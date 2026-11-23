@@ -1,7 +1,7 @@
 //! 基础实时数据可视化图表组件 `Chart`（支持 `Line`、`Bar`、`Area`、`Pie`、`Candlestick` 五种图表类型，纯整数 SDF 抗锯齿绘制，0 字节常驻 RAM）。
 
-use velox_core::prelude::*;
-use velox_core::sdf::dist_to_segment;
+use velox_engine::prelude::*;
+use velox_engine::sdf::dist_to_segment;
 
 /// 图表展示类型枚举。
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]

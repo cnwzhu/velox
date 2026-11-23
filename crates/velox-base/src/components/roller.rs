@@ -1,7 +1,7 @@
 //! 垂直滚轮选择器组件 `Roller`（定义可见行窗口、居中高亮选中、点击滚动行为与 `Theme` 按需回退）。
 
 use core::time::Duration;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 滚轮选择器组件（`Roller`）。
 pub struct Roller<'a> {

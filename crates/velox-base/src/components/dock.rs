@@ -1,7 +1,7 @@
 //! 多面板停靠工作区基础组件 `Dock`（默认无样式）。
 
 pub use crate::components::resizable::DockWorkspaceState;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 停靠面板区域描述（`DockPanel`）。
 #[derive(Clone, Copy)]

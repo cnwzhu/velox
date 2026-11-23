@@ -1,6 +1,6 @@
 //! 会话状态与分割线标记组件 `Marker`。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 会话分隔标记样式变体（`MarkerVariant`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

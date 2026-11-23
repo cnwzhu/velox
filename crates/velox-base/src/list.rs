@@ -3,7 +3,7 @@
 //! 仅在 `ScratchArena` 中展开当前视口可见范围内的列表项，
 //! 无论总数据量是 10 条还是 10,000 条，单帧 `ScratchArena` 内存消耗始终保持恒定。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// `VirtualList` 虚拟滚动列表组件类型别名（与 [`UniformList`] 等价）。
 pub type VirtualList<'a, F> = UniformList<'a, F>;

@@ -4,11 +4,11 @@
 //! - 每行独立持有文本（`SmallString`，`std` 下无限扩容，`#![no_std]` 下零堆分配）、行尾结束符 [`LineEnding`]、
 //!   样式属性表 [`AttrsList`] 与惰性视觉折行缓存 `layout_opt`；
 //! - 单行修改只失效当前行缓存，其余行 100% 零重排复用；
-//! - 使用与 `velox-core` 渲染器完全一致的高精度浮点字形度量（`measure_char_advance_f32` / `measure_char_kerning_f32`）
+//! - 使用与 `velox-engine` 渲染器完全一致的高精度浮点字形度量（`measure_char_advance_f32` / `measure_char_kerning_f32`）
 //!   计算每个 [`LayoutGlyph`] 的精确 `(x, w)` 与制表符对齐列宽。
 
-use velox_core::arena::{SmallString, SmallVec};
-use velox_core::display::{measure_char_advance_f32, measure_char_kerning_f32};
+use velox_engine::arena::{SmallString, SmallVec};
+use velox_engine::display::{measure_char_advance_f32, measure_char_kerning_f32};
 
 use super::attrs::AttrsList;
 use super::line_ending::LineEnding;

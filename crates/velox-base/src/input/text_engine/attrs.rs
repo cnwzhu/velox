@@ -4,8 +4,8 @@
 //! 支持行拆分（`split_off`）与行合并（`append`）时自动保真迁移语法高亮与富文本属性。
 
 use core::ops::Range;
-use velox_core::arena::SmallVec;
-use velox_core::style::Color;
+use velox_engine::arena::SmallVec;
+use velox_engine::style::Color;
 
 /// 字体字重（对应 `cosmic-text` `Weight`）。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

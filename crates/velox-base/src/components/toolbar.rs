@@ -1,7 +1,7 @@
 //! 工具栏基础组件 `Toolbar`（默认无样式）。
 
 use crate::traits::{ComponentSize, Sizable};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 工具栏动作按钮分组描述（`ToolbarGroup`）。
 #[derive(Clone, Copy)]

@@ -1,7 +1,7 @@
 //! 线性进度条基础组件 `ProgressBar`（默认无样式，支持百分比裁剪与可选平滑过渡动画）。
 
 use core::time::Duration;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// `Progress` 进度条组件类型别名（与 [`ProgressBar`] 等价）。
 pub type Progress = ProgressBar;

@@ -6,7 +6,7 @@
 pub mod editor;
 pub mod syntax;
 
-use velox_core::arena::{SmallString, SmallVec};
+use velox_engine::arena::{SmallString, SmallVec};
 
 use super::attrs::AttrsList;
 use super::buffer::TextDocBuffer;

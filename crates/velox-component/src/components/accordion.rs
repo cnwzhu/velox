@@ -1,7 +1,7 @@
 //! 主题化手风琴折叠面板组件 `Accordion`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::accordion::{AccordionItem, AccordionItemState};
 

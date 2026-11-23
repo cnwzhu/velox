@@ -1,7 +1,7 @@
 //! 基础无样式按钮行为原语 `Button`（贴近 `gpui-base` 设计：默认零背景、零边框、零圆角、零预设尺寸与变体色，
 //! 专注点击/长按/连发交互、键盘 `Tab`/`Enter`/`Space` 激活、`disabled` / `loading` / `selected` 状态管理与完整 `Styled` 链式定制）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 const AUTO_COLOR: Color = Color(0x0000_0001);
 /// 按钮加载旋转图标周期（毫秒）：900ms 顺时针旋转一周。

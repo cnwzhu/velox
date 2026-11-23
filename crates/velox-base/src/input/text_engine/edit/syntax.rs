@@ -5,10 +5,10 @@
 //! - 编辑某行后仅从受影响的起始行开始增量重染，一旦某行行尾状态与缓存一致即刻提前终止（Early Cutoff）；
 //! - 语法着色直接写入 `BufferLine::attrs_list`，彻底消除每帧全局重扫整个文档的 $O(N)$ 性能开销。
 
-use velox_core::arena::{SmallString, SmallVec};
-use velox_core::pod::{FrameScope, KeyCode, KeyModifiers};
-use velox_core::style::Color;
-use velox_core::theme::CoreTheme;
+use velox_engine::arena::{SmallString, SmallVec};
+use velox_engine::pod::{FrameScope, KeyCode, KeyModifiers};
+use velox_engine::style::Color;
+use velox_engine::theme::CoreTheme;
 
 use super::super::attrs::{Attrs, AttrsList};
 use super::super::buffer::TextDocBuffer;

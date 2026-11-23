@@ -22,7 +22,7 @@ description: >-
 
 应用程序只需依赖唯一入口 Crate：`velox-kit`。常用类型与构建器通过 `use velox_kit::prelude::*;` 一次性导入，同时各分层命名空间也可按需显式访问：
 
-- `velox_kit::core`（`velox-core`）：帧级零堆 UI 引擎内核（`ScratchArena`、`PodPool`、`Signal<T>`、24B `Style` / `Styled`、四步一维弹性布局求解器、`MotionCache`、`DamageTracker`、`i18n`、`a11y`），默认开启 `gpu`（自研轻量级 `wgpu` 2D SDF 渲染器）
+- `velox_kit::core`（`velox-engine`）：帧级零堆 UI 引擎内核（`ScratchArena`、`PodPool`、`Signal<T>`、24B `Style` / `Styled`、四步一维弹性布局求解器、`MotionCache`、`DamageTracker`、`i18n`、`a11y`），默认开启 `gpu`（自研轻量级 `wgpu` 2D SDF 渲染器）
 - `velox_kit::app`（由 `velox_kit::*` 与 `prelude` 重导出）：极简桌面启动层（`application()`、`init(cx)`、`open_window(...)`、`WindowOptions`、`Application::build_headless`）
 - `velox_kit::async_rt` / `velox_kit::scheduler`：跨平台分层异步运行时（通用 `SchedulerClock` / `AsyncDriver` / `run_async_event_loop`；双执行器 `ForegroundExecutor` / `AsyncApp` / `BackgroundExecutor` / RAII `Task<T>` / `NativeStdScheduler` / `ManualScheduler`；按可选 feature `tokio` / `smol` 接入独立 `velox-async` 适配层 `TokioScheduler` / `SmolScheduler`）
 - `velox_kit::base`（`velox-base`，通过 `base` feature 启用，默认随 `component` 开启，亦有不随 feature 变更类型的 `Base*` 别名）：70+ 无样式交互行为组件、`EditableText`、`TextBuffer`、`CodeEditor`、`Navigator`、`UniformList` / `VirtualList`、`Sizable` / `Variants` / `Disableable`
@@ -48,7 +48,7 @@ description: >-
 
 | 章节                        | 何时阅读                                                        |
 | --------------------------- | --------------------------------------------------------------- |
-| 架构速览与分层边界          | 永远必读；理解 `velox-core` / `base` / `component` / `async` / `kit` 边界 |
+| 架构速览与分层边界          | 永远必读；理解 `velox-engine` / `base` / `component` / `async` / `kit` 边界 |
 | 启动引导与根视图归属        | `application()`、`open_window()`、`WindowOptions`、`VeloxEngine`、`Root` |
 | 理解 Velox 的上下文阶段     | 涉及 `FrameScope`、`Scope<V>`、`ActionScope`、`AsyncApp`、渲染与事件阶段 |
 | 选择正确的抽象单元          | 抉择无状态 `Widget<'a>`、有状态 `View` (`Handle<T>`)、或 `img_shader` |
@@ -197,7 +197,7 @@ fn main() {
 | `Progress` / `ProgressBar` | `components::progress` | 水平百分比进度条（`0..=100`）                                 |
 | `SelectableText` / `MarkdownView` / `TextView` | `components::text_view` | 富文本、Markdown 与纯文本展示容器（`TextViewFormat`） |
 | `Card`           | `components::card`        | 自动回退 `theme.card` 与圆角边框的通用容器，支持 `Styled` / `.unstyled()` |
-| `Image`          | `components::image` / `velox_core::element::img` | 组件包装 `Image`（`ImageFit`）或内核零分配位图原语 `img()` / `svg()` |
+| `Image`          | `components::image` / `velox_engine::element::img` | 组件包装 `Image`（`ImageFit`）或内核零分配位图原语 `img()` / `svg()` |
 
 ### 浮层与弹窗（Overlay & Popups）
 

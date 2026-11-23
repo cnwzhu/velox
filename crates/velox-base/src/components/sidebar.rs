@@ -2,7 +2,7 @@
 //! 默认零背景、零边框、零圆角与零悬停渐变）。
 
 use crate::components::icon::IconName;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 侧边栏导航项描述（`SidebarItem`）。
 #[derive(Clone, Copy, Debug)]

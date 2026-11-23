@@ -1,6 +1,6 @@
 //! 只读代码补丁与变更预览组件 `Diff`（无样式基础行为定义）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 代码差异行类型枚举（`DiffLineKind`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

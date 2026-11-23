@@ -1,7 +1,7 @@
 //! 主题化滑动开关组件 `Switch`。
 
 use crate::styled::fill_color;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::switch::{SwitchLabelSide, SwitchState};
 

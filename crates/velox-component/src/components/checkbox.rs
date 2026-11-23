@@ -1,7 +1,7 @@
 //! 主题化复选框组件 `Checkbox`。
 
 use crate::styled::fill_color;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::checkbox::CheckboxState;
 

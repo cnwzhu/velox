@@ -1,6 +1,6 @@
 //! # Velox Base (`velox-base`)
 //!
-//! 建立在 `velox-core` 之上的无样式（Headless / Unstyled）基础组件行为原语库，
+//! 建立在 `velox-engine` 之上的无样式（Headless / Unstyled）基础组件行为原语库，
 //! 参照 `gpui-base` 分层理念：**默认不附带任何主题背景色、边框、圆角、阴影、悬停渐变、聚焦蓝框或预设语义变体色**，
 //! 专注交互行为、焦点与键盘导航、受控状态机与极简结构骨架；完整主题视觉皮肤统一由 `velox-component` 提供。
 //! - [`components`]：70+ 个跨端与移动端无样式基础、表单、布局与高级行为原语；
@@ -20,14 +20,14 @@ pub mod traits;
 
 #[doc(hidden)]
 pub mod __private {
-    pub use velox_core::style::{Style, StyleExt, Styled, StyledExt};
+    pub use velox_engine::style::{Style, StyleExt, Styled, StyledExt};
 }
 
 /// 复合组件内部子元素确定性无撞车 ID 派生（映射到 `0x8000_0000..=0xFFFF_FFFF` 独立命名空间，
 /// 彻底杜绝线性偏移写法与用户显式 ID 或相邻组件发生 ID 碰撞）。
 #[inline(always)]
 pub(crate) const fn scoped_child_id(parent_id: u32, salt: u32, index: u32) -> u32 {
-    velox_core::pod::derive_scoped_id(parent_id, salt, index)
+    velox_engine::pod::derive_scoped_id(parent_id, salt, index)
 }
 
 pub use components::{

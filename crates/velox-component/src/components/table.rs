@@ -1,7 +1,7 @@
 //! 主题化基础数据表格组件 `Table`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::table::{TableCellState, TableColumn, TableHeaderState};
 

@@ -2,7 +2,7 @@
 
 use crate::styled::fill_color;
 use crate::theme::Theme;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 crate::define_themed_component! {
     name: Root<'a>,

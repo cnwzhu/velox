@@ -3,7 +3,11 @@ name = "velox-base"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Headless component behaviors, state structures, navigation/virtual-list primitives, and minimal unstyled base widgets for Velox"
 
 [dependencies]
-velox-core = { path = "../velox-core", default-features = false }
+velox-engine = { version = "0.1.0", path = "../velox-engine", default-features = false }

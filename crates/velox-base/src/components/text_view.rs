@@ -1,6 +1,6 @@
 //! Markdown 与 HTML 富文本渲染视图基础组件 `TextView`、只读可选中文本 `SelectableText` 与轻量级富文本预览 `MarkdownView`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 富文本解析格式枚举（`TextViewFormat`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

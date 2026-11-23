@@ -1,7 +1,7 @@
 //! 主题化提示横幅组件 `Alert`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::alert::AlertVariant;
 

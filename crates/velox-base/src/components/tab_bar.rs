@@ -1,7 +1,7 @@
 //! 移动端底部标签栏基础组件 `TabBar`（默认无样式，支持多页签切换与底部 Home Indicator 安全区域自动避让）。
 
 use core::time::Duration;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 面向 [`TabBar::item`] 插槽回调的底部标签项状态快照。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

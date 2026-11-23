@@ -1,7 +1,7 @@
 //! 窗口级根容器基础组件 `Root`（默认无样式，支持向子树注入主题与承载对话框/通知浮层）。
 
 use crate::components::Theme;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 窗口级根容器基础组件（`Root`，默认无样式，统一承载页面主视图、模态对话框叠层与通知浮层栈）。
 pub struct Root<'a> {

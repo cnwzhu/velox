@@ -2,7 +2,7 @@
 
 use core::cell::Cell;
 use velox_base::*;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 #[test]
 fn test_text_boundary_word_and_line_ranges() {

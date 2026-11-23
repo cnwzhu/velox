@@ -1,7 +1,7 @@
 //! 主题化菜单与右键上下文菜单组件 `Menu`、`ContextMenu`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::menu::{MenuItem, MenuItemState};
 

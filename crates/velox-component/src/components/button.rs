@@ -4,7 +4,7 @@ use crate::styled::{
     apply_tw_button_size, apply_tw_button_variant, button_variant_palette, is_unset,
 };
 use velox_base::{ComponentSize, ComponentVariant, Disableable, Sizable, Variants};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 建立在 [`velox_base::Button`] 之上的主题化按钮组件（完整 8 档语义变体、3 档尺寸、悬停/按压与焦点环）。
 pub struct Button<'a> {

@@ -1,7 +1,7 @@
 //! 主题化悬停提示气泡组件 `Tooltip`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 crate::define_themed_component! {
     name: Tooltip<'a>,

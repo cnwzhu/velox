@@ -1,7 +1,7 @@
 //! 主题化一次性验证码输入框组件 `OtpInput`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::otp_input::{OtpSlotState, OtpState};
 

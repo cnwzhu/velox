@@ -1,6 +1,6 @@
 //! 屏幕虚拟软键盘组件 `VirtualKeyboard`（定义 QWERTY 与数字小键盘模式、键位动作与按需 `Theme` 样式回退）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 虚拟软键盘按键动作枚举。
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]

@@ -1,6 +1,6 @@
 //! 一次性验证码输入框组件 `OtpInput` 与固定容量验证码状态机 `OtpState`。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 面向 [`OtpInput`] 的固定位数无堆分配验证码输入状态。
 #[derive(Clone, Debug, PartialEq, Eq)]

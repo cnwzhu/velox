@@ -1,7 +1,7 @@
 //! 编辑器文本查找与替换匹配引擎（[`SearchMatcher`] / [`SearchSession`]，兼容 `#![no_std]`）。
 
 use core::ops::Range;
-use velox_core::arena::SmallVec;
+use velox_engine::arena::SmallVec;
 
 use super::cursor::Selection;
 

@@ -1,6 +1,6 @@
 //! 颜色选择器组件 `ColorPicker` 与色块组件 `ColorSwatch`。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 颜色选择器预置调色板状态（提供 12 种常用色板与自定义 RGB 状态）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

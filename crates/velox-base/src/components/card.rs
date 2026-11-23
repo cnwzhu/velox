@@ -1,6 +1,6 @@
 //! 无样式基础卡片容器原语 `Card`（默认零背景、零边框、零圆角、零内边距，支持全套 `Styled` 链式定制）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 无样式卡片容器原语（`Card`）。
 ///

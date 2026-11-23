@@ -1,6 +1,6 @@
 //! 分页导航基础组件 `Pagination`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 分页插槽按钮类型。
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

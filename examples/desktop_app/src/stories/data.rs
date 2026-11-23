@@ -17,13 +17,13 @@ const PKG_ROWS_ASC: &[&[&str]] = &[
     &["desktop_app", "Gallery App", "std + gpu", "Interactive Velox Base Gallery & Benchmarks"],
     &["velox-base", "Base Widgets", "headless", "75+ Headless Composable Primitives & CodeEditor"],
     &["velox-component", "Themed UI", "themed", "Shadcn Zinc + Blue Themed Component Wrappers"],
-    &["velox-core", "GUI Kernel", "std + sdf", "ScratchArena, 1D Solver, Damage & SDF Renderers"],
+    &["velox-engine", "GUI Kernel", "std + sdf", "ScratchArena, 1D Solver, Damage & SDF Renderers"],
     &["velox-kit", "Facade", "cross-plat", "Unified Cross-Platform Application Entry"],
 ];
 
 const PKG_ROWS_DESC: &[&[&str]] = &[
     &["velox-kit", "Facade", "cross-plat", "Unified Cross-Platform Application Entry"],
-    &["velox-core", "GUI Kernel", "std + sdf", "ScratchArena, 1D Solver, Damage & SDF Renderers"],
+    &["velox-engine", "GUI Kernel", "std + sdf", "ScratchArena, 1D Solver, Damage & SDF Renderers"],
     &["velox-component", "Themed UI", "themed", "Shadcn Zinc + Blue Themed Component Wrappers"],
     &["velox-base", "Base Widgets", "headless", "75+ Headless Composable Primitives & CodeEditor"],
     &["desktop_app", "Gallery App", "std + gpu", "Interactive Velox Base Gallery & Benchmarks"],
@@ -125,7 +125,7 @@ impl GalleryApp {
                 let _ = tree_nodes.push(TreeNode::new(4, "switch.rs", 2, false, false));
                 let _ = tree_nodes.push(TreeNode::new(5, "checkbox.rs", 2, false, false));
             }
-            let _ = tree_nodes.push(TreeNode::new(6, "velox-core/", 1, false, false));
+            let _ = tree_nodes.push(TreeNode::new(6, "velox-engine/", 1, false, false));
         }
         let tree_slice = cx.arena().alloc_iter(tree_nodes.as_slice().iter().copied());
 

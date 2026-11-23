@@ -1,6 +1,6 @@
 //! 主题化矢量图形与图标路径组件 `Svg`。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 crate::define_themed_component! {
     name: Svg<'a>,

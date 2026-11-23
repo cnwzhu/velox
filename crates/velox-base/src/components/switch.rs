@@ -3,7 +3,7 @@
 
 use crate::traits::ComponentSize;
 use core::time::Duration;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 const FLAG_GEOMETRY: u8 = 1 << 0;
 const FLAG_TRACK_BG: u8 = 1 << 1;

@@ -1,7 +1,7 @@
 //! 主题化卡片表面组件 `Card`。
 
 use crate::styled::apply_tw_card_surface;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 建立在 [`velox_base::Card`] 之上的主题化卡片表面组件（默认 `rounded(8) p(8) bg(card) border(1, border)`）。
 pub struct Card<'a> {

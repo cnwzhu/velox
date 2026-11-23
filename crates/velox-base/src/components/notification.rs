@@ -1,7 +1,7 @@
 //! 顶层浮动通知卡片基础组件 `Notification`（默认无样式）。
 
 use crate::components::AlertVariant;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 通知语义变体别名（与 [`AlertVariant`] 等价）。
 pub type NotificationVariant = AlertVariant;

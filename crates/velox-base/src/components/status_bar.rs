@@ -1,6 +1,6 @@
 //! 底部状态栏基础组件 `StatusBar`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 底部状态栏单元条目（`StatusBarItem`）。
 #[derive(Clone, Copy, Debug)]

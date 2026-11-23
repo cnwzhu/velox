@@ -1,6 +1,6 @@
 //! 带标题内容分组框基础组件 `GroupBox`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 带标题内容分组框基础组件（`GroupBox`，默认无样式）。
 pub struct GroupBox<'a> {

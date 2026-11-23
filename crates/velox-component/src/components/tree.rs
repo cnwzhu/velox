@@ -1,7 +1,7 @@
 //! 主题化树形层级视图组件 `Tree`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::tree::{TreeItemState, TreeNode, TreeState};
 

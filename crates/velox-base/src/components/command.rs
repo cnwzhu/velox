@@ -1,7 +1,7 @@
 //! 搜索与快捷操作命令面板基础组件 `Command`（默认无样式）。
 
 use crate::components::Combobox;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 命令面板动作条目定义（`CommandItem`）。
 #[derive(Clone, Copy, Debug)]

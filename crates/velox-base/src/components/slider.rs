@@ -2,7 +2,7 @@
 //! 默认直角中性轨道与滑块、零主题蓝填充、零阴影与零悬停渐变）。
 
 use crate::traits::ComponentSize;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 const FLAG_CUSTOM_COLORS: u8 = 1 << 0;
 const FLAG_CUSTOM_HEIGHT: u8 = 1 << 1;

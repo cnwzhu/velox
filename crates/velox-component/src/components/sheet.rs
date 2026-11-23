@@ -1,7 +1,7 @@
 //! 主题化侧边抽屉弹层组件 `Sheet`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::sheet::SheetSide;
 

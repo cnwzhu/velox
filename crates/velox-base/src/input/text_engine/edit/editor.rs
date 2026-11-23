@@ -6,9 +6,9 @@
 //! - 内置鼠标单/双/三击连击检测器（单击落点、双击选词、三击选行、按对应粒度流畅拖拽）；
 //! - 内置 `Shift` 选区扩展、`Ctrl+Left/Right` 按词、`Ctrl+Home/End`、`Ctrl+A/Z/Y`、`Tab`/`Shift+Tab` 块缩进快捷键分发。
 
-use velox_core::arena::{SmallString, SmallVec};
-use velox_core::platform::{clipboard_read_into, clipboard_write_text};
-use velox_core::pod::{FrameScope, KeyCode, KeyModifiers};
+use velox_engine::arena::{SmallString, SmallVec};
+use velox_engine::platform::{clipboard_read_into, clipboard_write_text};
+use velox_engine::pod::{FrameScope, KeyCode, KeyModifiers};
 
 use super::super::attrs::{Attrs, AttrsList};
 use super::super::buffer::TextDocBuffer;

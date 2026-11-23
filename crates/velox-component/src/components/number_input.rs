@@ -1,7 +1,7 @@
 //! 主题化数值步进输入框组件 `NumberInput`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::number_input::{step_value, NumberStep};
 

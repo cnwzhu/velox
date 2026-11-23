@@ -1,6 +1,6 @@
 //! 无样式星级评分行为原语 `Rating`（默认使用中性前景色，不注入主题警告金黄色）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 传递给 `Rating::item(...)` 插槽回调的单项评分状态。
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

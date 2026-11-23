@@ -1,6 +1,6 @@
 //! 可拖拽、可缩放的仪表盘与看板网格布局基础组件 `GridLayout`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 仪表盘网格看板磁贴单元定义（`GridTile`）。
 #[derive(Clone, Copy, Debug)]

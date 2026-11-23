@@ -1,6 +1,6 @@
 //! 文件与多媒体附件表面组件 `Attachment`。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 附件媒体类型枚举（`AttachmentKind`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

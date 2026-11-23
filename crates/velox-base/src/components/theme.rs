@@ -1,7 +1,7 @@
 //! 主题配色与外观模式组件模块 `Theme` / `ThemeMode`（统一导出核心主题令牌表与明暗模式辅助方法）。
 
 /// 导出核心主题令牌表（`Theme`，支持自定义颜色、排版与亮色/暗黑外观模式）。
-pub use velox_core::pod::CoreTheme as Theme;
+pub use velox_engine::pod::CoreTheme as Theme;
 
 /// 主题外观明暗模式枚举（`ThemeMode`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

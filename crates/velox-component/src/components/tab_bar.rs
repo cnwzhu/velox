@@ -1,7 +1,7 @@
 //! 主题化底部标签栏组件 `TabBar`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::tab_bar::TabBarItemState;
 

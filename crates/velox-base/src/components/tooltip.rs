@@ -1,6 +1,6 @@
 //! 悬停文字提示浮层基础组件 `Tooltip`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 轻量级文字提示浮层基础组件（`Tooltip`，默认无样式）。
 pub struct Tooltip<'a> {

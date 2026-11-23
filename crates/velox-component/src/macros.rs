@@ -102,8 +102,8 @@ macro_rules! define_themed_component {
         $crate::define_themed_component!(@impl_sizable $sizable, $name <'a>);
         $crate::define_themed_component!(@impl_disableable $disableable, $name <'a>);
 
-        impl<'a> velox_core::prelude::Widget<'a> for $name<'a> {
-            fn render_once(mut self, cx: &'a velox_core::prelude::FrameScope) -> velox_core::prelude::Element<'a> {
+        impl<'a> velox_engine::prelude::Widget<'a> for $name<'a> {
+            fn render_once(mut self, cx: &'a velox_engine::prelude::FrameScope) -> velox_engine::prelude::Element<'a> {
                 let apply_fn: fn(&mut $base, &crate::theme::Theme) = $apply_tw;
                 apply_fn(&mut self.inner, cx.theme());
                 self.inner.render_once(cx)
@@ -112,30 +112,30 @@ macro_rules! define_themed_component {
     };
 
     (@impl_styled true, $name:ident <'a>) => {
-        impl<'a> velox_core::style::Styled for $name<'a> {
+        impl<'a> velox_engine::style::Styled for $name<'a> {
             #[inline(always)]
-            fn style_mut(&mut self) -> &mut velox_core::style::Style {
-                velox_core::style::Styled::style_mut(&mut self.inner)
+            fn style_mut(&mut self) -> &mut velox_engine::style::Style {
+                velox_engine::style::Styled::style_mut(&mut self.inner)
             }
         }
-        impl<'a> velox_core::style::StyledExt for $name<'a> {
+        impl<'a> velox_engine::style::StyledExt for $name<'a> {
             #[inline(always)]
-            fn style_ext_mut(&mut self) -> &mut velox_core::style::StyleExt {
-                velox_core::style::StyledExt::style_ext_mut(&mut self.inner)
+            fn style_ext_mut(&mut self) -> &mut velox_engine::style::StyleExt {
+                velox_engine::style::StyledExt::style_ext_mut(&mut self.inner)
             }
         }
     };
     (@impl_styled false, $name:ident <'a>) => {
-        impl<'a> velox_core::style::Styled for $name<'a> {
+        impl<'a> velox_engine::style::Styled for $name<'a> {
             #[inline(always)]
-            fn style_mut(&mut self) -> &mut velox_core::style::Style {
-                velox_core::style::Styled::style_mut(&mut self.inner)
+            fn style_mut(&mut self) -> &mut velox_engine::style::Style {
+                velox_engine::style::Styled::style_mut(&mut self.inner)
             }
         }
-        impl<'a> velox_core::style::StyledExt for $name<'a> {
+        impl<'a> velox_engine::style::StyledExt for $name<'a> {
             #[inline(always)]
-            fn style_ext_mut(&mut self) -> &mut velox_core::style::StyleExt {
-                velox_core::style::StyledExt::style_ext_mut(&mut self.inner)
+            fn style_ext_mut(&mut self) -> &mut velox_engine::style::StyleExt {
+                velox_engine::style::StyledExt::style_ext_mut(&mut self.inner)
             }
         }
     };
@@ -256,22 +256,22 @@ macro_rules! define_themed_component {
             }
         }
 
-        impl velox_core::style::Styled for $name {
+        impl velox_engine::style::Styled for $name {
             #[inline(always)]
-            fn style_mut(&mut self) -> &mut velox_core::style::Style {
-                velox_core::style::Styled::style_mut(&mut self.inner)
+            fn style_mut(&mut self) -> &mut velox_engine::style::Style {
+                velox_engine::style::Styled::style_mut(&mut self.inner)
             }
         }
 
-        impl velox_core::style::StyledExt for $name {
+        impl velox_engine::style::StyledExt for $name {
             #[inline(always)]
-            fn style_ext_mut(&mut self) -> &mut velox_core::style::StyleExt {
-                velox_core::style::StyledExt::style_ext_mut(&mut self.inner)
+            fn style_ext_mut(&mut self) -> &mut velox_engine::style::StyleExt {
+                velox_engine::style::StyledExt::style_ext_mut(&mut self.inner)
             }
         }
 
-        impl<'a> velox_core::prelude::Widget<'a> for $name {
-            fn render_once(mut self, cx: &'a velox_core::prelude::FrameScope) -> velox_core::prelude::Element<'a> {
+        impl<'a> velox_engine::prelude::Widget<'a> for $name {
+            fn render_once(mut self, cx: &'a velox_engine::prelude::FrameScope) -> velox_engine::prelude::Element<'a> {
                 let apply_fn: fn(&mut $base, &crate::theme::Theme) = $apply_tw;
                 apply_fn(&mut self.inner, cx.theme());
                 self.inner.render_once(cx)
@@ -287,10 +287,10 @@ macro_rules! forward_slot_el {
         impl<'a> $ty<'a> {
             /// 转发底层 `velox-base` 的零堆分配插槽定制回调。
             #[inline]
-            pub fn $method<F, R>(mut self, cx: &'a velox_core::prelude::FrameScope, f: F) -> Self
+            pub fn $method<F, R>(mut self, cx: &'a velox_engine::prelude::FrameScope, f: F) -> Self
             where
                 F: Fn($($arg),*) -> R + 'a,
-                R: velox_core::prelude::IntoElement<'a>,
+                R: velox_engine::prelude::IntoElement<'a>,
             {
                 self.inner = self.inner.$method(cx, f);
                 self
@@ -306,9 +306,9 @@ macro_rules! forward_slot_div {
         impl<'a> $ty<'a> {
             /// 转发底层 `velox-base` 的容器样式定制回调。
             #[inline]
-            pub fn $method<F>(mut self, cx: &'a velox_core::prelude::FrameScope, f: F) -> Self
+            pub fn $method<F>(mut self, cx: &'a velox_engine::prelude::FrameScope, f: F) -> Self
             where
-                F: Fn($($arg),*) -> velox_core::prelude::Div<'a> + 'a,
+                F: Fn($($arg),*) -> velox_engine::prelude::Div<'a> + 'a,
             {
                 self.inner = self.inner.$method(cx, f);
                 self
@@ -324,10 +324,10 @@ macro_rules! forward_slot_str {
         impl<'a> $ty<'a> {
             /// 转发底层 `velox-base` 的文案格式化插槽回调。
             #[inline]
-            pub fn $method<F, S>(mut self, cx: &'a velox_core::prelude::FrameScope, f: F) -> Self
+            pub fn $method<F, S>(mut self, cx: &'a velox_engine::prelude::FrameScope, f: F) -> Self
             where
                 F: Fn($($arg),*) -> S + 'a,
-                S: Into<velox_core::prelude::StrRef<'a>>,
+                S: Into<velox_engine::prelude::StrRef<'a>>,
             {
                 self.inner = self.inner.$method(cx, f);
                 self

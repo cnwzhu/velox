@@ -1,7 +1,7 @@
 //! 无样式通用对话框原语 `Dialog`（提供顶层 `.overlay().occlude_hit()` 遮挡与 `Escape` 关闭行为；
 //! 默认零背景、零边框、零圆角、零阴影与零悬停渐变）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 const AUTO_COLOR: Color = Color(0x0000_0001);
 

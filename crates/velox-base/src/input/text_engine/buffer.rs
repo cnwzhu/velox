@@ -5,8 +5,8 @@
 //! - 提供按需惰性行排版、视口滚动投影 [`LayoutRun`] 迭代、字形级亚像素点击命中测试 [`Self::hit`]、
 //!   视觉软折行光标导航 [`Self::cursor_motion`] 与光标可见性自动滚动 [`Self::ensure_cursor_visible`]。
 
-use velox_core::arena::{SmallString, SmallVec};
-use velox_core::pod::FrameScope;
+use velox_engine::arena::{SmallString, SmallVec};
+use velox_engine::pod::FrameScope;
 
 use super::attrs::{Attrs, AttrsList};
 use super::buffer_line::BufferLine;

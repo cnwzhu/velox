@@ -354,7 +354,7 @@ const COLS: &[TableColumn<'static>] = &[
     TableColumn::new("License", 100),
 ];
 const ROWS: &[&[&str]] = &[
-    &["velox-core", "MPL-2.0"],
+    &["velox-engine", "MPL-2.0"],
     &["velox-kit", "MPL-2.0"],
 ];
 

@@ -82,7 +82,7 @@ $env:CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=--target=aa
 cargo build --release -p android_app --lib --target aarch64-unknown-linux-gnu
 if ($LASTEXITCODE -ne 0) { throw "Failed to build libandroid_app.so" }
 
-Write-Host "[3/4] Emitting Android host glue from velox-core::platform::android and compiling MainActivity.java -> classes.dex..." -ForegroundColor Cyan
+Write-Host "[3/4] Emitting Android host glue from velox-engine::platform::android and compiling MainActivity.java -> classes.dex..." -ForegroundColor Cyan
 $ApkWorkDir = Join-Path $WorkspaceRoot "target\android_apk_build"
 if (Test-Path $ApkWorkDir) { Remove-Item -Recurse -Force $ApkWorkDir }
 $HostGenDir = Join-Path $ApkWorkDir "host"

@@ -1,6 +1,6 @@
 //! 主题化数据图表组件 `Chart`。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::chart::{CandlestickBar, ChartKind};
 

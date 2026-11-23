@@ -1,7 +1,7 @@
 //! 主题化悬停卡片与确认警告对话框组件 `HoverCard`、`AlertDialog`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 crate::define_themed_component! {
     name: HoverCard<'a>,

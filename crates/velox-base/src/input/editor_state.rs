@@ -3,7 +3,7 @@
 //! 涵盖编辑状态、光标移动、括号自动闭合、缩进、代码诊断与语法高亮能力，完全兼容 `#![no_std]`。
 
 use core::ops::Range;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 use super::cursor::{BufferPoint, CursorSelection, Selection};
 use super::search::SearchMatcher;

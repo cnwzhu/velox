@@ -3,7 +3,7 @@
 
 use crate::traits::{ComponentSize, Sizable};
 use core::time::Duration;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 const CHECKBOX_FLAG_COLORS: u8 = 1 << 0;
 const CHECKBOX_FLAG_ROUNDED: u8 = 1 << 1;

@@ -95,7 +95,7 @@ cx.keep_animating(self.popup.is_animating(now));
 img_shader(cx, 120, 120, hash_of_state, move |surface: &mut dyn SurfacePainter| {
     let b = surface.bounds();
     let clip = surface.clip(); // 仅绘制落在脏矩形与裁剪窗口内的像素！
-    // 使用 velox_core::sdf::{dist_to_segment, sin_cos_deg10, isqrt_i32} + surface.blend_pixel(...)
+    // 使用 velox_engine::sdf::{dist_to_segment, sin_cos_deg10, isqrt_i32} + surface.blend_pixel(...)
     // 或 surface.draw_text(b, "42%", theme.foreground, 14)
 })
 ```

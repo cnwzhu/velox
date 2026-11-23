@@ -1,6 +1,6 @@
 //! 手风琴折叠面板基础组件 `Accordion` 与单块可折叠区域 `Collapsible`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 传递给 `Collapsible::trigger(...)` / `Collapsible::panel(...)` 插槽回调的状态。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

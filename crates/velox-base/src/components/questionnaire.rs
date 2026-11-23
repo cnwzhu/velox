@@ -1,6 +1,6 @@
 //! 可组合多步问卷调查组件 `Questionnaire`。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 问卷题目作答类型（`QuestionKind`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

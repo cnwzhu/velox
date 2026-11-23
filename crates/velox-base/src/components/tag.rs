@@ -1,6 +1,6 @@
 //! 无样式分类标签原语 `Tag` 与语义变体标记 `TagVariant`（默认零背景、零边框、零圆角，仅提供标签与关闭行为）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 分类标签颜色变体（语义标记，由 `velox-component::Tag` 映射为主题色板）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

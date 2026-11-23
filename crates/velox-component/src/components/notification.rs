@@ -1,7 +1,7 @@
 //! 主题化通知卡片组件 `Notification`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::notification::NotificationVariant;
 

@@ -1,7 +1,7 @@
 //! **smol (`async-executor` + `async-io`)** 轻量级异步调度器适配实现（由 `velox-async/smol` feature 启用）。
 //!
 //! - 与 GPUI 底层所采用的 `smol` / `async-task` 生态同源，依赖极简、编译迅速；
-//! - 实现 [`velox_core::async_rt::SchedulerBackend`] 与 [`velox_core::async_rt::AsyncDriver`]；
+//! - 实现 [`velox_engine::async_rt::SchedulerBackend`] 与 [`velox_engine::async_rt::AsyncDriver`]；
 //! - 后台多线程池驱动 `async_executor::Executor`，定时由 `async_io::Timer` 驱动（空闲 0% CPU）。
 
 use core::future::Future;
@@ -12,12 +12,12 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use ::async_executor::Executor;
-use velox_core::app::Application;
-use velox_core::async_rt::{
+use velox_engine::app::Application;
+use velox_engine::async_rt::{
     AsyncDriver, BoxFuture, SchedulerBackend, SchedulerCapabilities, SchedulerClock, Timer,
     UiWakeSignal,
 };
-use velox_core::VeloxEngine;
+use velox_engine::VeloxEngine;
 
 pub use ::async_executor as executor;
 pub use ::async_io as io;

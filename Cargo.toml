@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     # 1. GUI 框架层 (GUI Framework: Core / Base / Component / Kit)
-    "crates/velox-core",
+    "crates/velox-engine",
     "crates/velox-base",
     "crates/velox-component",
     "crates/velox-kit",
@@ -23,6 +23,10 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"
+repository = "https://github.com/cnwzhu/velox"
+readme = "README.md"
+keywords = ["gui", "ui", "cross-platform", "wgpu", "sdf"]
+categories = ["gui", "rendering::graphics-api"]
 
 [workspace.dependencies]
 bumpalo = { version = "3.20.3", features = ["collections"] }
@@ -41,7 +45,7 @@ opt-level = 3
 [profile.dev.package.ttf-parser]
 opt-level = 3
 
-[profile.dev.package.velox-core]
+[profile.dev.package.velox-engine]
 opt-level = 2
 
 [profile.dev.package.naga]

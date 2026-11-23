@@ -1,7 +1,7 @@
 //! 主题化分组框容器组件 `GroupBox`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 crate::define_themed_component! {
     name: GroupBox<'a>,

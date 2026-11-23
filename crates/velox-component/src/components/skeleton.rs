@@ -1,7 +1,7 @@
 //! 主题化骨架屏占位组件 `Skeleton`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::skeleton::SkeletonShape;
 

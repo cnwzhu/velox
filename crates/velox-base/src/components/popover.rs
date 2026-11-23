@@ -1,6 +1,6 @@
 //! 弹出浮层容器基础组件 `Popover`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 弹出卡片容器基础组件（`Popover`，默认无样式）。
 pub struct Popover<'a> {

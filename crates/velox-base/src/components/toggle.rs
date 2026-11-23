@@ -2,7 +2,7 @@
 //! 专注切换状态、焦点与禁用交互，完整支持 `Styled` 链式样式与外部主题层注入）。
 
 use crate::traits::Disableable;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 无样式双态切换按钮原语（`Toggle`）。
 pub struct Toggle<'a> {

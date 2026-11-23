@@ -6,7 +6,7 @@
 
 ## 24 字节紧凑 Style 位域与值域边界
 
-`velox_core::style::Style` 使用 `#[repr(C)]` 并通过编译期断言保证严格 **`size_of::<Style>() == 24`**：
+`velox_engine::style::Style` 使用 `#[repr(C)]` 并通过编译期断言保证严格 **`size_of::<Style>() == 24`**：
 
 | 字段 | 类型 | 说明与有效范围 |
 | --- | --- | --- |
@@ -53,7 +53,7 @@
 
 ## 四步一维弹性布局求解器（Two-Pass Axis Solver）
 
-`velox_core::solver` 放弃依赖硬件浮点的二维重载约束，采用纯 `i16` 整数“水平先行、垂直跟进（Height-for-Width）”四步法：
+`velox_engine::solver` 放弃依赖硬件浮点的二维重载约束，采用纯 `i16` 整数“水平先行、垂直跟进（Height-for-Width）”四步法：
 
 1. **Pass 1 (Horizontal Min/Pref Measure)**：自底向上测量每个节点的最小/首选宽度（含 `Text` 自动测宽）；
 2. **Pass 2 (Horizontal Solve & Line Wrapping)**：自顶向下把可用宽度按固定像素 / 百分比 / `flex_grow` 分配给子项；若开启 `.flex_wrap()` 或 `.grid(cols)`，在此阶段完成折行与列宽分配；

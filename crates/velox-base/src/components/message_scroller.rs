@@ -1,7 +1,7 @@
 //! 尾部自动跟随虚拟化消息列表组件 `MessageScroller`。
 
 use crate::components::Message;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 尾部跟随虚拟消息滚动列表状态（`MessageScrollerState`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,7 +194,7 @@ impl<'a> Widget<'a> for MessageScroller<'a> {
             jump_btn = jump_btn.child(
                 cx,
                 text(if self.state.unread_count > 0 {
-                    velox_core::fmt!(cx, "↓ {} new · Jump to latest", self.state.unread_count)
+                    velox_engine::fmt!(cx, "↓ {} new · Jump to latest", self.state.unread_count)
                 } else {
                     StrRef::Static("↓ Jump to latest")
                 })

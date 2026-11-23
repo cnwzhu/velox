@@ -1,6 +1,6 @@
 //! 主题化等高虚拟滚动列表组件 `UniformList` / `VirtualList`。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 主题化等高虚拟滚动列表组件（默认应用卡片背景、1px 边框与 6px 圆角，调用 `.unstyled()` 可还原透明容器）。
 pub struct UniformList<'a, F> {

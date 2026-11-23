@@ -4,7 +4,7 @@ pub use crate::components::avatar::Link;
 pub use crate::components::popover::Popover;
 pub use crate::components::scrollable::{Scrollbar, ScrollbarAxis};
 pub use crate::components::tooltip::Tooltip;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 悬停详情卡片基础组件（`HoverCard`，默认无样式）。
 pub struct HoverCard<'a> {

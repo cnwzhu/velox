@@ -1,6 +1,6 @@
 //! 时间分段输入框组件 `TimeField` 与状态结构 `TimeFieldState`（支持按需回退 `Theme` 样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 小时制式（12 小时制 / 24 小时制）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

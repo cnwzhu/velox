@@ -1,7 +1,7 @@
 //! 主题化对话气泡组件 `Bubble`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::bubble::{BubbleAlign, BubbleReaction};
 

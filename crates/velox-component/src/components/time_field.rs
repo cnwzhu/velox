@@ -1,7 +1,7 @@
 //! 主题化分段式时间输入框组件 `TimeField`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::time_field::{
     HourCycle, TimeFieldState, TimePrecision, TimeSegment, TimeSegmentState,

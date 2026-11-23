@@ -2,7 +2,7 @@
 //!
 //! 通过声明宏消除基础组件在 `Styled`、`Disableable`、`Sizable`、`Variants` 及基础骨架 `Style` 构建上的重复样板代码。
 
-/// 快速构建基础骨架 [`velox_core::style::Style`] 的声明宏。
+/// 快速构建基础骨架 [`velox_engine::style::Style`] 的声明宏。
 ///
 /// 示例：
 /// ```ignore
@@ -26,7 +26,7 @@ macro_rules! base_style {
     (@apply $style:ident, bg: $c:expr) => { $style.bg = $c; };
 }
 
-/// 为拥有 `style: Style` 与 `style_ext: StyleExt` 的组件批量同时实现 [`velox_core::style::Styled`] 与 [`velox_core::style::StyledExt`]。
+/// 为拥有 `style: Style` 与 `style_ext: StyleExt` 的组件批量同时实现 [`velox_engine::style::Styled`] 与 [`velox_engine::style::StyledExt`]。
 #[macro_export]
 macro_rules! impl_base_styled_box {
     ($ty:ident <'a>) => {
@@ -101,7 +101,7 @@ macro_rules! impl_base_styled_box {
     };
 }
 
-/// 为拥有 `style: Style` 字段（或指定字段）的组件批量实现 [`velox_core::style::Styled`]。
+/// 为拥有 `style: Style` 字段（或指定字段）的组件批量实现 [`velox_engine::style::Styled`]。
 #[macro_export]
 macro_rules! impl_base_styled {
     ($ty:ident <'a>) => {

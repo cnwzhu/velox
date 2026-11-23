@@ -1,6 +1,6 @@
 //! 数据表格基础组件 `Table`、`DataTable` 与列定义 `TableColumn`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 列排序方向枚举（`SortDirection`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

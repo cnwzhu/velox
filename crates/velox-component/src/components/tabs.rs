@@ -1,7 +1,7 @@
 //! 主题化选项卡切换组件 `Tabs`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::tabs::{TabItemState, TabsVariant};
 

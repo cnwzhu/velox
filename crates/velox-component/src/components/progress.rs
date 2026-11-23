@@ -1,7 +1,7 @@
 //! 主题化进度条组件 `ProgressBar` / `Progress`。
 
 use crate::styled::fill_color;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 crate::define_themed_component! {
     name: ProgressBar,

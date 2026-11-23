@@ -1,6 +1,6 @@
 //! **Tokio** 异步调度器适配实现（由 `velox-async/tokio` feature 启用）。
 //!
-//! - 将 Tokio 多线程运行时适配为 [`velox_core::async_rt::SchedulerBackend`] 与 [`velox_core::async_rt::AsyncDriver`]；
+//! - 将 Tokio 多线程运行时适配为 [`velox_engine::async_rt::SchedulerBackend`] 与 [`velox_engine::async_rt::AsyncDriver`]；
 //! - 内置跨线程安全 `TokioTimerFuture`（每次 `poll` 自动 `handle.enter()`），确保在 `winit` UI 主线程中调用 `cx.timer(...)` 永不触发 `no reactor running` panic；
 //! - 可直接在 `cx.background_spawn(...)` 内无缝 `.await` `reqwest`、`hyper`、`sqlx`、`tokio::net`、`tokio::fs` 等完整 Tokio 生态库。
 
@@ -12,12 +12,12 @@ use std::boxed::Box;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use velox_core::app::Application;
-use velox_core::async_rt::{
+use velox_engine::app::Application;
+use velox_engine::async_rt::{
     AsyncDriver, BoxFuture, SchedulerBackend, SchedulerCapabilities, SchedulerClock, Timer,
     UiWakeSignal,
 };
-use velox_core::VeloxEngine;
+use velox_engine::VeloxEngine;
 
 pub use ::tokio as runtime;
 

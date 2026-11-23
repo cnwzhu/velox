@@ -1,6 +1,6 @@
 //! 表单容器与布局基础组件 `Form` 及字段包装器 `FormField`。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 表单排版布局模式（`FormLayout`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

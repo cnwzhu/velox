@@ -3,7 +3,7 @@
 //! 完全兼容 `#![no_std]` 的零堆分配多光标选区模型。
 
 use core::ops::{Bound, Range, RangeBounds};
-use velox_core::arena::SmallVec;
+use velox_engine::arena::SmallVec;
 
 /// 二维文档行列坐标（`row` 为 0 起始行号，`column` 为行内 UTF-8 字节偏移）。
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]

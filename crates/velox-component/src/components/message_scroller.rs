@@ -1,7 +1,7 @@
 //! 主题化消息滚动容器组件 `MessageScroller`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::message_scroller::MessageScrollerState;
 

@@ -7,8 +7,8 @@
 //!   100% 兼容原有 `value: &str` + `CursorSelection` 用法，同步升级为 0 抖动叠层光标与精准选区高亮。
 
 use crate::traits::Disableable;
-use velox_core::display::measure_line_width_f32;
-use velox_core::prelude::*;
+use velox_engine::display::measure_line_width_f32;
+use velox_engine::prelude::*;
 
 use super::cursor::CursorSelection;
 use super::editor::{bake_buffer_snapshot, BakedBufferSnapshot};

@@ -1,6 +1,6 @@
 //! 无样式键盘快捷键展示原语 `Kbd`（默认零背景、零边框、零圆角，仅按 `+` 拆分渲染按键组合）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 无样式键盘快捷键提示原语（`Kbd`，例如 `Ctrl + K`）。
 pub struct Kbd<'a> {

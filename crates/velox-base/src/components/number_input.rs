@@ -1,7 +1,7 @@
 //! 无样式数值步进输入框行为原语 `NumberInput`（默认零背景、零边框、零圆角与零悬停渐变）。
 
 use crate::traits::ComponentSize;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 数值调整步进动作。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

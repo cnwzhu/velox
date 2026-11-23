@@ -1,6 +1,6 @@
 //! 无样式分割下拉按钮原语 `DropdownButton`（默认零背景、零边框、零圆角、零阴影）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 type DropdownButtonItemRenderer<'a> =
     &'a dyn Fn(Div<'a>, usize, &'a str, &'a FrameScope) -> Element<'a>;

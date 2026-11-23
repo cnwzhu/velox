@@ -6,7 +6,7 @@
 
 ## 分层隔离架构
 
-Velox 的异步子系统位于 `velox_core::async_rt`（由 `velox_kit::async_rt`、`velox_kit::scheduler` 与 `velox_kit::prelude::*` 统一导出），采用严格三层隔离设计，使业务 `View` 代码与底层调度器完全解耦：
+Velox 的异步子系统位于 `velox_engine::async_rt`（由 `velox_kit::async_rt`、`velox_kit::scheduler` 与 `velox_kit::prelude::*` 统一导出），采用严格三层隔离设计，使业务 `View` 代码与底层调度器完全解耦：
 
 1. **通用异步抽象与事件循环层**：
    - `SchedulerCapabilities`：描述调度器能力（`name`、`supports_background_threads`、`supports_dynamic_spawn`、`deterministic_clock`）；

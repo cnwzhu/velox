@@ -1,7 +1,7 @@
 //! 主题化顶部工具栏组件 `Toolbar`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::toolbar::ToolbarGroup;
 

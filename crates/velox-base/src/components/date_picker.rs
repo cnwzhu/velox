@@ -1,6 +1,6 @@
 //! 日历弹出日期选择器组件 `DatePicker`（默认回退 `cx.theme()`）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use crate::components::calendar::{Calendar, DateSelection, SimpleDate};
 

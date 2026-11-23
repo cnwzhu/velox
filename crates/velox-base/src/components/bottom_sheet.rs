@@ -1,7 +1,7 @@
 //! 基础移动端底部抽屉弹窗组件 `BottomSheet`（默认无样式，支持 `.overlay().occlude_hit()` 遮罩、拖拽指示条与底部安全区/软键盘自动避让）。
 
 use core::time::Duration;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 基础移动端底部弹出抽屉组件（`BottomSheet`，默认无样式）。
 pub struct BottomSheet<'a> {

@@ -1,7 +1,7 @@
 //! 主题化设置面板组件 `Settings`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::settings::{SettingsGroup, SettingsItem, SettingsValue};
 

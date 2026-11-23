@@ -1,7 +1,7 @@
 //! 无样式头像原语 `Avatar` 与超链接行为原语 `Link`。
 
 use crate::traits::ComponentSize;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 头像在线状态语义枚举。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

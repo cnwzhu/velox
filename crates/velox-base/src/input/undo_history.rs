@@ -1,6 +1,6 @@
 //! 事务分组撤销/重做历史栈（[`UndoHistory`]，零堆分配 `#![no_std]` 实现）。
 
-use velox_core::arena::SmallVec;
+use velox_engine::arena::SmallVec;
 
 /// 支持显式分组（`start_grouping` / `end_grouping`）、容量上限淘汰（`max_undos`）与忽略录制模式（`ignoring`）的撤销/重做历史管理器。
 #[derive(Clone, Debug)]

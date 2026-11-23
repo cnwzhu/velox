@@ -1,7 +1,7 @@
 //! 主题化滚轮选择器组件 `Roller`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 crate::define_themed_component! {
     name: Roller<'a>,

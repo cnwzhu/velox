@@ -1,6 +1,6 @@
 //! 无样式表单文本标签原语 `Label`（默认仅继承 `foreground` 文本色，不注入彩色主题星号或禁用灰）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 无样式表单字段文本标签原语（`Label`，支持必填星号标记与辅助说明文案）。
 pub struct Label<'a> {

@@ -1,7 +1,7 @@
 //! 主题化语音转写控件组件 `Speech`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::speech::{SpeechState, SpeechStatus};
 

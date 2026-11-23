@@ -1,7 +1,7 @@
 //! 主题化侧边栏导航组件 `Sidebar`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::sidebar::{SidebarItem, SidebarItemState, SidebarSection};
 

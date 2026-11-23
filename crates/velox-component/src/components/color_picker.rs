@@ -1,7 +1,7 @@
 //! 主题化颜色选择器与色板组件 `ColorPicker`、`ColorSwatch`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::color_picker::{ColorPickerState, ColorSwatchState};
 

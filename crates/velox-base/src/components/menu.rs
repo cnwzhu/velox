@@ -1,6 +1,6 @@
 //! 菜单基础组件 `Menu`、菜单项 `MenuItem` 与右键上下文菜单 `ContextMenu`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 菜单条目定义（`MenuItem`）。
 #[derive(Clone, Copy, Debug)]

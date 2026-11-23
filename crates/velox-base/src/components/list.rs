@@ -1,6 +1,6 @@
 //! 通用列表展示基础组件 `List` 与条目 `ListItem`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 列表项描述结构（`ListItem`）。
 #[derive(Clone, Copy, Debug)]

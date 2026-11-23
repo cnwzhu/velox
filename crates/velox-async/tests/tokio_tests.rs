@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use velox_async::{TokioScheduler, VeloxTokioExt};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 struct TokioDemoView {
     result: i32,

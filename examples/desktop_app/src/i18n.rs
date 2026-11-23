@@ -6,7 +6,7 @@
 use velox_kit::prelude::*;
 
 const EN_ENTRIES: &[MessageEntry] = &[
-    MessageEntry::new("about.body", "Built directly on velox-core & velox-base with zero-heap transient layout."),
+    MessageEntry::new("about.body", "Built directly on velox-engine & velox-base with zero-heap transient layout."),
     MessageEntry::new("about.close", "Close"),
     MessageEntry::new("about.desc", "Interactive Component Gallery (MPL-2.0)"),
     MessageEntry::new("about.title", "About Velox Base Gallery"),
@@ -71,7 +71,7 @@ const EN_ENTRIES: &[MessageEntry] = &[
 ];
 
 const ZH_CN_ENTRIES: &[MessageEntry] = &[
-    MessageEntry::new("about.body", "完全基于 velox-core 与 velox-base 构建，零堆瞬态布局与 GPU SDF 加速渲染。"),
+    MessageEntry::new("about.body", "完全基于 velox-engine 与 velox-base 构建，零堆瞬态布局与 GPU SDF 加速渲染。"),
     MessageEntry::new("about.close", "关闭"),
     MessageEntry::new("about.desc", "跨平台交互式组件画廊 (MPL-2.0)"),
     MessageEntry::new("about.title", "关于 Velox Base 画廊"),
@@ -136,7 +136,7 @@ const ZH_CN_ENTRIES: &[MessageEntry] = &[
 ];
 
 const JA_JP_ENTRIES: &[MessageEntry] = &[
-    MessageEntry::new("about.body", "velox-core と velox-base 上に直接構築されたクロスプラットフォームギャラリーです。"),
+    MessageEntry::new("about.body", "velox-engine と velox-base 上に直接構築されたクロスプラットフォームギャラリーです。"),
     MessageEntry::new("about.close", "閉じる"),
     MessageEntry::new("about.desc", "コンポーネントギャラリー (MPL-2.0)"),
     MessageEntry::new("about.title", "Velox Base Gallery について"),

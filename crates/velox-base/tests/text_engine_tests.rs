@@ -7,8 +7,8 @@ use velox_base::input::text_engine::{
     SyntaxTheme, TextDocBuffer, Wrap,
 };
 use velox_base::{CodeEditor, Textarea};
-use velox_core::display::measure_line_width_px;
-use velox_core::prelude::*;
+use velox_engine::display::measure_line_width_px;
+use velox_engine::prelude::*;
 
 #[test]
 fn test_line_ending_preservation_and_roundtrip() {

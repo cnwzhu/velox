@@ -1,6 +1,6 @@
 //! 层级树视图组件 `Tree` 与树状态管理 `TreeState`（支持按需回退 `Theme` 样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 扁平化层级树节点描述（`TreeNode`）。
 #[derive(Clone, Copy, Debug)]

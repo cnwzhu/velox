@@ -3,7 +3,7 @@
 //! 100% 兼容 `#![no_std]` 零堆分配：驻留 `.rodata`，且当应用层通过 `engine.set_i18n_catalog(...)`
 //! 或 `engine.set_dynamic_catalog(...)` 覆盖同名键时，应用级翻译自动优先于组件默认文案。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 const EN_US_ENTRIES: &[MessageEntry] = &[
     MessageEntry::new("velox.calendar.fri", "Fr"),

@@ -3,16 +3,20 @@ name = "velox-async"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ["gui", "async", "tokio", "smol", "velox"]
+categories = ["asynchronous", "gui"]
 description = "Feature-gated async scheduler adapters for Velox UI (tokio, smol)"
 
 [features]
 default = ["std"]
-std = ["velox-core/std"]
+std = ["velox-engine/std"]
 tokio = ["std", "dep:tokio"]
 smol = ["std", "dep:async-executor", "dep:async-io"]
 
 [dependencies]
-velox-core = { path = "../velox-core", default-features = false }
+velox-engine = { version = "0.1.0", path = "../velox-engine", default-features = false }
 tokio = { workspace = true, optional = true }
 async-executor = { workspace = true, optional = true }
 async-io = { workspace = true, optional = true }

@@ -1,7 +1,7 @@
 //! 主题化对话框组件 `Dialog`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 crate::define_themed_component! {
     name: Dialog<'a>,

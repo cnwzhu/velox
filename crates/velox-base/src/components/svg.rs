@@ -1,7 +1,7 @@
 //! 声明式原生矢量 SVG 图形组件（`Svg<'a>`），支持完整 `<svg>` 多色 XML 与 24×24 Path `d` 矢量图标。
 
 use crate::traits::{ComponentSize, Sizable};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 声明式原生矢量 SVG 展示组件（`Svg<'a>`）。
 ///

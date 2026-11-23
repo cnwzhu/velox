@@ -13,8 +13,8 @@
 //!   100% 保持旧版 `value: &str` + `CursorSelection` + `HighlightSpan` API 兼容，
 //!   同时同步升级为零抖动绝对定位光标与精准字符级选区高亮。
 
-use velox_core::display::{measure_char_advance_f32, measure_line_width_f32};
-use velox_core::prelude::*;
+use velox_engine::display::{measure_char_advance_f32, measure_line_width_f32};
+use velox_engine::prelude::*;
 
 use super::cursor::{BufferPoint, CursorSelection, Selection};
 use super::editor_state::{

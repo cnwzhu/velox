@@ -1,6 +1,6 @@
 //! # Velox Component (`velox-component`)
 //!
-//! 建立在 [`velox_core`] 与 [`velox_base`] 之上的 Tailwind 风格主题化组件样式库：
+//! 建立在 [`velox_engine`] 与 [`velox_base`] 之上的 Tailwind 风格主题化组件样式库：
 //! - 通过 [`define_themed_component!`] 宏为底层 [`velox_base`] 原语生成独立的主题化包装组件；
 //! - 通过 [`styled::TailwindStyled`] 提供类似 Tailwind CSS 的链式主题样式预设，自动回退 `cx.theme()` 语义配色，同时完整保留 `Styled` 显式定制优先级。
 

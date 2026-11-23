@@ -6,7 +6,7 @@
 
 ## 统一输入事件与手势参数
 
-`velox_core::pod::InputEvent` 抽象全平台输入来源（鼠标、触摸屏、手写笔、滚轮、实体键盘、IME 与系统返回导航）：
+`velox_engine::pod::InputEvent` 抽象全平台输入来源（鼠标、触摸屏、手写笔、滚轮、实体键盘、IME 与系统返回导航）：
 
 - **指针与触控**：`PointerDown { x, y }`、`PointerMove { x, y }`、`PointerUp { x, y }`、`PointerSecondaryDown/Up`、`PointerLeave`、`PointerCancel`、`PointerKindChanged(PointerKind)`
 - **滚动**：`Scroll { x, y, delta_y }`、`ScrollX { x, y, delta_x }`

@@ -6,7 +6,7 @@
 
 ## View vs Widget 抉择
 
-Velox 将 UI 抽象严格划分为两类核心 Trait（定义于 `velox_core::element`）：
+Velox 将 UI 抽象严格划分为两类核心 Trait（定义于 `velox_engine::element`）：
 
 ```rust
 pub trait View: Sized + 'static {

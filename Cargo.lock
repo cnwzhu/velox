@@ -2599,14 +2599,14 @@ dependencies = [
  "async-executor",
  "async-io",
  "tokio",
- "velox-core",
+ "velox-engine",
 ]
 
 [[package]]
 name = "velox-base"
 version = "0.1.0"
 dependencies = [
- "velox-core",
+ "velox-engine",
 ]
 
 [[package]]
@@ -2614,11 +2614,11 @@ name = "velox-component"
 version = "0.1.0"
 dependencies = [
  "velox-base",
- "velox-core",
+ "velox-engine",
 ]
 
 [[package]]
-name = "velox-core"
+name = "velox-engine"
 version = "0.1.0"
 dependencies = [
  "bumpalo",
@@ -2636,7 +2636,7 @@ dependencies = [
  "velox-async",
  "velox-base",
  "velox-component",
- "velox-core",
+ "velox-engine",
 ]
 
 [[package]]

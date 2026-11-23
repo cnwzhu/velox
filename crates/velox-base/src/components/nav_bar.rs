@@ -1,6 +1,6 @@
 //! 顶部导航栏基础组件 `NavBar`（默认无样式，支持居中标题、左侧返回按钮、右侧操作按钮与移动端顶部 `SafeAreaInsets` 自动避让）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 顶部导航栏基础组件（`NavBar`，默认无样式）。
 pub struct NavBar<'a> {

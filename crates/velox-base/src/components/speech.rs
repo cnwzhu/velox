@@ -1,6 +1,6 @@
 //! 语音听写与语音转文字输入组件 `Speech`（支持按需回退 `Theme` 样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 语音听写引擎工作状态枚举（`SpeechStatus`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

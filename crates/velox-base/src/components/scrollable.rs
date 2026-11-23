@@ -1,6 +1,6 @@
 //! 可滚动容器基础组件 `Scrollable` 与滚动条 `Scrollbar`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 滚动条方向。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

@@ -2,11 +2,11 @@
 //! （[`LayoutGlyph`]、[`LayoutLine`]、[`LayoutRun`]）。
 //!
 //! 参照 `pop-os/cosmic-text/src/shape.rs` 与 `buffer.rs` 设计，采用高精度浮点水平推进
-//! （`velox_core::display::measure_char_advance_f32` / `measure_char_kerning_f32`）构建字形几何，
+//! （`velox_engine::display::measure_char_advance_f32` / `measure_char_kerning_f32`）构建字形几何，
 //! 使鼠标命中测试、字符级选区高亮与 0 抖动光标定位与渲染器逐像素严格一致。
 
-use velox_core::arena::SmallVec;
-use velox_core::style::Color;
+use velox_engine::arena::SmallVec;
+use velox_engine::style::Color;
 
 use super::cursor::Affinity;
 

@@ -2,7 +2,7 @@
 //! 默认透明底 + 中性边框与选中点，不注入主题蓝填充与悬停渐变）。
 
 use crate::traits::{ComponentSize, Disableable, Sizable};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 传递给 `Radio::indicator(...)` 插槽回调的单选框状态。
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

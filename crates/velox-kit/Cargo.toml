@@ -3,19 +3,23 @@ name = "velox-kit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The one crate applications depend on — unified facade re-exporting velox-core, velox-base, and velox-component"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The one crate applications depend on — unified facade re-exporting velox-engine, velox-base, and velox-component"
 
 [features]
 default = ["gpu", "winit", "component"]
 
 # 运行时与窗口（纯 Rust 平台桥接 wayland / android / ios / harmony / web 随 std 自动可用）
-std = ["velox-core/std"]
-winit = ["std", "velox-core/winit"]
+std = ["velox-engine/std"]
+winit = ["std", "velox-engine/winit"]
 
 # GPU 硬件加速后端（内置 software 软光栅始终可用；关闭 default-features 并启用 std 即纯软件渲染）
-gpu = ["std", "velox-core/gpu"]
+gpu = ["std", "velox-engine/gpu"]
 
-# 组件层（关闭 default-features 即仅使用 velox-core）
+# 组件层（关闭 default-features 即仅使用 velox-engine）
 base = ["dep:velox-base"]
 component = ["base", "dep:velox-component"]
 
@@ -24,7 +28,7 @@ tokio = ["std", "dep:velox-async", "velox-async/tokio"]
 smol = ["std", "dep:velox-async", "velox-async/smol"]
 
 [dependencies]
-velox-core = { path = "../velox-core", default-features = false }
-velox-base = { path = "../velox-base", optional = true }
-velox-component = { path = "../velox-component", optional = true }
-velox-async = { path = "../velox-async", default-features = false, optional = true }
+velox-engine = { version = "0.1.0", path = "../velox-engine", default-features = false }
+velox-base = { version = "0.1.0", path = "../velox-base", optional = true }
+velox-component = { version = "0.1.0", path = "../velox-component", optional = true }
+velox-async = { version = "0.1.0", path = "../velox-async", default-features = false, optional = true }

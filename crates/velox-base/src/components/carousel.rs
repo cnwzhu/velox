@@ -1,6 +1,6 @@
 //! 轮播图与幻灯片浏览基础组件 `Carousel`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 轮播图与幻灯片浏览基础组件（`Carousel`，默认无样式，支持上一项/下一项切换按钮与底部指示器）。
 pub struct Carousel<'a> {

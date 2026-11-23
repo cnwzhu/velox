@@ -2,7 +2,7 @@
 
 use crate::styled::{fill_color, fill_rounded};
 use velox_base::ComponentSize;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::avatar::AvatarStatus;
 

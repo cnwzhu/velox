@@ -1,6 +1,6 @@
 //! 支持回退占位符（Fallback）的图像展示组件 `Image`。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 图像缩放适配模式（`ImageFit`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

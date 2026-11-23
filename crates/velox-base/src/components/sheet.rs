@@ -1,6 +1,6 @@
 //! 四向边缘抽屉面板基础组件 `Sheet`（默认无样式，支持顶层浮层遮罩命中拦截）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 边缘抽屉滑入方向枚举（`SheetSide`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

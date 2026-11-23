@@ -1,7 +1,7 @@
 //! 主题化星级评分组件 `Rating`。
 
 use crate::styled::fill_color;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::rating::RatingItemState;
 

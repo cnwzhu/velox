@@ -1,6 +1,6 @@
 //! 聊天消息气泡组件 `Bubble`。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 聊天气泡水平对齐方式（`BubbleAlign`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

@@ -1,7 +1,7 @@
 //! 主题化可搜索下拉选择框组件 `Combobox`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use crate::components::text_view::{MarkdownView, SelectableText};
 pub use velox_base::components::combobox::ComboboxItemState;

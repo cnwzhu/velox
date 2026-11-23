@@ -3,7 +3,7 @@
 //! **The one crate applications depend on.**
 //!
 //! 统一应用层入口库，默认开箱即用（`default = ["gpu", "winit", "component"]`）：
-//! - [`velox_core`] (`velox_kit::core`)：核心渲染引擎、Flex/Grid 布局、SDF 抗锯齿图元、内置软件光栅器、默认 `gpu`（自研轻量级 `wgpu` 2D SDF）硬件加速与跨平台后端（`std` 下全部可用，`winit` 启用原生桌面窗口）；
+//! - [`velox_engine`] (`velox_kit::core`)：核心渲染引擎、Flex/Grid 布局、SDF 抗锯齿图元、内置软件光栅器、默认 `gpu`（自研轻量级 `wgpu` 2D SDF）硬件加速与跨平台后端（`std` 下全部可用，`winit` 启用原生桌面窗口）；
 //! - [`velox_base`] (`velox_kit::base`)：默认无样式（Headless / Unstyled）组件交互行为原语、文本与代码编辑引擎、状态机与布局基础结构（通过 `base` feature 启用，默认随 `component` 开启）；
 //! - [`velox_component`] (`velox_kit::component`)：建立在 `velox-base` 之上的完整 Shadcn Zinc + Blue 主题化视觉组件库（通过 `component` feature 启用，**默认开启**）。
 //!
@@ -13,7 +13,7 @@
 //! - 顶层组件名与 `velox_kit::prelude::*`：启用 `component` feature 时指向主题化 `velox_component::*`，仅启用 `base` feature 时指向无样式 `velox_base::*`。
 
 
-pub use velox_core as core;
+pub use velox_engine as core;
 
 #[cfg(feature = "base")]
 pub use velox_base as base;
@@ -157,34 +157,35 @@ pub use velox_base::{
     Toolbar, Tooltip, Tree, UniformList, VirtualKeyboard, VirtualList,
 };
 
-pub use velox_core::prelude::*;
+pub use velox_engine::prelude::*;
 
-pub use velox_core::app;
-pub use velox_core::arena;
-pub use velox_core::async_rt;
-pub use velox_core::damage;
-pub use velox_core::display;
-pub use velox_core::element;
-pub use velox_core::engine;
-pub use velox_core::motion;
-pub use velox_core::platform;
-pub use velox_core::pod;
-pub use velox_core::raster;
-pub use velox_core::renderers;
-pub use velox_core::sdf;
-pub use velox_core::signal;
-pub use velox_core::solver;
-pub use velox_core::style;
+pub use velox_engine::app;
+pub use velox_engine::arena;
+pub use velox_engine::async_rt;
+pub use velox_engine::damage;
+pub use velox_engine::display;
+pub use velox_engine::element;
+pub use velox_engine::engine;
+pub use velox_engine::motion;
+pub use velox_engine::platform;
+pub use velox_engine::pod;
+pub use velox_engine::raster;
+pub use velox_engine::renderers;
+pub use velox_engine::sdf;
+pub use velox_engine::signal;
+pub use velox_engine::solver;
+pub use velox_engine::style;
 
 /// 独立可插拔异步调度器适配层聚合命名空间（按 feature 开关启用 `tokio` / `smol`）。
 pub mod scheduler {
-    pub use velox_core::async_rt::*;
+    pub use velox_engine::async_rt::*;
 
     #[cfg(feature = "tokio")]
     pub use velox_async::tokio;
 
     #[cfg(feature = "smol")]
     pub use velox_async::smol;
+
 }
 
 #[cfg(feature = "tokio")]
@@ -193,7 +194,8 @@ pub use velox_async::{TokioScheduler, VeloxEngineTokioExt, VeloxTokioExt};
 #[cfg(feature = "smol")]
 pub use velox_async::{SmolScheduler, VeloxEngineSmolExt, VeloxSmolExt};
 
-pub use velox_core::{export_android_app, export_harmony_app, export_ios_app, export_web_app};
+
+pub use velox_engine::{export_android_app, export_harmony_app, export_ios_app, export_web_app};
 
 /// 应用开发全量预导入模块（`use velox_kit::prelude::*;`）。
 ///
@@ -216,5 +218,6 @@ pub mod prelude {
     #[cfg(feature = "smol")]
     pub use velox_async::{SmolScheduler, VeloxEngineSmolExt, VeloxSmolExt};
 
-    pub use velox_core::prelude::*;
+
+    pub use velox_engine::prelude::*;
 }

@@ -1,6 +1,6 @@
 //! 基础圆弧进度仪表组件 `ArcGauge`（原生解析 SDF 圆弧图元：GPU 单 Draw Call 片元直算零上传，软件端多线程并行光栅）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 基础圆弧进度环与旋钮仪表组件（`ArcGauge`）。
 pub struct ArcGauge<'a> {

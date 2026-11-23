@@ -1,6 +1,6 @@
 //! 加载中骨架屏占位组件 `Skeleton`（支持按需回退 `Theme` 样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 骨架屏占位图形状（`SkeletonShape`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

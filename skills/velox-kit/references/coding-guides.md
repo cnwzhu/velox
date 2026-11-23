@@ -10,16 +10,16 @@
 
 Velox 采用严格单向依赖的分层 Workspace 架构（以 `MPL-2.0` 协议开源）：
 
-1. **`crates/velox-core`**：核心 UI 引擎内核，严禁依赖上层组件库或任何外部异步运行时。
+1. **`crates/velox-engine`**：核心 UI 引擎内核，严禁依赖上层组件库或任何外部异步运行时。
    - 帧内存管理（`ScratchArena`、`SmallVec<T, N>`、`StrRef<'a>`、`fmt!`）
    - 视图与状态池（`View`、`Widget<'a>`、`PodPool`、`Handle<V>`、`FrameScope`、`Scope<V>`、`ActionScope`）
    - 响应式信号图（`Signal<T>`、`Computed<T>`、`Effect`、`batch`）
    - 极简桌面启动层与异步运行时（`app`：`application` / `open_window`；`async_rt`：`AsyncDriver` / `run_async_event_loop` / `SchedulerBackend` / `ForegroundExecutor` / `BackgroundExecutor` / `Task<T>` / `NativeStdScheduler` / `ManualScheduler`）
    - 紧凑样式与四步布局引擎（`Style`、`Styled`、`Two-Pass Axis Solver`、`Region`、`DamageTracker`、`MotionCache`）
    - 跨平台与双渲染后端（`platform::{winit, wayland, mobile, android, ios, harmony, web, testing}`、`renderers::{software, wgpu}`）
-2. **`crates/velox-base`**：构建在 `velox-core` 之上的无样式行为原语层：70+ 基础组件交互逻辑、文本/代码编辑状态机（`EditableText`、`TextBuffer`、`CodeEditor`）、页面路由栈（`Navigator`）、等高虚拟列表（`UniformList` / `VirtualList`）与统一修饰 Trait（`Sizable`、`Variants`、`Disableable`）。
+2. **`crates/velox-base`**：构建在 `velox-engine` 之上的无样式行为原语层：70+ 基础组件交互逻辑、文本/代码编辑状态机（`EditableText`、`TextBuffer`、`CodeEditor`）、页面路由栈（`Navigator`）、等高虚拟列表（`UniformList` / `VirtualList`）与统一修饰 Trait（`Sizable`、`Variants`、`Disableable`）。
 3. **`crates/velox-component`**：构建在 `velox-base` 之上的 Shadcn Zinc + Blue Tailwind 风格主题化包装层（`define_themed_component!`、`TailwindStyled`、`Theme` / `ThemeMode`）。
-4. **`crates/velox-async`**：独立可插拔第三方异步调度器适配 Crate，通过 Cargo feature 按需开启（`tokio` -> `TokioScheduler`；`smol` -> `SmolScheduler`），严禁被 `velox-core` / `velox-base` 反向依赖。
+4. **`crates/velox-async`**：独立可插拔第三方异步调度器适配 Crate，通过 Cargo feature 按需开启（`tokio` -> `TokioScheduler`；`smol` -> `SmolScheduler`），严禁被 `velox-engine` / `velox-base` 反向依赖。
 5. **`crates/velox-kit`**：**应用唯一依赖 Crate**，统一重导出上述层级并提供稳定无歧义的 `Base*` / `Themed*` 别名、可选 `tokio`/`smol` feature 透传与 `prelude`。
 
 ---
@@ -87,7 +87,7 @@ Velox 提供三种层次清晰的状态管理方式，避免多份拷贝导致�
 1. **托管 `Task<T>` 生命周期（RAII 自动取消）**：`acx.spawn(...)` 与 `cx.background_spawn(...)` 返回的 `Task<T>` 标记了 `#[must_use]`，直接丢弃会立刻取消任务。与页面状态绑定的异步任务应存入 `View` 字段（如 `sync_task: Option<Task<()>>`），通过覆盖赋值或置 `None` 自动取消旧请求，仅在明确发后即忘时调用 `.detach()`。
 2. **`Signal<T>` 严禁跨线程访问**：`Signal<T>` 是 UI 主线程局部状态（`thread_local!`）。绝不可在 `cx.background_spawn(...)` 闭包内读写 `Signal<T>`；务必将后台计算或网络 I/O 结果 `.await` 返回前景后，在 `this.update(&mut cx, |view, _| { ... })` 中统一更新状态与信号。
 3. **保持业务代码调度器无关**：业务 `View` 代码统一依赖 `acx.spawn`、`cx.background_spawn`、`cx.background_executor()` 与 `cx.timer(dur)`，不直接硬编码 `tokio::spawn` 或 `Timer::after`——从而使同一份业务代码无需修改即可在默认 `NativeStdScheduler`、`TokioScheduler`、`SmolScheduler` 与测试 `ManualScheduler` 之间自由切换。
-4. **调度器适配层严格 Feature 隔离**：外部异步运行时适配器集中在 `crates/velox-async` 中并经由 `velox-kit` 的可选 feature（`tokio` / `smol`，默认全关）按需开启；`velox-core` 与 `velox-base` 严禁依赖任何第三方异步运行时。
+4. **调度器适配层严格 Feature 隔离**：外部异步运行时适配器集中在 `crates/velox-async` 中并经由 `velox-kit` 的可选 feature（`tokio` / `smol`，默认全关）按需开启；`velox-engine` 与 `velox-base` 严禁依赖任何第三方异步运行时。
 5. **无真睡确定性测试**：凡涉及定时器或异步状态流转的逻辑，优先配合 `ManualScheduler::new()` + `sched.advance(dur)` + `sched.drive_engine(&mut engine)` 编写 0ms 瞬时确定性单测。
 
 ---
@@ -185,7 +185,7 @@ panel.into_element(cx)
 
 - **Cargo Feature 必须严格可加（Additive）**：开启 `component`、`gpu`、`winit`、`tokio`、`smol` 等任何 Feature 都不能破坏下游调用。`tokio` 与 `smol` 默认关闭，保持默认编译零外部异步运行时依赖；需要类型绝对不变时向用户暴露 `Base*` / `Themed*` 别名。
 - **类型安全与显式构建器**：公开选项/配置结构体优先使用 `pub const fn new(...)` 搭配链式 Builder（`mut self -> Self`）；不暴露绕过不变量的原始可变内部指针。
-- **帧级零堆分配约束**：`velox-core` 与 `velox-base` 的公共组件在渲染热路径上优先使用 `ScratchArena`、`StrRef<'a>`、`SmallVec<T, N>` 与常量泛型容量参数 `CAP`，避免逐帧堆分配。
+- **帧级零堆分配约束**：`velox-engine` 与 `velox-base` 的公共组件在渲染热路径上优先使用 `ScratchArena`、`StrRef<'a>`、`SmallVec<T, N>` 与常量泛型容量参数 `CAP`，避免逐帧堆分配。
 
 ---
 
@@ -216,7 +216,7 @@ panel.into_element(cx)
   2. 点击与手势坐标真实命中（`dispatch_click`、`dispatch_pointer_down/move/up`）；
   3. 模态弹出时底层元素命中必须返回 `false`（确认 `.overlay().occlude_hit()` 生效）；
   4. 动态尺寸变化 `engine.resize(w, h)` 产生全视口脏区并保持布局正确；
-  5. 若改动 `velox-core`，务必额外运行 `cargo check -p velox-core --no-default-features` 确保最小软光栅裁剪构建不退化。
+  5. 若改动 `velox-engine`，务必额外运行 `cargo check -p velox-engine --no-default-features` 确保最小软光栅裁剪构建不退化。
 
 ---
 
@@ -237,7 +237,7 @@ panel.into_element(cx)
 3. **直接丢弃 `Task<T>` 或在后台线程操作 `Signal<T>`**：调用 `acx.spawn(...)` 后未赋值给 `self.task` 也没 `.detach()`，导致任务创建即被 Drop 取消；或在 `cx.background_spawn` 内直接读写 `Signal<T>` 破坏主线程隔离。
 4. **模态对话框未阻断底层点击**：只调用 `Dialog::new(...)` 或外部容器只写 `.overlay()` 而遗漏 `.occlude_hit()`，导致用户点弹窗外空白处意外触发背后侧边栏。
 5. **`TextInput` / `CodeEditor` 绑定字符串直接传入字段 `&self.buf.as_str()` 与 `&mut Scope<Self>` 借用冲突**：先调用 `let s = self.buf.as_arena_str(cx);` 复制到当前帧 `ScratchArena`（零堆分配），再传 `s` 并使用 `cx.listener(...)`。
-6. **在核心/组件文件直接引入第三方异步运行时或 GPU 依赖而未加 feature 门控**：直接破坏 `velox-core` / `velox-base` 的最小裁剪与零外部异步依赖契约。
+6. **在核心/组件文件直接引入第三方异步运行时或 GPU 依赖而未加 feature 门控**：直接破坏 `velox-engine` / `velox-base` 的最小裁剪与零外部异步依赖契约。
 
 ---
 
@@ -249,4 +249,4 @@ panel.into_element(cx)
 - [ ] 异步任务 `Task<T>` 均已正确托管（存入 `View` 字段、`.await` 或 `.detach()`），且无跨线程读写 `Signal<T>`。
 - [ ] 需要拦截背景穿透的浮层均带有 `.overlay().occlude_hit()`。
 - [ ] 无动画且无进行中异步动画时能回归 `PlatformControlFlow::Wait`（0% CPU 空闲休眠）。
-- [ ] 已运行 `cargo test --workspace` 验证交互流，若修改核心库则通过 `cargo check -p velox-core --no-default-features`。
+- [ ] 已运行 `cargo test --workspace` 验证交互流，若修改核心库则通过 `cargo check -p velox-engine --no-default-features`。

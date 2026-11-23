@@ -2,7 +2,7 @@
 
 use crate::styled::{fill_color, fill_rounded};
 use velox_base::CursorSelection;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 crate::define_themed_component! {
     name: Textarea<'a>,

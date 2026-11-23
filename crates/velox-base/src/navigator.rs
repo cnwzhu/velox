@@ -1,8 +1,8 @@
 //! 零堆分配页面路由栈与过渡转场管理器 `Navigator`。
 
-use velox_core::display::PixelFormat;
-use velox_core::renderers::software::blit_translated_layer;
-use velox_core::solver::Region;
+use velox_engine::display::PixelFormat;
+use velox_engine::renderers::software::blit_translated_layer;
+use velox_engine::solver::Region;
 
 /// 页面切换过渡动画类型。
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]

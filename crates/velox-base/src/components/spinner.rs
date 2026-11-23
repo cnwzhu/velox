@@ -1,7 +1,7 @@
 //! 基础环形加载旋转指示器组件 `Spinner`（基于 `ArcGauge` 渲染）。
 
 use crate::components::ArcGauge;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 基础环形旋转加载指示器组件（`Spinner`）。
 pub struct Spinner {

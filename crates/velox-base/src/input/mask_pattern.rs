@@ -1,6 +1,6 @@
 //! 格式化输入掩码模式（[`MaskPattern`] / [`MaskToken`]）与全角数字规范化（兼容 `#![no_std]`）。
 
-use velox_core::arena::SmallVec;
+use velox_engine::arena::SmallVec;
 
 /// 密码模式默认掩码字符。
 pub const MASK_CHAR: char = '•';

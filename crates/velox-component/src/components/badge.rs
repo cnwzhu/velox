@@ -2,7 +2,7 @@
 
 use crate::styled::is_unset;
 use velox_base::{ComponentSize, ComponentVariant, Sizable, Variants};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 建立在 [`velox_base::Badge`] 之上的主题化状态徽章组件（完整 8 档语义变体与 3 档尺寸）。
 pub struct Badge<'a> {

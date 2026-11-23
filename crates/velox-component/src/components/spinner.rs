@@ -1,6 +1,6 @@
 //! 主题化加载旋转指示器组件 `Spinner`。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 crate::define_themed_component! {
     name: Spinner,

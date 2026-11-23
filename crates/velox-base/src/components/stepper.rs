@@ -1,6 +1,6 @@
 //! 分步向导与进度指示器基础组件 `Stepper`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 分步流程状态（`StepStatus`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

@@ -1,6 +1,6 @@
 //! 搜索组合下拉框 `Combobox`（默认回退 `cx.theme()`）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use crate::components::text_view::{MarkdownView, SelectableText};
 

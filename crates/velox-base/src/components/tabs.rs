@@ -3,7 +3,7 @@
 
 use crate::traits::{ComponentSize, Sizable};
 use core::time::Duration;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 const FLAG_CUSTOM_HEIGHT: u8 = 1 << 0;
 const FLAG_CUSTOM_APPEARANCE: u8 = 1 << 1;

@@ -6,7 +6,7 @@
 
 ## 瞬态帧内存池 ScratchArena
 
-`velox_core::arena::ScratchArena` 是 Velox 实现“渲染期零全局堆分配”的基础设施：
+`velox_engine::arena::ScratchArena` 是 Velox 实现“渲染期零全局堆分配”的基础设施：
 
 - 底层基于 `bumpalo::Bump` 实现连续页块弹性分配，在每帧或每次重建通过 `rewind()` O(1) 整体复用内存；
 - 提供 `alloc` / `alloc_bytes` / `alloc_fmt` / `alloc_iter` 存放本帧文本、回调闭包与高亮切片，以及 `alloc_temp` / `alloc_temp_iter_exact` 存放瞬态树与布局求解节点。

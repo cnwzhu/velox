@@ -1,7 +1,7 @@
 //! 矢量 SVG 图标展示组件 `Icon` 与内置标准图标枚举 `IconName`（24×24 Lucide 风格原生抗锯齿矢量路径）。
 
 use crate::traits::{ComponentSize, Sizable};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 内置常用图标名称枚举（`IconName`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

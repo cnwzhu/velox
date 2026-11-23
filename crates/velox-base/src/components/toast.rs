@@ -1,7 +1,7 @@
 //! 顶层轻提示通知横幅基础组件 `Toast`（默认无样式，保留定位、`.overlay()` 浮层与可选入场动画）。
 
 use core::time::Duration;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 浮动轻提示通知基础组件（`Toast`，默认无样式）。
 pub struct Toast<'a> {

@@ -1,7 +1,7 @@
 //! 主题化模态弹窗组件 `Modal`。
 
 use crate::styled::{fill_color, fill_rounded};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 crate::define_themed_component! {
     name: Modal<'a>,

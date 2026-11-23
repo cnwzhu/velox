@@ -1,7 +1,7 @@
 //! 主题化滑动条组件 `Slider`。
 
 use crate::styled::fill_color;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::slider::SliderState;
 

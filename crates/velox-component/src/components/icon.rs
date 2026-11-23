@@ -1,6 +1,6 @@
 //! 主题化矢量图标组件 `Icon`。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::icon::IconName;
 

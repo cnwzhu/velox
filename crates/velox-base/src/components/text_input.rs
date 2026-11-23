@@ -1,8 +1,8 @@
 //! 基础单行文本输入框组件 `TextInput`（支持文本状态、闪烁叠层光标、亚像素鼠标任意选区、
 //! 双击选词/三击全选、修饰键快捷键、系统剪贴板复制粘贴、右键菜单回调与密码掩码模式）。
 
-use velox_core::display::measure_line_width_f32;
-use velox_core::prelude::*;
+use velox_engine::display::measure_line_width_f32;
+use velox_engine::prelude::*;
 
 const AUTO_COLOR: Color = Color(0x0000_0001);
 const DOUBLE_CLICK_MS: u32 = 380;

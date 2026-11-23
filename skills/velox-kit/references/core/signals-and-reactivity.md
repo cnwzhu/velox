@@ -6,7 +6,7 @@
 
 ## 核心概念与零堆内存模型
 
-`velox_core::signal` 提供无需宏观状态树 Diff 的细粒度响应式原语（由 `velox_kit::prelude::*` 全量导出）：
+`velox_engine::signal` 提供无需宏观状态树 Diff 的细粒度响应式原语（由 `velox_kit::prelude::*` 全量导出）：
 
 - **`Signal<T>`、`Computed<T>`、`Effect`** 均为 **4 字节 `Copy` 强类型句柄**（`id: u16` + `generation: u16` 防 ABA）；
 - 存储约束：**内联值存储要求 `T: Copy + 'static`，`size_of::<T>() <= 16` 字节、`align_of::<T>() <= 8` 字节**（在编译后运行写入时检查断言，覆盖 `i32`、`u64`、`bool`、`Color`、`SimpleDate`、`Region`、轻量状态枚举等）；

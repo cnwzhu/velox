@@ -1,7 +1,7 @@
 //! 无样式基础下拉选择菜单原语 `Dropdown`（定义展开态、选项选中行为、`.overlay()` 顶层弹出与命中遮挡；
 //! 默认零背景、零边框、零圆角、零阴影与零动画）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 传递给 `Dropdown::item(...)` 插槽回调的下拉选项状态。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -6,7 +6,7 @@
 
 ## 统一跨平台后端概览
 
-Velox 将**窗口事件收集与像素/交换链呈现（`velox_kit::platform`）**与**图形光栅化渲染器（`velox_core::renderers`）**解耦，业务 `View` 代码在桌面、移动端与 Web 浏览器之间无需修改即可复用。
+Velox 将**窗口事件收集与像素/交换链呈现（`velox_kit::platform`）**与**图形光栅化渲染器（`velox_engine::renderers`）**解耦，业务 `View` 代码在桌面、移动端与 Web 浏览器之间无需修改即可复用。
 
 ---
 

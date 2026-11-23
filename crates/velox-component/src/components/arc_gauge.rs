@@ -1,7 +1,7 @@
 //! 主题化 SDF 圆弧仪表盘组件 `ArcGauge`。
 
 use crate::styled::fill_color;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 crate::define_themed_component! {
     name: ArcGauge<'a>,

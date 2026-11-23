@@ -1,7 +1,7 @@
 //! 无样式日历原语 `Calendar`（支持 `gpui-base` 风格的 `.item(...)` / `.label(...)` 插槽回调、
 //! 日/月/年三视图切换、前后月补齐、`today` / `min_date` / `max_date` 状态以及外层 [`Styled`] 链式修饰）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 const AUTO_COLOR: Color = Color(0x0000_0001);
 

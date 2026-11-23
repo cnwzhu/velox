@@ -1,6 +1,6 @@
 //! 结构化应用设置面板基础组件 `Settings`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 设置项控件值类型枚举（`SettingsValue`）。
 #[derive(Clone, Copy, Debug)]

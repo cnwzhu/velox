@@ -2,7 +2,7 @@
 
 use crate::components::{Attachment, Avatar, Bubble, BubbleAlign, BubbleReaction};
 use crate::traits::Sizable;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 消息发送方角色枚举（`MessageRole`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

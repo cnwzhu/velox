@@ -2,7 +2,7 @@
 //! 默认零卡片底色、零边框、零圆角、零阴影与零入场动画）。
 
 use core::time::Duration;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 const AUTO_COLOR: Color = Color(0x0000_0001);
 

@@ -1,6 +1,6 @@
 //! 无样式内联警告提示原语 `Alert` 与语义变体 `AlertVariant`（默认零背景、零边框、零圆角与零语义底色）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 警告与通知语义等级变体（`AlertVariant`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

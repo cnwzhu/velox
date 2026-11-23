@@ -1,6 +1,6 @@
 //! 键值对详情展示列表基础组件 `DescriptionList`。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 键值对描述列表条目（`DescriptionItem`）。
 #[derive(Clone, Copy, Debug)]

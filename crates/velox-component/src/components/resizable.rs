@@ -1,7 +1,7 @@
 //! 主题化可调分栏布局组件 `ResizableSplit` / `Resizable`。
 
 use crate::styled::fill_color;
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::resizable::{DockWorkspaceState, SplitAxis};
 

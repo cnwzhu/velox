@@ -136,5 +136,5 @@ let _ = plat.step_platform(&mut engine, 16);
 | 可插拔异步适配层（`tokio` + `smol`）测试 | `cargo test -p velox-async --all-features` |
 | `velox-kit` 默认及全调度器 Feature 集成测试 | `cargo test -p velox-kit --features tokio,smol` |
 | `velox-kit` 最小软光栅裁剪编译检查 | `cargo check -p velox-kit --no-default-features --features component` |
-| `velox-core` 最小无 GPU 裁剪编译检查 | `cargo check -p velox-core --no-default-features` |
+| `velox-engine` 最小无 GPU 裁剪编译检查 | `cargo check -p velox-engine --no-default-features` |
 | 工作区全量测试 | `cargo test --workspace` |

@@ -1,6 +1,6 @@
 //! 无样式下拉选择器原语 `Select` 与候选条目 `SelectOption`（默认零背景、零边框、零圆角、零阴影与零悬停渐变）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 const AUTO_COLOR: Color = Color(0x0000_0001);
 

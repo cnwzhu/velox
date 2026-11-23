@@ -1,6 +1,6 @@
 //! 可调整分栏布局基础组件 `ResizableSplit` 与停靠工作区状态 `DockWorkspaceState`（默认无样式）。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 /// 分栏切割方向。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

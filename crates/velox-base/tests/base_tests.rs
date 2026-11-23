@@ -3,8 +3,8 @@
 use velox_base::{
     uniform_list, Button, Checkbox, Disableable, Navigator, PageTransition, Slider, Switch, Tabs,
 };
-use velox_core::platform::testing::TestingPlatform;
-use velox_core::prelude::*;
+use velox_engine::platform::testing::TestingPlatform;
+use velox_engine::prelude::*;
 
 struct BaseApp {
     count: i32,
@@ -52,7 +52,7 @@ impl View for BaseApp {
                 uniform_list(6, 100, 16, 64, 0, |i, cx| {
                     div()
                         .h(16)
-                        .child(cx, text(velox_core::fmt!(cx, "Item {}", i)))
+                        .child(cx, text(velox_engine::fmt!(cx, "Item {}", i)))
                         .into_element(cx)
                 }),
             )
@@ -1285,7 +1285,7 @@ fn test_gpui_base_calendar_slot_callbacks_and_views() {
                     CalendarItemKind::Weekday => {
                         StrRef::from(["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"][(value as usize) % 7])
                     }
-                    _ => velox_core::fmt!(cx, "{}", value),
+                    _ => velox_engine::fmt!(cx, "{}", value),
                 });
 
             div().size_full().p_2().child(cx, calendar).into_element(cx)
@@ -1462,7 +1462,7 @@ fn test_gpui_base_composite_slot_callbacks() {
                 .label(cx, |kind, p| match kind {
                     PaginationItemKind::Previous => StrRef::from("Prev"),
                     PaginationItemKind::Next => StrRef::from("Next"),
-                    PaginationItemKind::Page => velox_core::fmt!(cx, "{}", p),
+                    PaginationItemKind::Page => velox_engine::fmt!(cx, "{}", p),
                 });
 
             let acc = Accordion::new(9060, ACC_ITEMS, self.acc_mask)

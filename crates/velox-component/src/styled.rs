@@ -1,11 +1,11 @@
 //! Tailwind 风格主题化样式扩展（`TailwindStyled`）与共享主题着色辅助函数。
 //!
-//! 将 `velox_core::style::Styled` 的原子链式能力与 `Theme`、`ComponentVariant`、`ComponentSize`
+//! 将 `velox_engine::style::Styled` 的原子链式能力与 `Theme`、`ComponentVariant`、`ComponentSize`
 //! 结合，为 `velox-component` 中的全部主题化包装组件提供一致的 Shadcn Zinc + Blue 视觉皮肤。
 
 use crate::theme::Theme;
 use velox_base::{ComponentSize, ComponentVariant};
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 
 pub(crate) const AUTO_COLOR: Color = Color(0x0000_0001);
 

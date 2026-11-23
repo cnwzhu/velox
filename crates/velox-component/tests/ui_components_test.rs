@@ -1,6 +1,6 @@
 //! `velox-ui` 标准组件库（`Slider`、`Tabs`、`Checkbox`、`Modal`、`ArcGauge`）集成测试。
 
-use velox_core::prelude::*;
+use velox_engine::prelude::*;
 use velox_component::{ArcGauge, Checkbox, Modal, Slider, Tabs};
 
 struct ControlPanel {
