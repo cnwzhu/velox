@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    # 1. GUI 框架层 (GUI Framework: Core / Base / Component / Kit)
+    "crates/velox-core",
+    "crates/velox-base",
+    "crates/velox-component",
+    "crates/velox-kit",
+
+    # 2. 独立异步调度器适配层 (Pluggable Scheduler Adapters)
+    "crates/velox-async",
+
+    # 3. 跨平台桌面、移动端与 Web 示例 (Examples)
+    "examples/hello_world",
+    "examples/desktop_app",
+    "examples/android_app",
+    "examples/ios_app",
+    "examples/harmony_app",
+    "examples/web_app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+
+[workspace.dependencies]
+bumpalo = { version = "3.20.3", features = ["collections"] }
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen"] }
+softbuffer = { version = "0.4", default-features = false, features = ["wayland", "wayland-dlopen"] }
+fontdue = "0.9"
+ttf-parser = "0.25"
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "dx12", "metal", "vulkan", "wgsl", "webgpu"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "io-util"] }
+async-executor = "1.13"
+async-io = "2.4"
+
+[profile.dev.package.fontdue]
+opt-level = 3
+
+[profile.dev.package.ttf-parser]
+opt-level = 3
+
+[profile.dev.package.velox-core]
+opt-level = 2
+
+[profile.dev.package.naga]
+opt-level = 3
+
+[profile.dev.package.wgpu-core]
+opt-level = 2
+
+[profile.dev.package.wgpu-hal]
+opt-level = 2

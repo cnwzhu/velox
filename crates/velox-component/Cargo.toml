@@ -1,0 +1,10 @@
+[package]
+name = "velox-component"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Themed and styled zero-allocation UI component library built on velox-core and velox-base"
+
+[dependencies]
+velox-core = { path = "../velox-core", default-features = false }
+velox-base = { path = "../velox-base" }

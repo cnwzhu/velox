@@ -1,0 +1,18 @@
+[package]
+name = "velox-async"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Feature-gated async scheduler adapters for Velox UI (tokio, smol)"
+
+[features]
+default = ["std"]
+std = ["velox-core/std"]
+tokio = ["std", "dep:tokio"]
+smol = ["std", "dep:async-executor", "dep:async-io"]
+
+[dependencies]
+velox-core = { path = "../velox-core", default-features = false }
+tokio = { workspace = true, optional = true }
+async-executor = { workspace = true, optional = true }
+async-io = { workspace = true, optional = true }

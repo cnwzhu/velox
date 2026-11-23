@@ -1,0 +1,22 @@
+[package]
+name = "ios_app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Velox iOS mobile application example (UIKit / CADisplayLink / CAMetalLayer, Dynamic Island SafeArea, UIKeyboard, Swipe-Back) built on velox-kit"
+
+[lib]
+name = "ios_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "ios_app_cli"
+path = "src/main.rs"
+
+[features]
+default = []
+gpu = ["velox-kit/gpu"]
+winit = ["velox-kit/winit"]
+
+[dependencies]
+velox-kit = { path = "../../crates/velox-kit", default-features = false, features = ["std", "component"] }

@@ -1,0 +1,9 @@
+[package]
+name = "velox-base"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless component behaviors, state structures, navigation/virtual-list primitives, and minimal unstyled base widgets for Velox"
+
+[dependencies]
+velox-core = { path = "../velox-core", default-features = false }

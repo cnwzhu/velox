@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <title>Velox WebAssembly Application</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: #0b0f17; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: system-ui, sans-serif; }
+    canvas { width: 800px; height: 600px; border-radius: 12px; box-shadow: 0 16px 40px rgba(0,0,0,0.5); touch-action: none; }
+  </style>
+</head>
+<body>
+  <canvas id="velox-canvas" width="800" height="600"></canvas>
+  <script type="module">
+    function unwrapCoreWasm(u8) {
+      if (u8[4] === 1) return u8;
+      let pos = 8;
+      while (pos < u8.length) {
+        const secId = u8[pos++];
+        let len = 0, shift = 0;
+        while (pos < u8.length) {
+          const b = u8[pos++];
+          len |= (b & 0x7f) << shift;
+          if ((b & 0x80) === 0) break;
+          shift += 7;
+        }
+        if (secId === 1 && u8[pos] === 0x00 && u8[pos + 1] === 0x61 && u8[pos + 2] === 0x73 && u8[pos + 3] === 0x6d && u8[pos + 4] === 0x01) {
+          return u8.subarray(pos, pos + len);
+        }
+        pos += len;
+      }
+      return u8;
+    }
+
+    export async function mountVeloxCanvas(wasmUrl, canvas, createAppExport = "velox_wasm_app_init") {
+      const wasiStub = new Proxy({}, { get: () => new Proxy({}, { get: () => () => 0 }) });
+      const sep = wasmUrl.includes("?") ? "&" : "?";
+      const resp = await fetch(`${wasmUrl}${sep}_t=${Date.now()}`, { cache: "no-store" });
+      const rawBytes = new Uint8Array(await resp.arrayBuffer());
+      const coreBytes = unwrapCoreWasm(rawBytes);
+      const { instance } = await WebAssembly.instantiate(coreBytes, wasiStub);
+      const exports = instance.exports;
+      const rect = canvas.getBoundingClientRect();
+      const logicalW = (rect.width | 0) || canvas.width;
+      const logicalH = (rect.height | 0) || canvas.height;
+      const dpr = Math.min(3, Math.max(1, Math.round(window.devicePixelRatio || 1)));
+      canvas.width = logicalW * dpr;
+      canvas.height = logicalH * dpr;
+      const app = exports[createAppExport](logicalW, logicalH);
+      if (typeof exports.velox_web_app_set_dpi_scale === "function" && dpr > 1) {
+        exports.velox_web_app_set_dpi_scale(app, dpr);
+      }
+      const ctx = canvas.getContext("2d");
+
+      canvas.addEventListener("pointerdown", e => exports.velox_web_app_pointer_event(app, 0, e.offsetX | 0, e.offsetY | 0));
+      canvas.addEventListener("pointermove", e => exports.velox_web_app_pointer_event(app, 1, e.offsetX | 0, e.offsetY | 0));
+      canvas.addEventListener("pointerup", e => exports.velox_web_app_pointer_event(app, 2, e.offsetX | 0, e.offsetY | 0));
+      canvas.addEventListener("pointercancel", e => exports.velox_web_app_pointer_event(app, 3, 0, 0));
+      canvas.addEventListener("wheel", e => {
+        e.preventDefault();
+        exports.velox_web_app_wheel_event(app, e.offsetX | 0, e.offsetY | 0, (-e.deltaY * 0.5) | 0);
+      }, { passive: false });
+      window.addEventListener("popstate", () => exports.velox_web_app_popstate_back(app));
+
+      let lastTs = performance.now();
+      function tick(now) {
+        const dt = Math.min(100, Math.max(1, (now - lastTs) | 0));
+        lastTs = now;
+        const dirtyCount = exports.velox_web_app_step_frame(app, dt);
+        if (dirtyCount > 0) {
+          const w = canvas.width, h = canvas.height;
+          const rgbaPtr = exports.velox_web_app_rgba_ptr(app);
+          const rgbaLen = exports.velox_web_app_rgba_byte_len(app);
+          const img = new ImageData(new Uint8ClampedArray(exports.memory.buffer, rgbaPtr, rgbaLen), w, h);
+          const dirtyPtr = exports.velox_web_app_dirty_rects_ptr(app);
+          const rects = new Int16Array(exports.memory.buffer, dirtyPtr, dirtyCount * 4);
+          for (let i = 0; i < dirtyCount; i++) {
+            const x = rects[i * 4], y = rects[i * 4 + 1], rw = rects[i * 4 + 2], rh = rects[i * 4 + 3];
+            ctx.putImageData(img, 0, 0, x, y, rw, rh);
+          }
+        }
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+      return { app, exports };
+    }
+    mountVeloxCanvas("./web_app.wasm", document.getElementById("velox-canvas"), "velox_wasm_app_init");
+  </script>
+</body>
+</html>

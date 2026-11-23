@@ -1,0 +1,22 @@
+[package]
+name = "android_app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Velox Android mobile application example (JNI / NDK Surface, WindowInsets, IME, Back Navigation) built on velox-kit"
+
+[lib]
+name = "android_app"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "android_app_cli"
+path = "src/main.rs"
+
+[features]
+default = []
+gpu = ["velox-kit/gpu"]
+winit = ["velox-kit/winit"]
+
+[dependencies]
+velox-kit = { path = "../../crates/velox-kit", default-features = false, features = ["std", "component"] }

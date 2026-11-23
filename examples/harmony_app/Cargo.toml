@@ -1,0 +1,22 @@
+[package]
+name = "harmony_app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Velox HarmonyOS NEXT / OpenHarmony mobile application example (ArkTS XComponent / OH_NativeXComponent / OHNativeWindow, AvoidArea, IME, onBackPress) built on velox-kit"
+
+[lib]
+name = "harmony_app"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "harmony_app_cli"
+path = "src/main.rs"
+
+[features]
+default = []
+gpu = ["velox-kit/gpu"]
+winit = ["velox-kit/winit"]
+
+[dependencies]
+velox-kit = { path = "../../crates/velox-kit", default-features = false, features = ["std", "component"] }

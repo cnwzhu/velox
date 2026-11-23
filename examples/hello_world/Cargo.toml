@@ -1,0 +1,9 @@
+[package]
+name = "hello_world"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal Velox Kit desktop application matching gpui-kit's concise startup ergonomics"
+
+[dependencies]
+velox-kit = { path = "../../crates/velox-kit" }
