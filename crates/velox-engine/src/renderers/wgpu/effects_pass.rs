@@ -1,0 +1,644 @@
+//! GPU 多 Pass 后处理与离屏合成引擎（`GpuEffectsEngine`）：
+//! 负责 Dual Kawase Blur、实时毛玻璃（`backdrop-filter`）、4×5 `ColorMatrix`、任意子树 `DropShadow`、
+//! 2D 仿射变换、SVG Path 裁剪遮罩与完整 27 种 W3C / Porter-Duff 混合模式的 GPU 编排。
+
+use ::wgpu;
+use std::vec::Vec;
+
+use crate::paint::{ColorMatrix, Transform2D};
+use crate::solver::Region;
+
+use super::layer_pool::LayerTargetPool;
+use super::pod_as_bytes;
+
+const EFFECTS_WGSL: &str = include_str!("effects.wgsl");
+const INIT_EFFECT_SLOTS: usize = 32;
+
+/// 与 `effects.wgsl` 严格对齐的 256 字节动态 Uniform 槽位（`16 × vec4<f32>`）。
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub(crate) struct EffectUniform {
+    pub(crate) tex_sizes: [f32; 4],
+    pub(crate) dst_rect: [f32; 4],
+    pub(crate) src_rect: [f32; 4],
+    pub(crate) clip_rect: [f32; 4],
+    pub(crate) body_rect: [f32; 4],
+    pub(crate) radii: [f32; 4],
+    pub(crate) params: [f32; 4],
+    pub(crate) flags: [f32; 4],
+    pub(crate) tint: [f32; 4],
+    pub(crate) inv_xform: [f32; 4],
+    pub(crate) extra: [f32; 4],
+    pub(crate) cm0: [f32; 4],
+    pub(crate) cm1: [f32; 4],
+    pub(crate) cm2: [f32; 4],
+    pub(crate) cm3: [f32; 4],
+    pub(crate) cm_bias: [f32; 4],
+}
+
+const _: () = assert!(core::mem::size_of::<EffectUniform>() == 256);
+
+pub(crate) const EFFECT_KIND_COMPOSITE: f32 = 0.0;
+pub(crate) const EFFECT_KIND_BACKDROP: f32 = 1.0;
+pub(crate) const EFFECT_KIND_KAWASE_DOWN: f32 = 2.0;
+pub(crate) const EFFECT_KIND_KAWASE_UP: f32 = 3.0;
+pub(crate) const EFFECT_KIND_SHADOW_EXTRACT: f32 = 4.0;
+pub(crate) const EFFECT_KIND_BLIT: f32 = 5.0;
+
+impl EffectUniform {
+    pub(crate) fn set_color_matrix(&mut self, cm: Option<ColorMatrix>) {
+        if let Some(m) = cm {
+            self.flags[0] = 1.0;
+            self.cm0 = [m.0[0], m.0[1], m.0[2], m.0[3]];
+            self.cm1 = [m.0[5], m.0[6], m.0[7], m.0[8]];
+            self.cm2 = [m.0[10], m.0[11], m.0[12], m.0[13]];
+            self.cm3 = [m.0[15], m.0[16], m.0[17], m.0[18]];
+            self.cm_bias = [m.0[4], m.0[9], m.0[14], m.0[19]];
+        } else {
+            self.flags[0] = 0.0;
+            self.cm0 = [1.0, 0.0, 0.0, 0.0];
+            self.cm1 = [0.0, 1.0, 0.0, 0.0];
+            self.cm2 = [0.0, 0.0, 1.0, 0.0];
+            self.cm3 = [0.0, 0.0, 0.0, 1.0];
+            self.cm_bias = [0.0; 4];
+        }
+    }
+
+    pub(crate) fn set_transform(&mut self, t: Option<Transform2D>, scale: f32) {
+        if let Some(tr) = t {
+            if !tr.is_identity() {
+                let lin = Transform2D::new(tr.a, tr.b, tr.c, tr.d, 0.0, 0.0);
+                if let Some(inv) = lin.invert() {
+                    self.inv_xform = [inv.a, inv.b, inv.c, inv.d];
+                    self.extra[0] = tr.e * scale;
+                    self.extra[1] = tr.f * scale;
+                    return;
+                }
+            }
+        }
+        self.inv_xform = [1.0, 0.0, 0.0, 1.0];
+        self.extra[0] = 0.0;
+        self.extra[1] = 0.0;
+    }
+}
+
+/// 录制到单 `CommandEncoder` 中的原子 GPU 操作步骤。
+pub(crate) enum GpuPassStep {
+    /// 将 `primitives[start..end]` 渲染至 `target_idx` 离屏纹理。
+    DrawBatch {
+        target_idx: usize,
+        clear: Option<wgpu::Color>,
+        viewport_slot: u32,
+        prim_start: u32,
+        prim_end: u32,
+    },
+    /// 在两张离屏池纹理之间拷贝局部矩形（用于安全获取 `dst_tex` 背景快照，规避读写冲突）。
+    CopyRect {
+        src_idx: usize,
+        src_origin: (u32, u32),
+        dst_idx: usize,
+        dst_origin: (u32, u32),
+        size: (u32, u32),
+    },
+    /// 执行单次后处理/混合/模糊/毛玻璃着色器 Pass。
+    Effect {
+        dst_idx: usize,
+        clear_dst: bool,
+        src_idx: usize,
+        dst_snap_idx: usize,
+        mask_path: Option<(std::string::String, u32, u32)>,
+        effect_slot: u32,
+    },
+    /// 最终将根离屏画布 Blit 到外部传入的 `target_view`。
+    BlitToTarget {
+        src_idx: usize,
+        effect_slot: u32,
+    },
+}
+
+/// 懒初始化的 GPU 离屏合成与后处理子引擎（常规无图层 UI 启动与运行期 0 成本）。
+pub(crate) struct GpuEffectsEngine {
+    pipeline: wgpu::RenderPipeline,
+    bgl: wgpu::BindGroupLayout,
+    uniform_buf: wgpu::Buffer,
+    uniform_capacity: usize,
+    pub(crate) pool: LayerTargetPool,
+    pub(crate) slots: Vec<EffectUniform>,
+    pub(crate) steps: Vec<GpuPassStep>,
+}
+
+impl GpuEffectsEngine {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target_format: wgpu::TextureFormat,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("velox_wgpu_effects_shader"),
+            source: wgpu::ShaderSource::Wgsl(EFFECTS_WGSL.into()),
+        });
+
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("velox_wgpu_effects_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(256),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("velox_wgpu_effects_pl"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+
+        // 混合逻辑完全在片元着色器中按 27 种 W3C 公式精确求值，直接覆写目标像素（BlendState::REPLACE）
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("velox_wgpu_effects_pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_fullscreen"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_effect"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let uniform_buf = Self::create_uniform_buf(device, INIT_EFFECT_SLOTS);
+        let pool = LayerTargetPool::new(device, queue, target_format);
+        Self {
+            pipeline,
+            bgl,
+            uniform_buf,
+            uniform_capacity: INIT_EFFECT_SLOTS,
+            pool,
+            slots: Vec::with_capacity(INIT_EFFECT_SLOTS),
+            steps: Vec::with_capacity(32),
+        }
+    }
+
+    fn create_uniform_buf(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("velox_wgpu_effects_uniforms"),
+            size: (capacity.max(1) * 256) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    pub(crate) fn begin_frame(&mut self) {
+        self.pool.begin_frame();
+        self.slots.clear();
+        self.steps.clear();
+    }
+
+    #[inline]
+    pub(crate) fn push_slot(&mut self, u: EffectUniform) -> u32 {
+        let idx = self.slots.len() as u32;
+        self.slots.push(u);
+        idx
+    }
+
+    /// 录制 Dual Kawase Blur 金字塔步骤：对 `src_idx` 纹理的 `[0..active_w, 0..active_h]` 执行平滑模糊，
+    /// 返回模糊结果的离屏纹理索引（有效区域同样位于 `[0..active_w, 0..active_h]`）。
+    pub(crate) fn plan_kawase_blur(
+        &mut self,
+        device: &wgpu::Device,
+        src_idx: usize,
+        active_w: u32,
+        active_h: u32,
+        blur_px: f32,
+        is_srgb: bool,
+    ) -> usize {
+        if blur_px < 0.5 || active_w == 0 || active_h == 0 {
+            return src_idx;
+        }
+        // 根据目标模糊半径自适应选择金字塔级数（1~4 级）与偏移步长
+        let levels: usize = if blur_px <= 3.0 {
+            1
+        } else if blur_px <= 10.0 {
+            2
+        } else if blur_px <= 26.0 {
+            3
+        } else {
+            4
+        };
+        let step_offset = (blur_px / ((1u32 << levels) as f32) * 1.15).clamp(0.5, 4.0);
+
+        let mut chain: Vec<(usize, u32, u32)> = Vec::with_capacity(levels + 1);
+        chain.push((src_idx, active_w, active_h));
+
+        // 1. Downsample 金字塔
+        let mut cur_w = active_w;
+        let mut cur_h = active_h;
+        for _ in 0..levels {
+            let next_w = (cur_w / 2).max(1);
+            let next_h = (cur_h / 2).max(1);
+            let dst_idx = self.pool.acquire(device, next_w, next_h);
+            let (prev_idx, pw, ph) = *chain.last().unwrap();
+            let src_tex_sz = (self.pool.get(prev_idx).width, self.pool.get(prev_idx).height);
+            let dst_tex_sz = (self.pool.get(dst_idx).width, self.pool.get(dst_idx).height);
+
+            let mut u = EffectUniform::default();
+            u.tex_sizes = [
+                dst_tex_sz.0 as f32,
+                dst_tex_sz.1 as f32,
+                src_tex_sz.0 as f32,
+                src_tex_sz.1 as f32,
+            ];
+            u.dst_rect = [0.0, 0.0, next_w as f32, next_h as f32];
+            u.src_rect = [0.0, 0.0, pw as f32, ph as f32];
+            u.params = [1.0, 0.0, EFFECT_KIND_KAWASE_DOWN, step_offset];
+            u.flags[3] = if is_srgb { 1.0 } else { 0.0 };
+            let slot = self.push_slot(u);
+            self.steps.push(GpuPassStep::Effect {
+                dst_idx,
+                clear_dst: true,
+                src_idx: prev_idx,
+                dst_snap_idx: prev_idx,
+                mask_path: None,
+                effect_slot: slot,
+            });
+            chain.push((dst_idx, next_w, next_h));
+            cur_w = next_w;
+            cur_h = next_h;
+        }
+
+        // 2. Upsample 金字塔（回升至原始 active_w × active_h）
+        let mut cur_idx = chain.last().unwrap().0;
+        let mut cw = chain.last().unwrap().1;
+        let mut ch = chain.last().unwrap().2;
+        for lvl in (0..levels).rev() {
+            let (_, target_w, target_h) = chain[lvl];
+            let out_idx = self.pool.acquire(device, target_w, target_h);
+            let src_tex_sz = (self.pool.get(cur_idx).width, self.pool.get(cur_idx).height);
+            let dst_tex_sz = (self.pool.get(out_idx).width, self.pool.get(out_idx).height);
+
+            let mut u = EffectUniform::default();
+            u.tex_sizes = [
+                dst_tex_sz.0 as f32,
+                dst_tex_sz.1 as f32,
+                src_tex_sz.0 as f32,
+                src_tex_sz.1 as f32,
+            ];
+            u.dst_rect = [0.0, 0.0, target_w as f32, target_h as f32];
+            u.src_rect = [0.0, 0.0, cw as f32, ch as f32];
+            u.params = [1.0, 0.0, EFFECT_KIND_KAWASE_UP, step_offset];
+            u.flags[3] = if is_srgb { 1.0 } else { 0.0 };
+            let slot = self.push_slot(u);
+            self.steps.push(GpuPassStep::Effect {
+                dst_idx: out_idx,
+                clear_dst: true,
+                src_idx: cur_idx,
+                dst_snap_idx: cur_idx,
+                mask_path: None,
+                effect_slot: slot,
+            });
+
+            if cur_idx != src_idx {
+                self.pool.release(cur_idx);
+            }
+            cur_idx = out_idx;
+            cw = target_w;
+            ch = target_h;
+        }
+
+        // 释放中间降采样级纹理（跳过 lvl 0 原输入和最后已释放的顶层）
+        for &(idx, _, _) in chain.iter().skip(1) {
+            if idx != cur_idx && idx != src_idx {
+                self.pool.release(idx);
+            }
+        }
+        cur_idx
+    }
+
+    /// 批量上传全部 `EffectUniform` 槽位并在单 `CommandEncoder` 内执行全部 `GpuPassStep`。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_steps(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        main_pipeline: &wgpu::RenderPipeline,
+        main_bind_group: &wgpu::BindGroup,
+        linear_sampler: &wgpu::Sampler,
+        target_view: &wgpu::TextureView,
+    ) {
+        if self.slots.len() > self.uniform_capacity {
+            self.uniform_capacity = self.slots.len().next_power_of_two();
+            self.uniform_buf = Self::create_uniform_buf(device, self.uniform_capacity);
+        }
+        if !self.slots.is_empty() {
+            queue.write_buffer(&self.uniform_buf, 0, pod_as_bytes(&self.slots));
+        }
+
+        // 预构建所有需要用到的 SVG Path R8Unorm 遮罩纹理
+        for step in &self.steps {
+            if let GpuPassStep::Effect {
+                mask_path: Some((path_d, mw, mh)),
+                ..
+            } = step
+            {
+                let _ = self.pool.ensure_path_mask(device, queue, path_d, *mw, *mh);
+            }
+        }
+
+        for step in &self.steps {
+            match step {
+                GpuPassStep::DrawBatch {
+                    target_idx,
+                    clear,
+                    viewport_slot,
+                    prim_start,
+                    prim_end,
+                } => {
+                    let view = &self.pool.get(*target_idx).view;
+                    let load = match *clear {
+                        Some(c) => wgpu::LoadOp::Clear(c),
+                        None => wgpu::LoadOp::Load,
+                    };
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("velox_layer_draw_batch"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                        multiview_mask: None,
+                    });
+                    if *prim_end > *prim_start {
+                        rpass.set_pipeline(main_pipeline);
+                        rpass.set_bind_group(0, main_bind_group, &[*viewport_slot * 256]);
+                        rpass.draw(0..6, *prim_start..*prim_end);
+                    }
+                }
+
+                GpuPassStep::CopyRect {
+                    src_idx,
+                    src_origin,
+                    dst_idx,
+                    dst_origin,
+                    size,
+                } => {
+                    if size.0 == 0 || size.1 == 0 {
+                        continue;
+                    }
+                    let src = self.pool.get(*src_idx);
+                    let dst = self.pool.get(*dst_idx);
+                    let cw = size
+                        .0
+                        .min(src.width.saturating_sub(src_origin.0))
+                        .min(dst.width.saturating_sub(dst_origin.0));
+                    let ch = size
+                        .1
+                        .min(src.height.saturating_sub(src_origin.1))
+                        .min(dst.height.saturating_sub(dst_origin.1));
+                    if cw == 0 || ch == 0 {
+                        continue;
+                    }
+                    encoder.copy_texture_to_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &src.texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d {
+                                x: src_origin.0,
+                                y: src_origin.1,
+                                z: 0,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &dst.texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d {
+                                x: dst_origin.0,
+                                y: dst_origin.1,
+                                z: 0,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::Extent3d {
+                            width: cw,
+                            height: ch,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+
+                GpuPassStep::Effect {
+                    dst_idx,
+                    clear_dst,
+                    src_idx,
+                    dst_snap_idx,
+                    mask_path,
+                    effect_slot,
+                } => {
+                    let mask_key = mask_path
+                        .as_ref()
+                        .map(|(path_d, mw, mh)| {
+                            self.pool.ensure_path_mask(device, queue, path_d, *mw, *mh)
+                        });
+                    let mask_view = self.pool.path_mask_view(mask_key);
+                    let src_view = &self.pool.get(*src_idx).view;
+                    let snap_view = &self.pool.get(*dst_snap_idx).view;
+                    let dst_view = &self.pool.get(*dst_idx).view;
+
+                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("velox_effect_bg"),
+                        layout: &self.bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: &self.uniform_buf,
+                                    offset: 0,
+                                    size: wgpu::BufferSize::new(256),
+                                }),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(src_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(snap_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(mask_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::Sampler(linear_sampler),
+                            },
+                        ],
+                    });
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("velox_effect_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: dst_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: if *clear_dst {
+                                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                                } else {
+                                    wgpu::LoadOp::Load
+                                },
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                        multiview_mask: None,
+                    });
+                    rpass.set_pipeline(&self.pipeline);
+                    rpass.set_bind_group(0, &bg, &[*effect_slot * 256]);
+                    rpass.draw(0..6, 0..1);
+                }
+
+                GpuPassStep::BlitToTarget {
+                    src_idx,
+                    effect_slot,
+                } => {
+                    let src_view = &self.pool.get(*src_idx).view;
+                    let mask_view = self.pool.white_mask_view();
+                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("velox_blit_bg"),
+                        layout: &self.bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: &self.uniform_buf,
+                                    offset: 0,
+                                    size: wgpu::BufferSize::new(256),
+                                }),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(src_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(src_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(mask_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::Sampler(linear_sampler),
+                            },
+                        ],
+                    });
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("velox_blit_to_target"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: target_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                        multiview_mask: None,
+                    });
+                    rpass.set_pipeline(&self.pipeline);
+                    rpass.set_bind_group(0, &bg, &[*effect_slot * 256]);
+                    rpass.draw(0..6, 0..1);
+                }
+            }
+        }
+    }
+}
+
+/// 将任意浮点逻辑/物理坐标包围盒安全钳位到 `[0..max_w, 0..max_h]`。
+#[inline]
+pub(crate) fn clamp_rect_u32(r: Region, max_w: u32, max_h: u32) -> (u32, u32, u32, u32) {
+    let x0 = (r.x.max(0) as u32).min(max_w);
+    let y0 = (r.y.max(0) as u32).min(max_h);
+    let x1 = (r.right().max(0) as u32).min(max_w);
+    let y1 = (r.bottom().max(0) as u32).min(max_h);
+    (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+}

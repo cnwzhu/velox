@@ -3,12 +3,18 @@
 use core::cell::Cell;
 use core::time::Duration;
 
+use crate::arena::StrRef;
+use crate::paint::{
+    BackdropFilter, BlendMode, ColorMatrix, ColorStop, CornerRadii, DropShadow, ExtendMode,
+    GradientSpace, LayerFilter, Paint, PaintEffects, Transform2D,
+};
 use crate::pod::{ActionScope, CursorShape, DragEvent, FrameScope};
 use crate::style::{AlignItems, Color, Easing, Edges, LoopMode, Style, StyleRefinement, Styled};
 
 use super::div_node::{
-    duration_to_ms, pack_visual_flags, DivInteractivity, DivNode, DivRareHandlers, DivStateStyles,
-    DivVisual, EnterFrom, TransitionSpec, FOCUS_BORDER_NONE, NO_FOCUS_BORDER_DIV_VISUAL,
+    duration_to_ms, pack_visual_flags, DivExtended, DivInteractivity, DivNode, DivRareHandlers,
+    DivStateStyles, DivVisual, EnterFrom, TransitionSpec, FOCUS_BORDER_NONE,
+    NO_FOCUS_BORDER_DIV_VISUAL,
 };
 use super::{Element, ElementNode, IntoElement};
 
@@ -20,8 +26,9 @@ impl<'a> IntoElement<'a> for Div<'a> {
             || self.hover_style.is_some()
             || self.active_style.is_some()
             || self.focus_style.is_some();
+        let has_effects = !self.effects.is_empty();
 
-        let alloc_visual = |state_styles: Option<&'a DivStateStyles<'a>>,
+        let alloc_visual = |extended: Option<&'a DivExtended<'a>>,
                             transition: Option<&'a TransitionSpec>|
          -> &'a DivVisual<'a> {
             let (pos_x, pos_y) = self.pos.unwrap_or((0, 0));
@@ -41,7 +48,7 @@ impl<'a> IntoElement<'a> for Div<'a> {
                 self.align_self,
             );
             &*cx.arena().alloc_temp(DivVisual {
-                state_styles,
+                extended,
                 transition,
                 margin: self.margin,
                 extra_padding: self.extra_padding,
@@ -80,8 +87,21 @@ impl<'a> IntoElement<'a> for Div<'a> {
             } else {
                 None
             };
+            let effects = if has_effects {
+                Some(&*cx.arena().alloc_temp(self.effects))
+            } else {
+                None
+            };
+            let extended = if state_styles.is_some() || effects.is_some() {
+                Some(&*cx.arena().alloc_temp(DivExtended {
+                    state_styles,
+                    effects,
+                }))
+            } else {
+                None
+            };
             let transition = self.transition.map(|t| &*cx.arena().alloc_temp(t));
-            Some(alloc_visual(state_styles, transition))
+            Some(alloc_visual(extended, transition))
         } else if let Some((fw, fc)) = self.focus_border {
             if fw == 0 && fc == Color::TRANSPARENT {
                 Some(&NO_FOCUS_BORDER_DIV_VISUAL)
@@ -243,6 +263,8 @@ pub struct Div<'a> {
     pub focus_style: Option<StyleRefinement>,
     /// 行容器内是否按子元素文本基线对齐（`items-baseline`）。
     pub items_baseline: bool,
+    /// 高级视觉特效包（多色标渐变、四角独立圆角、混合模式、模糊/色彩滤镜、毛玻璃、2D 变换与路径裁剪；未设置时零分配）。
+    pub effects: PaintEffects<'a>,
 }
 
 /// 构造一个基础弹性盒容器（完全复刻 HTML/Tailwind 的 `div` 直觉）。
@@ -291,6 +313,7 @@ pub fn div<'a>() -> Div<'a> {
         active_style: None,
         focus_style: None,
         items_baseline: false,
+        effects: PaintEffects::EMPTY,
     }
 }
 
@@ -323,6 +346,7 @@ impl<'a> Div<'a> {
             || self.active_style.is_some()
             || self.focus_style.is_some()
             || self.items_baseline
+            || !self.effects.is_empty()
     }
 
     #[inline(always)]
@@ -1241,6 +1265,289 @@ impl<'a> Div<'a> {
         } else {
             self.mr(px)
         }
+    }
+
+    // ========================================================================
+    // 高级渲染能力：四角独立圆角 / 多色标渐变 / 混合模式 / 滤镜 / 毛玻璃 / 2D 变换 / 路径裁剪
+    // ========================================================================
+
+    /// 设置四角独立圆角 `[tl, tr, br, bl]`。
+    #[inline(always)]
+    pub fn rounded_corners(mut self, radii: CornerRadii) -> Self {
+        self.effects.corner_radii = Some(radii);
+        self
+    }
+
+    /// 仅设置顶部两角圆角（底部直角）。
+    #[inline(always)]
+    pub fn rounded_t(self, r: u8) -> Self {
+        self.rounded_corners(CornerRadii::top(r))
+    }
+
+    /// 仅设置底部两角圆角（顶部直角）。
+    #[inline(always)]
+    pub fn rounded_b(self, r: u8) -> Self {
+        self.rounded_corners(CornerRadii::bottom(r))
+    }
+
+    /// 仅设置左侧两角圆角（右侧直角）。
+    #[inline(always)]
+    pub fn rounded_l(self, r: u8) -> Self {
+        self.rounded_corners(CornerRadii::left(r))
+    }
+
+    /// 仅设置右侧两角圆角（左侧直角）。
+    #[inline(always)]
+    pub fn rounded_r(self, r: u8) -> Self {
+        self.rounded_corners(CornerRadii::right(r))
+    }
+
+    /// 设置任意完整填充画刷 [`Paint`]（多色标 Linear / Radial / Conic 渐变或纯色）。
+    #[inline(always)]
+    pub fn bg_paint(mut self, paint: Paint<'a>) -> Self {
+        self.effects.bg_paint = Some(paint);
+        self
+    }
+
+    /// 设置多色标任意角度线性渐变（色标切片自动拷贝进帧级 `ScratchArena`，零堆分配）。
+    #[inline]
+    pub fn bg_linear_gradient(
+        mut self,
+        cx: &'a FrameScope,
+        angle_deg: f32,
+        stops: &[ColorStop],
+    ) -> Self {
+        let arena_stops = cx.arena().alloc_iter(stops.iter().copied());
+        self.effects.bg_paint = Some(Paint::linear_angle(angle_deg, arena_stops));
+        self
+    }
+
+    /// 设置多色标居中径向渐变。
+    #[inline]
+    pub fn bg_radial_gradient(mut self, cx: &'a FrameScope, stops: &[ColorStop]) -> Self {
+        let arena_stops = cx.arena().alloc_iter(stops.iter().copied());
+        self.effects.bg_paint = Some(Paint::radial(arena_stops));
+        self
+    }
+
+    /// 设置多色标双圆焦点径向渐变。
+    #[inline]
+    pub fn bg_radial_focal_gradient(
+        mut self,
+        cx: &'a FrameScope,
+        center: [f32; 2],
+        radius: f32,
+        focal: [f32; 2],
+        focal_radius: f32,
+        stops: &[ColorStop],
+    ) -> Self {
+        let arena_stops = cx.arena().alloc_iter(stops.iter().copied());
+        self.effects.bg_paint = Some(Paint::radial_focal(
+            center,
+            radius,
+            focal,
+            focal_radius,
+            arena_stops,
+        ));
+        self
+    }
+
+    /// 设置多色标锥形/扫描渐变（`start_angle_deg` 以 12 点钟方向为 `0°` 顺时针）。
+    #[inline]
+    pub fn bg_conic_gradient(
+        mut self,
+        cx: &'a FrameScope,
+        start_angle_deg: f32,
+        stops: &[ColorStop],
+    ) -> Self {
+        let arena_stops = cx.arena().alloc_iter(stops.iter().copied());
+        self.effects.bg_paint = Some(Paint::conic(start_angle_deg, arena_stops));
+        self
+    }
+
+    /// 修改已配置的背景渐变延展模式（`Pad` / `Repeat` / `Reflect`）。
+    #[inline]
+    pub fn bg_gradient_extend(mut self, mode: ExtendMode) -> Self {
+        if let Some(p) = self.effects.bg_paint {
+            self.effects.bg_paint = Some(p.with_extend(mode));
+        }
+        self
+    }
+
+    /// 修改已配置的背景渐变插值色彩空间（`Srgb` / `LinearRgb` / `Oklab`）。
+    #[inline]
+    pub fn bg_gradient_space(mut self, space: GradientSpace) -> Self {
+        if let Some(p) = self.effects.bg_paint {
+            self.effects.bg_paint = Some(p.with_space(space));
+        }
+        self
+    }
+
+    /// 设置图元/图层合成与混合模式（完整 27 种 Porter-Duff + W3C 混合模式）。
+    #[inline(always)]
+    pub fn blend_mode(mut self, mode: BlendMode) -> Self {
+        self.effects.blend_mode = mode;
+        self
+    }
+
+    /// 显式开启隔离合成图层（使 `.opacity(...)` 作为真正的 Group Opacity 合成，重叠子元素互不透底）。
+    #[inline(always)]
+    pub fn isolate(mut self) -> Self {
+        self.effects.isolate = true;
+        self
+    }
+
+    /// 设置完整图层后处理滤镜 [`LayerFilter`]。
+    #[inline(always)]
+    pub fn filter(mut self, filter: LayerFilter) -> Self {
+        self.effects.filter = filter;
+        self
+    }
+
+    /// 设置子树高斯/Kawase 模糊半径（逻辑像素）。
+    #[inline(always)]
+    pub fn blur(mut self, radius: u8) -> Self {
+        self.effects.filter.blur_radius = radius;
+        self
+    }
+
+    /// 叠加 4×5 色彩矩阵滤镜（可多次链式调用，自动矩阵右乘复合）。
+    #[inline]
+    pub fn color_matrix(mut self, matrix: ColorMatrix) -> Self {
+        self.effects.filter.color_matrix = Some(match self.effects.filter.color_matrix {
+            Some(prev) => prev.then(matrix),
+            None => matrix,
+        });
+        self
+    }
+
+    /// 灰度滤镜（`amount ∈ [0.0, 1.0]`）。
+    #[inline]
+    pub fn grayscale(self, amount: f32) -> Self {
+        self.color_matrix(ColorMatrix::grayscale(amount))
+    }
+
+    /// 怀旧棕褐滤镜（`amount ∈ [0.0, 1.0]`）。
+    #[inline]
+    pub fn sepia(self, amount: f32) -> Self {
+        self.color_matrix(ColorMatrix::sepia(amount))
+    }
+
+    /// 饱和度滤镜（`1.0` 不变，`0.0` 灰度，`> 1.0` 增艳）。
+    #[inline]
+    pub fn saturate(self, amount: f32) -> Self {
+        self.color_matrix(ColorMatrix::saturate(amount))
+    }
+
+    /// 亮度滤镜（`1.0` 不变）。
+    #[inline]
+    pub fn brightness(self, amount: f32) -> Self {
+        self.color_matrix(ColorMatrix::brightness(amount))
+    }
+
+    /// 对比度滤镜（`1.0` 不变）。
+    #[inline]
+    pub fn contrast(self, amount: f32) -> Self {
+        self.color_matrix(ColorMatrix::contrast(amount))
+    }
+
+    /// 色相旋转滤镜（角度制 `deg`）。
+    #[inline]
+    pub fn hue_rotate(self, deg: f32) -> Self {
+        self.color_matrix(ColorMatrix::hue_rotate(deg))
+    }
+
+    /// 反色滤镜（`amount ∈ [0.0, 1.0]`）。
+    #[inline]
+    pub fn invert(self, amount: f32) -> Self {
+        self.color_matrix(ColorMatrix::invert(amount))
+    }
+
+    /// 任意子树轮廓投影滤镜（CSS `filter: drop-shadow(...)`）。
+    #[inline(always)]
+    pub fn drop_shadow(mut self, blur: u8, offset_x: i8, offset_y: i8, color: Color) -> Self {
+        self.effects.filter.drop_shadow = Some(DropShadow::new(blur, offset_x, offset_y, color));
+        self
+    }
+
+    /// 设置完整实时背景滤镜 [`BackdropFilter`]。
+    #[inline(always)]
+    pub fn backdrop_filter(mut self, filter: BackdropFilter) -> Self {
+        self.effects.backdrop_filter = filter;
+        self
+    }
+
+    /// 开启实时背景毛玻璃模糊（CSS `backdrop-filter: blur(...)`）。
+    #[inline(always)]
+    pub fn backdrop_blur(mut self, radius: u8) -> Self {
+        self.effects.backdrop_filter.blur_radius = radius;
+        self
+    }
+
+    /// 一键开启现代 Acrylic / Vibrancy 毛玻璃材质（背景模糊 + 饱和度提亮 + 微颗粒 + 磨砂着色）。
+    #[inline]
+    pub fn backdrop_acrylic(mut self, blur_radius: u8, tint: Color) -> Self {
+        self.effects.backdrop_filter = BackdropFilter::acrylic(blur_radius, tint);
+        self
+    }
+
+    /// 叠加 2D 仿射变换（以容器自身中心为原点；支持多次链式复合）。
+    #[inline]
+    pub fn transform(mut self, t: Transform2D) -> Self {
+        self.effects.transform = Some(match self.effects.transform {
+            Some(prev) => prev.concat(t),
+            None => t,
+        });
+        self
+    }
+
+    /// 绕元素中心顺时针旋转（角度制 `deg`）。
+    #[inline]
+    pub fn rotate_deg(self, deg: f32) -> Self {
+        self.transform(Transform2D::rotate(deg))
+    }
+
+    /// 绕元素中心缩放 `(sx, sy)`。
+    #[inline]
+    pub fn scale(self, sx: f32, sy: f32) -> Self {
+        self.transform(Transform2D::scale(sx, sy))
+    }
+
+    /// 沿 `(tx, ty)` 平移视觉位置（不触发布局重排）。
+    #[inline]
+    pub fn translate(self, tx: f32, ty: f32) -> Self {
+        self.transform(Transform2D::translate(tx, ty))
+    }
+
+    /// 错切变换（角度制 `ax`, `ay`）。
+    #[inline]
+    pub fn skew(self, ax_deg: f32, ay_deg: f32) -> Self {
+        let mut s = self;
+        if ax_deg != 0.0 {
+            s = s.transform(Transform2D::skew_x(ax_deg));
+        }
+        if ay_deg != 0.0 {
+            s = s.transform(Transform2D::skew_y(ay_deg));
+        }
+        s
+    }
+
+    /// 使用任意静态 SVG Path 字符串（`d="..."`）对容器及子树执行抗锯齿矢量裁剪。
+    #[inline(always)]
+    pub fn clip_path(mut self, path_d: &'static str) -> Self {
+        self.effects.clip_path = Some(StrRef::Static(path_d));
+        self
+    }
+
+    /// 使用帧内动态 SVG Path 字符串对容器及子树执行抗锯齿矢量裁剪。
+    #[inline]
+    pub fn clip_path_str(mut self, cx: &'a FrameScope, path_d: &str) -> Self {
+        let buf = cx.arena().alloc_bytes(path_d.len());
+        buf.copy_from_slice(path_d.as_bytes());
+        // SAFETY: `buf` 刚刚完整拷贝自合法 UTF-8 `&str`
+        let s = unsafe { core::str::from_utf8_unchecked(buf) };
+        self.effects.clip_path = Some(StrRef::Scratch(s));
+        self
     }
 }
 

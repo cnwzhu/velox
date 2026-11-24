@@ -47,6 +47,38 @@ pub fn sqrt_f32(x: f32) -> f32 {
     }
 }
 
+/// 立方根（支持负数，供 OKLab 色彩空间转换使用）。
+#[inline]
+pub fn cbrt_f32(x: f32) -> f32 {
+    {
+        x.cbrt()
+    }
+}
+
+/// sRGB 通道值 `[0.0, 1.0]` 转线性光强 `[0.0, 1.0]`（IEC 61966-2-1）。
+#[inline]
+pub fn srgb_to_linear_f32(c: f32) -> f32 {
+    let x = c.clamp(0.0, 1.0);
+    if x <= 0.04045 {
+        return x / 12.92;
+    }
+    {
+        ((x + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// 线性光强 `[0.0, 1.0]` 转 sRGB 通道值 `[0.0, 1.0]`（IEC 61966-2-1）。
+#[inline]
+pub fn linear_to_srgb_f32(c: f32) -> f32 {
+    let x = c.clamp(0.0, 1.0);
+    if x <= 0.003_130_8 {
+        return x * 12.92;
+    }
+    {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 /// 同时计算 `(sin(rad), cos(rad))`。
 #[inline]
 pub fn sin_cos_f32(rad: f32) -> (f32, f32) {
@@ -214,6 +246,75 @@ impl Transform2D {
             self.a * x + self.c * y + self.e,
             self.b * x + self.d * y + self.f,
         )
+    }
+
+    /// 判断是否为单位变换矩阵。
+    #[inline(always)]
+    pub fn is_identity(self) -> bool {
+        abs_f32(self.a - 1.0) < 1e-6
+            && abs_f32(self.b) < 1e-6
+            && abs_f32(self.c) < 1e-6
+            && abs_f32(self.d - 1.0) < 1e-6
+            && abs_f32(self.e) < 1e-6
+            && abs_f32(self.f) < 1e-6
+    }
+
+    /// 绕指定中心 `(cx, cy)` 缩放 `(sx, sy)`。
+    #[inline]
+    pub fn scale_around(sx: f32, sy: f32, cx: f32, cy: f32) -> Self {
+        Self::translate(cx, cy)
+            .concat(Self::scale(sx, sy))
+            .concat(Self::translate(-cx, -cy))
+    }
+
+    /// 求 2D 仿射变换的逆矩阵（奇异矩阵返回 `None`）。
+    #[inline]
+    pub fn invert(self) -> Option<Self> {
+        let det = self.a * self.d - self.b * self.c;
+        if abs_f32(det) < 1e-8 || !det.is_finite() {
+            return None;
+        }
+        let inv = 1.0 / det;
+        let a = self.d * inv;
+        let b = -self.b * inv;
+        let c = -self.c * inv;
+        let d = self.a * inv;
+        let e = -(a * self.e + c * self.f);
+        let f = -(b * self.e + d * self.f);
+        Some(Self { a, b, c, d, e, f })
+    }
+
+    /// 计算逻辑矩形经当前仿射变换后的轴对齐外接包围盒（像素向外取整）。
+    #[inline]
+    pub fn transform_region(self, r: crate::solver::Region) -> crate::solver::Region {
+        if r.is_empty() {
+            return crate::solver::Region::EMPTY;
+        }
+        let x0 = r.x as f32;
+        let y0 = r.y as f32;
+        let x1 = r.right() as f32;
+        let y1 = r.bottom() as f32;
+        let p0 = self.apply(x0, y0);
+        let p1 = self.apply(x1, y0);
+        let p2 = self.apply(x0, y1);
+        let p3 = self.apply(x1, y1);
+        let min_x = p0.0.min(p1.0).min(p2.0).min(p3.0);
+        let max_x = p0.0.max(p1.0).max(p2.0).max(p3.0);
+        let min_y = p0.1.min(p1.1).min(p2.1).min(p3.1);
+        let max_y = p0.1.max(p1.1).max(p2.1).max(p3.1);
+        let rx0 = (floor_f32(min_x) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let ry0 = (floor_f32(min_y) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let rx1 = (ceil_f32(max_x) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let ry1 = (ceil_f32(max_y) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        crate::solver::Region::new(rx0, ry0, rx1.saturating_sub(rx0), ry1.saturating_sub(ry0))
+    }
+
+    /// 将当前绕局部中心 `(cx, cy)` 表达的变换转换到屏幕空间（`T(cx,cy) * self * T(-cx,-cy)`）。
+    #[inline]
+    pub fn centered_at(self, cx: f32, cy: f32) -> Self {
+        Self::translate(cx, cy)
+            .concat(self)
+            .concat(Self::translate(-cx, -cy))
     }
 
     /// 估算该仿射变换对应的平均各向同性缩放系数（用于缩放 `stroke-width`）。

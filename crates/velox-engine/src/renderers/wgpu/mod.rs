@@ -10,8 +10,11 @@
 pub use ::wgpu;
 
 mod atlas;
+mod effects_pass;
+mod layer_pool;
 mod offscreen;
 mod pipeline;
+mod ramp;
 mod window;
 
 pub use offscreen::WgpuOffscreenRenderer;
@@ -30,7 +33,7 @@ use crate::renderers::software::compute_unoccluded_clip;
 use crate::solver::Region;
 use crate::style::Color;
 
-/// 单个 2D GPU 渲染图元实例（严格对齐 GPU 128B Cache Line 与 WGSL `std430`，`8 × vec4<f32> = 128 Bytes`）。
+/// 单个 2D GPU 渲染图元实例（严格对齐 GPU 64B Cache Line 与 WGSL `std430`，`12 × vec4<f32> = 192 Bytes`）。
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct GpuPrimitive {
@@ -42,7 +45,7 @@ pub struct GpuPrimitive {
     pub uv: [f32; 4],
     /// 主填充色 / 文本色 / 阴影色 / `Arc` 轨道色（直通 RGBA `[0.0..=1.0]`）。
     pub color0: [f32; 4],
-    /// 线性渐变终点色 / `Arc` 填充色（直通 RGBA `[0.0..=1.0]`）。
+    /// 2 色线性渐变终点色 / `Arc` 填充色（直通 RGBA `[0.0..=1.0]`）。
     pub color1: [f32; 4],
     /// 边框颜色（直通 RGBA `[0.0..=1.0]`）。
     pub border_color: [f32; 4],
@@ -50,8 +53,16 @@ pub struct GpuPrimitive {
     /// - `kind`: `0.0` = Quad，`1.0` = SoftShadow，`2.0` = Glyph，`3.0` = Sprite，`4.0` = Arc；
     /// - `horiz_grad`: `1.0` = 水平渐变，`0.0` = 垂直渐变。
     pub params: [f32; 4],
-    /// 扩展参数：`[clip_radius, 0.0, 0.0, 0.0]`（`clip_radius > 0` 时对 `clip` 启用抗锯齿圆角 SDF 裁切）。
+    /// `[clip_radius, grad_kind(0=2color,1=linear,2=radial,3=conic), ramp_v, extend_mode(0=pad,1=repeat,2=reflect)]`。
     pub extra: [f32; 4],
+    /// 四角独立圆角 `[tl, tr, br, bl]`（物理像素）。
+    pub radii: [f32; 4],
+    /// 渐变几何参数 A（Linear:`[sx,sy,ex,ey]`；Radial:`[cx,cy,r1,fx]`；Conic:`[cx,cy,start_rad,sweep_rad]`）。
+    pub grad_a: [f32; 4],
+    /// 渐变几何参数 B 与 2D 变换平移量 `[fy, r0, tx_px, ty_px]`。
+    pub grad_b: [f32; 4],
+    /// 2D 仿射变换逆线性矩阵 `[inv_a, inv_b, inv_c, inv_d]`（无变换时为单位阵 `[1.0, 0.0, 0.0, 1.0]`）。
+    pub xform: [f32; 4],
 }
 
 pub(crate) const KIND_QUAD: f32 = 0.0;
@@ -59,6 +70,7 @@ pub(crate) const KIND_SHADOW: f32 = 1.0;
 pub(crate) const KIND_GLYPH: f32 = 2.0;
 pub(crate) const KIND_SPRITE: f32 = 3.0;
 pub(crate) const KIND_ARC: f32 = 4.0;
+pub(crate) const IDENTITY_XFORM: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
@@ -116,6 +128,10 @@ pub(crate) fn make_quad_primitive(
             if horiz_grad { 1.0 } else { 0.0 },
         ],
         extra: [clip_radius, 0.0, 0.0, 0.0],
+        radii: [corner_radius; 4],
+        grad_a: [0.0; 4],
+        grad_b: [0.0; 4],
+        xform: IDENTITY_XFORM,
     }
 }
 
@@ -137,6 +153,10 @@ pub(crate) fn make_shadow_primitive(
         border_color: [0.0; 4],
         params: [corner_radius, blur_radius, KIND_SHADOW, 0.0],
         extra: [clip_radius, 0.0, 0.0, 0.0],
+        radii: [corner_radius; 4],
+        grad_a: [0.0; 4],
+        grad_b: [0.0; 4],
+        xform: IDENTITY_XFORM,
     }
 }
 
@@ -166,7 +186,113 @@ pub(crate) fn make_arc_primitive(
         border_color: [0.0; 4],
         params: [0.0, 0.0, KIND_ARC, 0.0],
         extra: [clip_radius, 0.0, 0.0, 0.0],
+        radii: [0.0; 4],
+        grad_a: [0.0; 4],
+        grad_b: [0.0; 4],
+        xform: IDENTITY_XFORM,
     }
+}
+
+/// 构造高级 [`crate::paint::StyledQuad`] 对应的 GPU 图元（四角独立圆角 + 多色标渐变 LUT + 2D 仿射变换）。
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn make_styled_quad_primitive(
+    bounds: [f32; 4],
+    clip: [f32; 4],
+    clip_radius: f32,
+    sq: &crate::paint::StyledQuad<'_>,
+    scale: f32,
+    ramp_v: Option<f32>,
+) -> Option<GpuPrimitive> {
+    let radii = [
+        (sq.radii.tl as f32) * scale,
+        (sq.radii.tr as f32) * scale,
+        (sq.radii.br as f32) * scale,
+        (sq.radii.bl as f32) * scale,
+    ];
+    let bw = if sq.border_width == 0 {
+        0.0
+    } else {
+        ((sq.border_width as f32) * scale).round().max(1.0)
+    };
+    let (xform, tx, ty) = if let Some(t) = sq.transform {
+        if !t.is_identity() {
+            let linear_only = crate::paint::Transform2D::new(t.a, t.b, t.c, t.d, 0.0, 0.0);
+            let inv = linear_only.invert()?;
+            ([inv.a, inv.b, inv.c, inv.d], t.e * scale, t.f * scale)
+        } else {
+            (IDENTITY_XFORM, 0.0, 0.0)
+        }
+    } else {
+        (IDENTITY_XFORM, 0.0, 0.0)
+    };
+
+    let (color0, color1, grad_kind, grad_a, grad_b, extend_f) = match sq.paint {
+        crate::paint::Paint::Solid(c) => {
+            let cf = color_to_f32(c.scale_alpha(sq.opacity));
+            (cf, cf, 0.0, [0.0; 4], [0.0, 0.0, tx, ty], 0.0)
+        }
+        crate::paint::Paint::LinearGradient {
+            start, end, extend, ..
+        } => (
+            [0.0; 4],
+            [0.0; 4],
+            1.0,
+            [start[0], start[1], end[0], end[1]],
+            [0.0, 0.0, tx, ty],
+            extend as u8 as f32,
+        ),
+        crate::paint::Paint::RadialGradient {
+            center,
+            radius,
+            focal,
+            focal_radius,
+            extend,
+            ..
+        } => (
+            [0.0; 4],
+            [0.0; 4],
+            2.0,
+            [center[0], center[1], radius, focal[0]],
+            [focal[1], focal_radius, tx, ty],
+            extend as u8 as f32,
+        ),
+        crate::paint::Paint::ConicGradient {
+            center,
+            start_angle_deg,
+            sweep_deg,
+            extend,
+            ..
+        } => {
+            let start_rad = (start_angle_deg * (core::f32::consts::PI / 180.0))
+                .rem_euclid(core::f32::consts::TAU);
+            let sweep_rad = (sweep_deg.abs().max(1e-3) * (core::f32::consts::PI / 180.0))
+                .min(core::f32::consts::TAU);
+            (
+                [0.0; 4],
+                [0.0; 4],
+                3.0,
+                [center[0], center[1], start_rad, sweep_rad],
+                [0.0, 0.0, tx, ty],
+                extend as u8 as f32,
+            )
+        }
+    };
+
+    Some(GpuPrimitive {
+        bounds,
+        clip,
+        uv: [0.0; 4],
+        color0,
+        color1,
+        border_color: color_to_f32(sq.border_color),
+        params: [sq.radii.max_radius() as f32 * scale, bw, KIND_QUAD, 0.0],
+        extra: [clip_radius, grad_kind, ramp_v.unwrap_or(0.0), extend_f],
+        radii,
+        grad_a,
+        grad_b,
+        xform,
+    })
 }
 
 /// 将逻辑矩形按分数/整数 `scale` 映射并对齐至物理像素边界（Pixel Snapping）。
@@ -378,6 +504,13 @@ impl WgpuScene {
                     DrawPayload::Sprite(_) => {
                         self.sprite_count += 1;
                     }
+                    DrawPayload::StyledQuad(sq) => {
+                        if let Some(prim) = make_styled_quad_primitive(sb, sc, cr, sq, s, None) {
+                            self.quad_count += 1;
+                            self.primitives.push(prim);
+                        }
+                    }
+                    DrawPayload::PushLayer(_) | DrawPayload::PopLayer => {}
                 }
             }
         }

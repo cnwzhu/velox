@@ -3,6 +3,7 @@
 mod buttons;
 mod data;
 mod editor;
+mod effects;
 mod feedback;
 mod icons_settings;
 mod inputs;

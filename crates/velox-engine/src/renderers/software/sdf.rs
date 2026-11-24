@@ -116,12 +116,43 @@ pub fn opaque_core_rect(op: &DrawOp<'_>) -> Region {
         {
             op.bounds.intersect(op.clip)
         }
+        DrawPayload::StyledQuad(sq)
+            if sq.blend_mode.is_normal()
+                && sq.transform.is_none()
+                && sq.opacity == 255
+                && sq.paint.is_fully_opaque() =>
+        {
+            let max_r = sq.radii.max_radius() as i16;
+            let bw = sq.border_width as i16;
+            let inset = if bw > 0 && sq.border_color.a() < 255 {
+                max_r.max(bw)
+            } else {
+                max_r
+            };
+            let inner_w = op.bounds.w.saturating_sub(inset.saturating_mul(2));
+            let inner_h = op.bounds.h.saturating_sub(inset.saturating_mul(2));
+            if inner_w <= 0 || inner_h <= 0 {
+                Region::EMPTY
+            } else {
+                Region::new(
+                    op.bounds.x.saturating_add(inset),
+                    op.bounds.y.saturating_add(inset),
+                    inner_w,
+                    inner_h,
+                )
+                .intersect(op.clip)
+            }
+        }
         _ => Region::EMPTY,
     }
 }
 
 /// 在 Pass 4 末尾预先对全帧 `DrawOp` 执行一次前向遮挡裁剪，收缩或清空被上层全覆盖的不透明图层裁剪框。
 pub fn precompute_occlusion_clips(ops: &mut [DrawOp<'_>]) {
+    // 若本帧包含隔离合成图层、毛玻璃或可编程混合模式，则保留各节点原始裁剪框，避免误裁剪毛玻璃/混合模式依赖的下层像素。
+    if super::effects::ops_have_layers_or_blend(ops) {
+        return;
+    }
     let len = ops.len();
     for idx in 0..len {
         let base_clip = ops[idx].clip.intersect(ops[idx].bounds);
@@ -136,8 +167,11 @@ pub fn precompute_occlusion_clips(ops: &mut [DrawOp<'_>]) {
         }
         // `TextRun` 需保留父级裁剪盒（仅裁剪上层遮挡）以便在 1.25x/1.50x/1.75x 分数 DPI 下
         // 按实际物理字号自由扩展单行宽而不被 1x 逻辑 `bounds` 切掉末尾字符；
-        // 带圆角裁切（`clip_radius > 0`）的节点亦保留原父级圆角裁剪盒避免四角中心错位。
-        if matches!(ops[idx].payload, DrawPayload::TextRun { .. }) || ops[idx].clip_radius > 0 {
+        // 带圆角裁切（`clip_radius > 0`）或 2D 变换的节点亦保留原父级裁剪盒。
+        let keep_parent_clip = matches!(ops[idx].payload, DrawPayload::TextRun { .. })
+            || matches!(ops[idx].payload, DrawPayload::StyledQuad(sq) if sq.transform.is_some())
+            || ops[idx].clip_radius > 0;
+        if keep_parent_clip {
             ops[idx].clip = compute_unoccluded_clip(ops[idx].clip, &ops[(idx + 1)..]);
         } else {
             ops[idx].clip = unoccluded;

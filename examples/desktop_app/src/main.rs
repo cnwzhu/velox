@@ -4,7 +4,7 @@
 //! - 默认 / `--window`：启动原生桌面画廊窗口（Windows / macOS / Linux Pure Wayland，默认启用 `wgpu` 2D SDF GPU 硬件加速）；
 //! - `--software`：运行时切换至内置软件光栅渲染器（`DesktopRenderBackend::Software`）；
 //! - `--light`：以亮色主题（`ThemeMode::Light`）启动画廊；
-//! - `--story <name>`：直接打开指定故事页（`overview` / `buttons` / `selection` / `sliders` / `inputs` / `navigation` / `editor` / `overlays` / `feedback` / `data` / `icons`）；
+//! - `--story <name>`：直接打开指定故事页（`overview` / `buttons` / `selection` / `sliders` / `inputs` / `navigation` / `editor` / `overlays` / `feedback` / `data` / `icons` / `effects`）；
 //! - `--lang <en|zh|ja>`：指定初始显示语言；
 //! - `--scale <1|2>`：设置 HiDPI 缩放倍率（默认 `2`）；
 //! - `--save-png <path>`：渲染首帧并导出无损 PNG 画廊快照；

@@ -2,6 +2,7 @@
 
 use core::time::Duration;
 
+use crate::paint::PaintEffects;
 use crate::pod::{ActionScope, CursorShape};
 use crate::style::{AlignItems, Color, Easing, Edges, LoopMode, Style, StyleRefinement};
 
@@ -66,10 +67,17 @@ pub struct DivStateStyles<'a> {
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::size_of::<DivStateStyles<'static>>() == 32);
 
+/// 冷路径二级扩展包（仅 16 字节，按需挂在 [`DivVisual`] 上以同时保持 `DivVisual == 64B` 与 `DivStateStyles == 32B`）。
+#[derive(Copy, Clone, Debug, Default)]
+pub struct DivExtended<'a> {
+    pub state_styles: Option<&'a DivStateStyles<'a>>,
+    pub effects: Option<&'a PaintEffects<'a>>,
+}
+
 /// 按需分配在 [`crate::arena::ScratchArena`] 中的扩展视觉与布局约束属性（严格紧凑 **64 字节**，零对齐空洞）。
 #[derive(Copy, Clone, Debug)]
 pub struct DivVisual<'a> {
-    pub state_styles: Option<&'a DivStateStyles<'a>>,
+    pub extended: Option<&'a DivExtended<'a>>,
     pub transition: Option<&'a TransitionSpec>,
     pub margin: Edges<i16>,
     pub extra_padding: Edges<i16>,
@@ -171,7 +179,7 @@ impl<'a> DivVisual<'a> {
 }
 
 static DEFAULT_DIV_VISUAL: DivVisual<'static> = DivVisual {
-    state_styles: None,
+    extended: None,
     transition: None,
     margin: Edges::all(0),
     extra_padding: Edges::all(0),
@@ -195,7 +203,7 @@ static DEFAULT_DIV_VISUAL: DivVisual<'static> = DivVisual {
 
 /// 仅禁用了默认焦点边框（`.no_focus_border()`）的零分配共享只读扩展节点。
 pub(super) static NO_FOCUS_BORDER_DIV_VISUAL: DivVisual<'static> = DivVisual {
-    state_styles: None,
+    extended: None,
     transition: None,
     margin: Edges::all(0),
     extra_padding: Edges::all(0),
@@ -261,8 +269,18 @@ impl<'a> core::ops::Deref for DivNode<'a> {
 
 impl<'a> DivNode<'a> {
     #[inline(always)]
+    pub fn state_styles(&self) -> Option<&'a DivStateStyles<'a>> {
+        self.extended.and_then(|e| e.state_styles)
+    }
+
+    #[inline(always)]
+    pub fn effects(&self) -> Option<&'a PaintEffects<'a>> {
+        self.extended.and_then(|e| e.effects)
+    }
+
+    #[inline(always)]
     pub fn text_color(&self) -> Option<Color> {
-        self.state_styles.and_then(|s| {
+        self.state_styles().and_then(|s| {
             if (s.flags & STATE_FLAG_HAS_TEXT_COLOR) != 0 {
                 Some(s.text_color)
             } else {
@@ -273,23 +291,23 @@ impl<'a> DivNode<'a> {
 
     #[inline(always)]
     pub fn text_size(&self) -> Option<u8> {
-        self.state_styles
+        self.state_styles()
             .and_then(|s| if s.text_size > 0 { Some(s.text_size) } else { None })
     }
 
     #[inline(always)]
     pub fn hover_style(&self) -> Option<StyleRefinement> {
-        self.state_styles.and_then(|s| s.hover_style.copied())
+        self.state_styles().and_then(|s| s.hover_style.copied())
     }
 
     #[inline(always)]
     pub fn active_style(&self) -> Option<StyleRefinement> {
-        self.state_styles.and_then(|s| s.active_style.copied())
+        self.state_styles().and_then(|s| s.active_style.copied())
     }
 
     #[inline(always)]
     pub fn focus_style(&self) -> Option<StyleRefinement> {
-        self.state_styles.and_then(|s| s.focus_style.copied())
+        self.state_styles().and_then(|s| s.focus_style.copied())
     }
 
     #[inline(always)]

@@ -34,6 +34,10 @@ pub use crate::i18n::{
     StaticLocaleTable, TextDirection,
 };
 pub use crate::motion::{DrawOp, DrawPayload, MotionCache, MotionState, Presence, Tween};
+pub use crate::paint::{
+    BackdropFilter, BlendMode, ColorMatrix, ColorStop, CornerRadii, DropShadow, ExtendMode,
+    GradientSpace, LayerFilter, LayerSpec, Paint, PaintEffects, StyledQuad,
+};
 pub use crate::platform::{
     clipboard_has_text, clipboard_read_into, clipboard_write_text, AsyncPlatform,
     AsyncPlatformSurface, DesktopRenderBackend, FlushReport, Platform, PlatformControlFlow,
@@ -60,5 +64,5 @@ pub use crate::style::{
 };
 pub use crate::svg::{
     parse_svg_color, parse_svg_viewbox, SvgFillRule, SvgLineCap, SvgLineJoin, SvgRenderOptions,
-    SvgViewBox,
+    SvgViewBox, Transform2D,
 };

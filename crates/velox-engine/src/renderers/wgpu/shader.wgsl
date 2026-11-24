@@ -4,15 +4,19 @@ struct ViewportUniform {
     _pad: f32,
 };
 
-// 严格 128 Bytes（8 × vec4<f32>），对齐 GPU Cache Line 与 WGSL std430：
+// 严格 192 Bytes（12 × vec4<f32>），对齐 GPU Cache Line 与 WGSL std430：
 // - bounds:       [x, y, w, h]
 // - clip:         [x0, y0, x1, y1]
 // - uv:           Glyph/Sprite 为 [u0, v0, u1, v1]；Arc 为 [start_rad, sweep_rad, fill_sweep_rad, thickness_px]
 // - color0:       主填充色 / 文本色 / 阴影色 / Arc 轨道色
-// - color1:       渐变终点色 / Arc 填充进度色
+// - color1:       2色渐变终点色 / Arc 填充进度色
 // - border_color: 边框颜色
-// - params:       [corner_radius, border_or_blur, kind, horiz_grad]
-// - extra:        [clip_radius, 0, 0, 0]
+// - params:       [corner_radius_legacy, border_or_blur, kind, horiz_grad]
+// - extra:        [clip_radius, grad_kind(0=2color,1=linear,2=radial,3=conic), ramp_v, extend_mode(0=pad,1=repeat,2=reflect)]
+// - radii:        四角独立圆角 [tl, tr, br, bl]
+// - grad_a:       Linear:[sx,sy,ex,ey]; Radial:[cx,cy,r1,fx]; Conic:[cx,cy,start_rad,sweep_rad]
+// - grad_b:       [fy, r0, tx_px, ty_px]（后两位兼任 2D 仿射平移分量）
+// - xform:        2D 仿射变换逆线性矩阵 [inv_a, inv_b, inv_c, inv_d]（默认单位阵 [1, 0, 0, 1]）
 struct Primitive {
     bounds: vec4<f32>,
     clip: vec4<f32>,
@@ -22,6 +26,10 @@ struct Primitive {
     border_color: vec4<f32>,
     params: vec4<f32>,
     extra: vec4<f32>,
+    radii: vec4<f32>,
+    grad_a: vec4<f32>,
+    grad_b: vec4<f32>,
+    xform: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> viewport: ViewportUniform;
@@ -29,6 +37,8 @@ struct Primitive {
 @group(0) @binding(2) var glyph_tex: texture_2d<f32>;
 @group(0) @binding(3) var sprite_tex: texture_2d<f32>;
 @group(0) @binding(4) var atlas_sampler: sampler;
+@group(0) @binding(5) var ramp_tex: texture_2d<f32>;
+@group(0) @binding(6) var linear_sampler: sampler;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -41,15 +51,12 @@ fn vs_main(
     @builtin(instance_index) iid: u32,
 ) -> VsOut {
     let prim = primitives[iid];
-    let p0 = max(prim.bounds.xy, prim.clip.xy);
-    let p1 = min(prim.bounds.xy + prim.bounds.zw, prim.clip.zw);
-
-    var out: VsOut;
-    out.idx = iid;
-    if (p0.x >= p1.x || p0.y >= p1.y) {
-        out.pos = vec4<f32>(-2.0, -2.0, 0.0, 1.0);
-        return out;
-    }
+    let has_xform = abs(prim.xform.x - 1.0) > 0.0001
+        || abs(prim.xform.y) > 0.0001
+        || abs(prim.xform.z) > 0.0001
+        || abs(prim.xform.w - 1.0) > 0.0001
+        || abs(prim.grad_b.z) > 0.0001
+        || abs(prim.grad_b.w) > 0.0001;
 
     var corner = vec2<f32>(0.0, 0.0);
     switch (vid) {
@@ -61,7 +68,45 @@ fn vs_main(
         default: { corner = vec2<f32>(1.0, 1.0); }
     }
 
-    let px = mix(p0, p1, corner);
+    var out: VsOut;
+    out.idx = iid;
+
+    var px = vec2<f32>(0.0, 0.0);
+    if (!has_xform) {
+        let p0 = max(prim.bounds.xy, prim.clip.xy);
+        let p1 = min(prim.bounds.xy + prim.bounds.zw, prim.clip.zw);
+        if (p0.x >= p1.x || p0.y >= p1.y) {
+            out.pos = vec4<f32>(-2.0, -2.0, 0.0, 1.0);
+            return out;
+        }
+        px = mix(p0, p1, corner);
+    } else {
+        // 由 2x2 逆线性矩阵还原正向线性矩阵，精确变换四角并外扩 2px 抗锯齿余量
+        let ia = prim.xform.x;
+        let ib = prim.xform.y;
+        let ic = prim.xform.z;
+        let id = prim.xform.w;
+        let det = ia * id - ib * ic;
+        if (abs(det) < 0.000001) {
+            out.pos = vec4<f32>(-2.0, -2.0, 0.0, 1.0);
+            return out;
+        }
+        let inv_det = 1.0 / det;
+        let fa = id * inv_det;
+        let fb = -ib * inv_det;
+        let fc = -ic * inv_det;
+        let fd = ia * inv_det;
+
+        let half_s = prim.bounds.zw * 0.5;
+        let center = prim.bounds.xy + half_s;
+        let screen_center = center + prim.grad_b.zw;
+        let local_rel = (corner - vec2<f32>(0.5, 0.5)) * (prim.bounds.zw + vec2<f32>(4.0, 4.0));
+        px = screen_center + vec2<f32>(
+            fa * local_rel.x + fc * local_rel.y,
+            fb * local_rel.x + fd * local_rel.y,
+        );
+    }
+
     let ndc = vec2<f32>(
         (px.x / max(viewport.size.x, 1.0)) * 2.0 - 1.0,
         1.0 - (px.y / max(viewport.size.y, 1.0)) * 2.0,
@@ -95,6 +140,124 @@ fn sdf_rounded_box(p: vec2<f32>, center: vec2<f32>, half_size: vec2<f32>, radius
     return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
+// 四角独立圆角 SDF：radii = [tl, tr, br, bl]
+fn sdf_rounded_box_4(p: vec2<f32>, center: vec2<f32>, half_size: vec2<f32>, radii: vec4<f32>) -> f32 {
+    let rel = p - center;
+    let r_pair = select(radii.yz, radii.xw, rel.x < 0.0); // [tr, br] or [tl, bl]
+    let raw_r = select(r_pair.y, r_pair.x, rel.y < 0.0);
+    let r = clamp(raw_r, 0.0, min(half_size.x, half_size.y));
+    let q = abs(rel) - (half_size - vec2<f32>(r));
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+// Interleaved Gradient Noise（Jimenez 2014）：消除 8-bit 渐变与大阴影色带（banding）
+fn ign_dither(p: vec2<f32>) -> f32 {
+    let magic = vec3<f32>(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(p, magic.xy))) - 0.5;
+}
+
+fn apply_extend_mode(t: f32, mode: f32) -> f32 {
+    if (mode > 1.5) {
+        // Reflect
+        let f = fract(t * 0.5) * 2.0;
+        return clamp(select(2.0 - f, f, f <= 1.0), 0.0, 1.0);
+    } else if (mode > 0.5) {
+        // Repeat
+        return clamp(fract(t), 0.0, 1.0);
+    }
+    return clamp(t, 0.0, 1.0);
+}
+
+fn sample_gradient_ramp(prim: Primitive, lp: vec2<f32>, screen_p: vec2<f32>) -> vec4<f32> {
+    let u = (lp.x - prim.bounds.x) / max(prim.bounds.z, 1.0);
+    let v = (lp.y - prim.bounds.y) / max(prim.bounds.w, 1.0);
+    let gk = prim.extra.y;
+    let ext = prim.extra.w;
+
+    var t_raw = 0.0;
+    var valid = true;
+
+    if (gk < 1.5) {
+        // 1 = Linear Gradient
+        let s = prim.grad_a.xy;
+        let e = prim.grad_a.zw;
+        let d = e - s;
+        let denom = dot(d, d);
+        if (denom > 0.0000001) {
+            t_raw = dot(vec2<f32>(u, v) - s, d) / denom;
+        }
+    } else if (gk < 2.5) {
+        // 2 = Radial Gradient（支持同心圆与双圆焦点偏移）
+        let c = prim.grad_a.xy;
+        let r1 = max(prim.grad_a.z, 0.00001);
+        let f = vec2<f32>(prim.grad_a.w, prim.grad_b.x);
+        let r0 = max(prim.grad_b.y, 0.0);
+        let cd = c - f;
+        if (dot(cd, cd) < 0.000001 && r0 < 0.000001) {
+            t_raw = length(vec2<f32>(u, v) - c) / r1;
+        } else {
+            let dp = vec2<f32>(u, v) - f;
+            let dr = r1 - r0;
+            let a = dot(cd, cd) - dr * dr;
+            let b = -2.0 * (dot(dp, cd) + r0 * dr);
+            let ct = dot(dp, dp) - r0 * r0;
+            if (abs(a) < 0.000001) {
+                if (abs(b) < 0.000001) {
+                    valid = false;
+                } else {
+                    t_raw = -ct / b;
+                }
+            } else {
+                let disc = b * b - 4.0 * a * ct;
+                if (disc < 0.0) {
+                    valid = false;
+                } else {
+                    let sd = sqrt(disc);
+                    let t_hi = (-b + sd) / (2.0 * a);
+                    let t_lo = (-b - sd) / (2.0 * a);
+                    if (r0 + t_hi * dr >= 0.0) {
+                        t_raw = t_hi;
+                    } else if (r0 + t_lo * dr >= 0.0) {
+                        t_raw = t_lo;
+                    } else {
+                        valid = false;
+                    }
+                }
+            }
+        }
+    } else {
+        // 3 = Conic Gradient（12 点钟方向 0 rad 顺时针）
+        let c = prim.grad_a.xy;
+        let dp = vec2<f32>(u, v) - c;
+        let tau = 6.28318530718;
+        var ang = atan2(dp.x, -dp.y);
+        if (ang < 0.0) {
+            ang = ang + tau;
+        }
+        var rel = ang - prim.grad_a.z;
+        if (rel < 0.0) {
+            rel = rel + tau;
+        }
+        t_raw = rel / max(prim.grad_a.w, 0.0001);
+    }
+
+    if (!valid) {
+        return vec4<f32>(0.0);
+    }
+
+    let t = apply_extend_mode(t_raw, ext);
+    let ramp_u = (0.5 + t * 255.0) / 256.0;
+    let raw_col = textureSampleLevel(ramp_tex, linear_sampler, vec2<f32>(ramp_u, prim.extra.z), 0.0);
+    let dither = ign_dither(screen_p) / 255.0;
+    let dithered = vec4<f32>(
+        clamp(raw_col.r + dither, 0.0, 1.0),
+        clamp(raw_col.g + dither, 0.0, 1.0),
+        clamp(raw_col.b + dither, 0.0, 1.0),
+        raw_col.a,
+    );
+    return maybe_to_linear_straight(dithered);
+}
+
 // Evan Wallace (Figma), "Fast Rounded Rectangle Shadows" (2018):
 // 高精度误差函数 erf(x) 近似（向量化版本，最大误差 < 0.001）
 fn erf_vec2(x: vec2<f32>) -> vec2<f32> {
@@ -110,7 +273,6 @@ fn gaussian(x: f32, sigma: f32) -> f32 {
     return exp(-0.5 * inv * inv) / (2.50662827 * sigma);
 }
 
-// 给定纵向偏移 y，沿 X 轴求高斯核与圆角盒截面的解析积分
 fn rounded_box_shadow_x(x: f32, y: f32, sigma: f32, corner: f32, half_size: vec2<f32>) -> f32 {
     let delta = min(half_size.y - corner - abs(y), 0.0);
     let curved = half_size.x - corner + sqrt(max(0.0, corner * corner - delta * delta));
@@ -118,7 +280,6 @@ fn rounded_box_shadow_x(x: f32, y: f32, sigma: f32, corner: f32, half_size: vec2
     return integral.y - integral.x;
 }
 
-// 4 点高斯积分求圆角矩形与 2D 高斯核的精确解析卷积阴影
 fn rounded_box_shadow(center: vec2<f32>, half_size: vec2<f32>, p: vec2<f32>, sigma: f32, corner: f32) -> f32 {
     let pt = p - center;
     let low = pt.y - half_size.y;
@@ -142,7 +303,6 @@ fn rounded_box_shadow(center: vec2<f32>, half_size: vec2<f32>, p: vec2<f32>, sig
 fn sdf_arc_round(rel: vec2<f32>, r_arc: f32, half_thick: f32, start_rad: f32, sweep_rad: f32) -> f32 {
     let half_span = sweep_rad * 0.5;
     let mid = start_rad + half_span;
-    // 12 点钟顺时针方向向量：(sin(a), -cos(a))
     let dir_mid = vec2<f32>(sin(mid), -cos(mid));
     let r_dist = length(rel);
     if (r_dist > 0.0001 && dot(rel, dir_mid) >= r_dist * cos(half_span)) {
@@ -178,24 +338,35 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let kind = prim.params.z;
 
     if (kind < 0.5) {
-        // Quad: 圆角/直角矩形 + 线性渐变 + 边框（单次 SDF 计算）
+        // Quad / StyledQuad: 四角独立圆角 + 2D 仿射变换 + 完整渐变 LUT + 边框
         let half_size = prim.bounds.zw * 0.5;
         let center = prim.bounds.xy + half_size;
-        let radius = prim.params.x;
+        let screen_center = center + prim.grad_b.zw;
+        let rel_s = p - screen_center;
+        let lp = center + vec2<f32>(
+            prim.xform.x * rel_s.x + prim.xform.z * rel_s.y,
+            prim.xform.y * rel_s.x + prim.xform.w * rel_s.y,
+        );
+
         let bw = prim.params.y;
-        let sd_outer = sdf_rounded_box(p, center, half_size, radius);
+        let sd_outer = sdf_rounded_box_4(lp, center, half_size, prim.radii);
         let outer_cov = clamp(0.5 - sd_outer, 0.0, 1.0) * clip_cov;
         if (outer_cov <= 0.0) {
             discard;
         }
 
-        let horiz = prim.params.w > 0.5;
-        let grad_t = select(
-            clamp((p.y - prim.bounds.y) / max(prim.bounds.w, 1.0), 0.0, 1.0),
-            clamp((p.x - prim.bounds.x) / max(prim.bounds.z, 1.0), 0.0, 1.0),
-            horiz,
-        );
-        let fill_col = maybe_to_linear_straight(mix(prim.color0, prim.color1, grad_t));
+        var fill_col = vec4<f32>(0.0);
+        if (prim.extra.y > 0.5) {
+            fill_col = sample_gradient_ramp(prim, lp, p);
+        } else {
+            let horiz = prim.params.w > 0.5;
+            let grad_t = select(
+                clamp((lp.y - prim.bounds.y) / max(prim.bounds.w, 1.0), 0.0, 1.0),
+                clamp((lp.x - prim.bounds.x) / max(prim.bounds.z, 1.0), 0.0, 1.0),
+                horiz,
+            );
+            fill_col = maybe_to_linear_straight(mix(prim.color0, prim.color1, grad_t));
+        }
         let border_col = maybe_to_linear_straight(prim.border_color);
 
         if (bw > 0.0 && border_col.a > 0.0) {
@@ -218,7 +389,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
         return vec4<f32>(fill_col.rgb * fill_col.a, fill_col.a) * outer_cov;
     } else if (kind < 1.5) {
-        // SoftShadow: Evan Wallace (Figma) 解析圆角盒高斯卷积阴影
+        // SoftShadow: Evan Wallace (Figma) 解析圆角盒高斯卷积阴影 + 防色带抖动
         let half_size = prim.bounds.zw * 0.5;
         let center = prim.bounds.xy + half_size;
         let radius = prim.params.x;
@@ -231,9 +402,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             discard;
         }
         let col = maybe_to_linear_straight(prim.color0);
-        return vec4<f32>(col.rgb * col.a, col.a) * cov;
+        let dither = ign_dither(p) / 255.0;
+        let eff_cov = clamp(cov + dither * 0.5, 0.0, 1.0);
+        return vec4<f32>(col.rgb * col.a, col.a) * eff_cov;
     } else if (kind < 2.5) {
-        // Glyph: R8Unorm 动态字形图集
+        // Glyph: R8Unorm 动态字形图集（像素对齐锐利采样）
         let local_uv = clamp((p - prim.bounds.xy) / max(prim.bounds.zw, vec2<f32>(1.0)), vec2<f32>(0.0), vec2<f32>(1.0));
         let atlas_uv = mix(prim.uv.xy, prim.uv.zw, local_uv);
         let cov = textureSampleLevel(glyph_tex, atlas_sampler, atlas_uv, 0.0).r * clip_cov;
@@ -243,10 +416,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let col = maybe_to_linear_straight(prim.color0);
         return vec4<f32>(col.rgb * col.a, col.a) * cov;
     } else if (kind < 3.5) {
-        // Sprite: Rgba8Unorm 预乘 Alpha 精灵/自定义 SDF 画布图集
+        // Sprite: Rgba8Unorm 预乘 Alpha 精灵图集（1:1 精确命中纹素中心，缩放时半纹素钳位防邻边渗色）
+        let tex_size = vec2<f32>(textureDimensions(sprite_tex));
+        let half_tex = vec2<f32>(0.5) / max(tex_size, vec2<f32>(1.0));
+        let uv_min = prim.uv.xy + half_tex;
+        let uv_max = max(prim.uv.zw - half_tex, uv_min);
         let local_uv = clamp((p - prim.bounds.xy) / max(prim.bounds.zw, vec2<f32>(1.0)), vec2<f32>(0.0), vec2<f32>(1.0));
-        let atlas_uv = mix(prim.uv.xy, prim.uv.zw, local_uv);
-        let s = textureSampleLevel(sprite_tex, atlas_sampler, atlas_uv, 0.0);
+        let atlas_uv = clamp(mix(prim.uv.xy, prim.uv.zw, local_uv), uv_min, uv_max);
+        let s = textureSampleLevel(sprite_tex, linear_sampler, atlas_uv, 0.0);
         if (s.a <= 0.0) {
             discard;
         }
@@ -261,7 +438,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
         return s * clip_cov;
     } else {
-        // Arc: 原生 GPU 解析圆弧 SDF（轨道 + 进度弧一次片元合成，零 CPU 光栅与纹理上传）
+        // Arc: 原生 GPU 解析圆弧 SDF
         let half_size = prim.bounds.zw * 0.5;
         let center = prim.bounds.xy + half_size;
         let r_max = min(half_size.x, half_size.y);

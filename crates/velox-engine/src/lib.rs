@@ -21,6 +21,7 @@ pub mod element;
 pub mod engine;
 pub mod i18n;
 pub mod motion;
+pub mod paint;
 pub mod platform;
 pub mod pod;
 pub mod prelude;

@@ -6,6 +6,8 @@ use crate::motion::{DrawOp, DrawPayload};
 use crate::solver::Region;
 use crate::style::Color;
 
+use super::effects::{ops_have_layers_or_blend, rasterize_ops_with_layers};
+use super::effects::rasterize_styled_quad;
 use super::sdf::{
     clip_against_opaque_rects, compute_sdf_coverage, compute_unoccluded_clip, opaque_core_rect,
     rasterize_quad,
@@ -37,6 +39,20 @@ pub fn rasterize_region<P: PixelFormat>(
         return;
     }
 
+    if ops_have_layers_or_blend(ops) {
+        rasterize_ops_with_layers(
+            ops,
+            buf_bounds,
+            1.0,
+            dirty_region,
+            buffer_origin_x,
+            buffer_origin_y,
+            buffer_stride,
+            target,
+        );
+        return;
+    }
+
     let mut occluders: crate::arena::SmallVec<(usize, Region), 32> = crate::arena::SmallVec::new();
     let mut occluders_complete = true;
     for (idx, op) in ops.iter().enumerate() {
@@ -48,7 +64,10 @@ pub fn rasterize_region<P: PixelFormat>(
     }
 
     for (idx, op) in ops.iter().enumerate() {
-        let raw_clip = dirty_region.intersect(op.clip).intersect(op.bounds);
+        let raw_clip = match op.payload {
+            DrawPayload::StyledQuad(sq) if sq.transform.is_some() => dirty_region.intersect(op.clip),
+            _ => dirty_region.intersect(op.clip).intersect(op.bounds),
+        };
         if raw_clip.is_empty() {
             continue;
         }
@@ -116,6 +135,22 @@ pub fn rasterize_region<P: PixelFormat>(
                     dst,
                 );
             }
+            DrawPayload::StyledQuad(sq) => {
+                rasterize_styled_quad(
+                    op.bounds,
+                    sub_clip,
+                    sq,
+                    1.0,
+                    buffer_origin_x,
+                    buffer_origin_y,
+                    buffer_stride,
+                    dst,
+                );
+            }
+            DrawPayload::PushLayer(layer) => {
+                let _ = layer;
+            }
+            DrawPayload::PopLayer => {}
         };
 
         if corner_clip_active {
@@ -142,7 +177,7 @@ pub fn rasterize_region<P: PixelFormat>(
 ///   分块备份/绘制/SDF 抗锯齿还原，同时支持任意大半径圆角裁切且零堆分配。
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn draw_op_with_tiled_rounded_clip<P: PixelFormat>(
+pub(super) fn draw_op_with_tiled_rounded_clip<P: PixelFormat>(
     effective_clip: Region,
     clip_box: Region,
     clip_r: i16,
@@ -286,6 +321,20 @@ pub(crate) fn rasterize_region_scaled<P: PixelFormat>(
         return;
     }
 
+    if ops_have_layers_or_blend(ops) {
+        rasterize_ops_with_layers(
+            ops,
+            viewport,
+            scale_factor,
+            dirty_phys,
+            buffer_origin_x,
+            buffer_origin_y,
+            buffer_stride,
+            target,
+        );
+        return;
+    }
+
     let sf = scale_factor.clamp(0.5, 4.0);
     let vp_clip_phys = snap_clip_region_scaled(viewport, sf);
 
@@ -300,7 +349,10 @@ pub(crate) fn rasterize_region_scaled<P: PixelFormat>(
     }
 
     for (idx, op) in ops.iter().enumerate() {
-        let raw_clip = viewport.intersect(op.clip).intersect(op.bounds);
+        let raw_clip = match op.payload {
+            DrawPayload::StyledQuad(sq) if sq.transform.is_some() => viewport.intersect(op.clip),
+            _ => viewport.intersect(op.clip).intersect(op.bounds),
+        };
         if raw_clip.is_empty() {
             continue;
         }
@@ -365,6 +417,13 @@ pub(crate) fn rasterize_region_scaled<P: PixelFormat>(
                     continue;
                 }
                 (eff, Some((adj_bounds, adj_flags, logical_fs, fs_q4)))
+            }
+            DrawPayload::StyledQuad(sq) if sq.transform.is_some() => {
+                let eff = sc.intersect(dirty_phys);
+                if eff.is_empty() {
+                    continue;
+                }
+                (eff, None)
             }
             _ => {
                 let eff = sc.intersect(sb).intersect(dirty_phys);
@@ -461,6 +520,19 @@ pub(crate) fn rasterize_region_scaled<P: PixelFormat>(
                     dst,
                 );
             }
+            DrawPayload::StyledQuad(sq) => {
+                rasterize_styled_quad(
+                    sb,
+                    sub_clip,
+                    sq,
+                    sf,
+                    buffer_origin_x,
+                    buffer_origin_y,
+                    buffer_stride,
+                    dst,
+                );
+            }
+            DrawPayload::PushLayer(_) | DrawPayload::PopLayer => {}
         };
 
         if corner_clip_active {
@@ -520,10 +592,11 @@ pub(crate) fn rasterize_region_scaled_parallel<P: PixelFormat>(
     #[cfg(not(target_arch = "wasm32"))]
     {
         let area = (dirty_phys.w.max(0) as usize) * (dirty_phys.h.max(0) as usize);
-        let has_shader = ops.iter().any(|op| {
-            matches!(op.payload, DrawPayload::Sprite(SpriteSource::Shader { .. }))
-                && !dirty_region.intersect(op.clip).intersect(op.bounds).is_empty()
-        });
+        let has_shader = ops_have_layers_or_blend(ops)
+            || ops.iter().any(|op| {
+                matches!(op.payload, DrawPayload::Sprite(SpriteSource::Shader { .. }))
+                    && !dirty_region.intersect(op.clip).intersect(op.bounds).is_empty()
+            });
         if !has_shader && dirty_phys.h >= 32 && area >= 65_536 {
             if parallel_pool::dispatch_parallel_strips_scaled(
                 ops,
@@ -862,10 +935,11 @@ pub fn rasterize_region_parallel<P: PixelFormat>(
     #[cfg(not(target_arch = "wasm32"))]
     {
         let area = (dirty_region.w.max(0) as usize) * (dirty_region.h.max(0) as usize);
-        let has_shader = ops.iter().any(|op| {
-            matches!(op.payload, DrawPayload::Sprite(SpriteSource::Shader { .. }))
-                && !dirty_region.intersect(op.clip).intersect(op.bounds).is_empty()
-        });
+        let has_shader = ops_have_layers_or_blend(ops)
+            || ops.iter().any(|op| {
+                matches!(op.payload, DrawPayload::Sprite(SpriteSource::Shader { .. }))
+                    && !dirty_region.intersect(op.clip).intersect(op.bounds).is_empty()
+            });
         if !has_shader && dirty_region.h >= 32 && area >= 65_536 {
             if parallel_pool::dispatch_parallel_strips(
                 ops,

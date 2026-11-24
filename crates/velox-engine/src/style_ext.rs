@@ -10,6 +10,9 @@
 use core::time::Duration;
 
 use crate::element::{div, Div, Element, EnterFrom, IntoElement, TransitionSpec};
+use crate::paint::{
+    BackdropFilter, BlendMode, ColorMatrix, CornerRadii, DropShadow, LayerFilter, Transform2D,
+};
 use crate::pod::{CursorShape, FrameScope};
 use crate::style::{
     AlignItems, Color, Easing, Edges, FlexDir, Length, LoopMode, Style, StyleRefinement, Styled,
@@ -40,6 +43,12 @@ pub struct StyleExt {
     pub z_index: Option<i8>,
     pub align_self: Option<AlignItems>,
     pub items_baseline: bool,
+    pub corner_radii: Option<CornerRadii>,
+    pub blend_mode: BlendMode,
+    pub isolate: bool,
+    pub filter: LayerFilter,
+    pub backdrop_filter: BackdropFilter,
+    pub transform: Option<Transform2D>,
     dirty: bool,
 }
 
@@ -80,6 +89,12 @@ impl StyleExt {
             z_index: None,
             align_self: None,
             items_baseline: false,
+            corner_radii: None,
+            blend_mode: BlendMode::SrcOver,
+            isolate: false,
+            filter: LayerFilter::NONE,
+            backdrop_filter: BackdropFilter::NONE,
+            transform: None,
             dirty: false,
         }
     }
@@ -234,6 +249,27 @@ impl StyleExt {
         }
         if self.items_baseline {
             target.items_baseline = true;
+        }
+        if let Some(cr) = self.corner_radii {
+            target.effects.corner_radii = Some(cr);
+        }
+        if !self.blend_mode.is_normal() {
+            target.effects.blend_mode = self.blend_mode;
+        }
+        if self.isolate {
+            target.effects.isolate = true;
+        }
+        if !self.filter.is_empty() {
+            target.effects.filter = self.filter;
+        }
+        if !self.backdrop_filter.is_empty() {
+            target.effects.backdrop_filter = self.backdrop_filter;
+        }
+        if let Some(t) = self.transform {
+            target.effects.transform = Some(match target.effects.transform {
+                Some(prev) => prev.concat(t),
+                None => t,
+            });
         }
         target
     }
@@ -849,4 +885,109 @@ pub trait StyledExt: Styled + Sized {
     fn inline_flex(self) -> Self {
         self.flex_row()
     }
+
+    // --- 现代视觉扩展（四角独立圆角 / 混合模式 / 滤镜 / 毛玻璃 / 2D 变换） ---
+
+    #[inline(always)]
+    fn rounded_corners(mut self, radii: CornerRadii) -> Self {
+        let ext = self.style_ext_mut();
+        ext.corner_radii = Some(radii);
+        ext.dirty = true;
+        self
+    }
+
+    #[inline(always)] fn rounded_t(self, r: u8) -> Self { self.rounded_corners(CornerRadii::top(r)) }
+    #[inline(always)] fn rounded_b(self, r: u8) -> Self { self.rounded_corners(CornerRadii::bottom(r)) }
+    #[inline(always)] fn rounded_l(self, r: u8) -> Self { self.rounded_corners(CornerRadii::left(r)) }
+    #[inline(always)] fn rounded_r(self, r: u8) -> Self { self.rounded_corners(CornerRadii::right(r)) }
+
+    #[inline(always)]
+    fn blend_mode(mut self, mode: BlendMode) -> Self {
+        let ext = self.style_ext_mut();
+        ext.blend_mode = mode;
+        ext.dirty = true;
+        self
+    }
+
+    #[inline(always)]
+    fn isolate(mut self) -> Self {
+        let ext = self.style_ext_mut();
+        ext.isolate = true;
+        ext.dirty = true;
+        self
+    }
+
+    #[inline(always)]
+    fn blur(mut self, radius: u8) -> Self {
+        let ext = self.style_ext_mut();
+        ext.filter.blur_radius = radius;
+        ext.dirty = true;
+        self
+    }
+
+    #[inline]
+    fn color_matrix(mut self, matrix: ColorMatrix) -> Self {
+        let ext = self.style_ext_mut();
+        ext.filter.color_matrix = Some(match ext.filter.color_matrix {
+            Some(prev) => prev.then(matrix),
+            None => matrix,
+        });
+        ext.dirty = true;
+        self
+    }
+
+    #[inline] fn grayscale(self, amount: f32) -> Self { self.color_matrix(ColorMatrix::grayscale(amount)) }
+    #[inline] fn sepia(self, amount: f32) -> Self { self.color_matrix(ColorMatrix::sepia(amount)) }
+    #[inline] fn saturate(self, amount: f32) -> Self { self.color_matrix(ColorMatrix::saturate(amount)) }
+    #[inline] fn brightness(self, amount: f32) -> Self { self.color_matrix(ColorMatrix::brightness(amount)) }
+    #[inline] fn contrast(self, amount: f32) -> Self { self.color_matrix(ColorMatrix::contrast(amount)) }
+    #[inline] fn hue_rotate(self, deg: f32) -> Self { self.color_matrix(ColorMatrix::hue_rotate(deg)) }
+    #[inline] fn invert(self, amount: f32) -> Self { self.color_matrix(ColorMatrix::invert(amount)) }
+
+    #[inline(always)]
+    fn drop_shadow(mut self, blur: u8, offset_x: i8, offset_y: i8, color: Color) -> Self {
+        let ext = self.style_ext_mut();
+        ext.filter.drop_shadow = Some(DropShadow::new(blur, offset_x, offset_y, color));
+        ext.dirty = true;
+        self
+    }
+
+    #[inline(always)]
+    fn backdrop_filter(mut self, filter: BackdropFilter) -> Self {
+        let ext = self.style_ext_mut();
+        ext.backdrop_filter = filter;
+        ext.dirty = true;
+        self
+    }
+
+    #[inline(always)]
+    fn backdrop_blur(mut self, radius: u8) -> Self {
+        let ext = self.style_ext_mut();
+        ext.backdrop_filter.blur_radius = radius;
+        ext.dirty = true;
+        self
+    }
+
+    #[inline]
+    fn backdrop_acrylic(mut self, blur_radius: u8, tint: Color) -> Self {
+        let ext = self.style_ext_mut();
+        ext.backdrop_filter = BackdropFilter::acrylic(blur_radius, tint);
+        ext.dirty = true;
+        self
+    }
+
+    #[inline]
+    fn transform(mut self, t: Transform2D) -> Self {
+        let ext = self.style_ext_mut();
+        ext.transform = Some(match ext.transform {
+            Some(prev) => prev.concat(t),
+            None => t,
+        });
+        ext.dirty = true;
+        self
+    }
+
+    #[inline] fn rotate_deg(self, deg: f32) -> Self { self.transform(Transform2D::rotate(deg)) }
+    #[inline] fn scale(self, sx: f32, sy: f32) -> Self { self.transform(Transform2D::scale(sx, sy)) }
+    #[inline] fn translate(self, tx: f32, ty: f32) -> Self { self.transform(Transform2D::translate(tx, ty)) }
 }

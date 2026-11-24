@@ -159,6 +159,7 @@ impl VeloxEngine {
                 let d = unsafe {
                     let root_node = &mut *(prev_layout_ptr as *mut LayoutNode<'_, '_>);
                     reflatten_pass4_only(
+                        arena,
                         root_node,
                         self.viewport,
                         interaction,
@@ -250,11 +251,13 @@ impl VeloxEngine {
         self.frame_scope
             .arena_mut()
             .restore_mark(self.ops_cursor_mark as usize);
+        let arena = self.frame_scope.arena();
         let mut ops: SmallVec<DrawOp<'_>, MAX_DRAW_OPS> = SmallVec::new();
         let mut hits: SmallVec<HitRegion<'_>, MAX_HIT_REGIONS> = SmallVec::new();
         let dropped = unsafe {
             reflatten_pass4_only(
-                &mut *self.cached_layout_ptr,
+                arena,
+                &mut *(self.cached_layout_ptr as *mut LayoutNode<'_, '_>),
                 self.viewport,
                 interaction,
                 &mut self.motion,
@@ -267,7 +270,6 @@ impl VeloxEngine {
 
         self.damage
             .diff_and_update_in_place(&mut self.prev_snapshots, ops.as_slice(), record_diff);
-        let arena = self.frame_scope.arena();
         Self::cache_ops_and_hits_into(
             arena,
             ops.as_mut_slice(),
@@ -362,6 +364,7 @@ impl VeloxEngine {
                 let d = unsafe {
                     let root_node = &mut *(prev_layout_ptr as *mut LayoutNode<'_, '_>);
                     reflatten_pass4_only(
+                        arena,
                         root_node,
                         self.viewport,
                         interaction,

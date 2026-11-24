@@ -2,6 +2,7 @@
 
 use crate::arena::StrRef;
 use crate::element::SpriteSource;
+use crate::paint::{LayerSpec, StyledQuad};
 use crate::solver::Region;
 use crate::style::Color;
 
@@ -20,7 +21,7 @@ pub struct DrawOp<'a> {
     pub payload: DrawPayload<'a>,
 }
 
-/// 闭合绘制负载枚举（严格限定 3 种扁平绘制指令：`Quad`、`TextRun`、`Sprite`）。
+/// 闭合绘制负载枚举（3 种零开销高频基元 `Quad`/`TextRun`/`Sprite` + 3 种零体积膨胀冷路径高级原语）。
 #[derive(Copy, Clone)]
 pub enum DrawPayload<'a> {
     /// 圆角矩形、定点数线性渐变与边框（由 SDF 扫描线算法一次性合成，`border_width` 最高位 `0x80` 标识水平渐变）。
@@ -40,6 +41,12 @@ pub enum DrawPayload<'a> {
     },
     /// A4/A8 抗锯齿 Alpha 图标掩码、RGB565 贴图或过程化矢量精灵。
     Sprite(SpriteSource<'a>),
+    /// 高级矩形图元：多色标渐变（Linear/Radial/Conic + OKLab）、四角独立圆角、2D 仿射变换与单图元混合模式（8B Arena 引用，不膨胀 `DrawOp`）。
+    StyledQuad(&'a StyledQuad<'a>),
+    /// 推入隔离合成图层：支持组级不透明度、27 种混合模式、高斯模糊、色彩矩阵、任意形状投影、实时毛玻璃与 SVG Path 裁剪（8B Arena 引用）。
+    PushLayer(&'a LayerSpec<'a>),
+    /// 弹出当前隔离合成图层并执行滤镜后处理与合成回父画布（0B）。
+    PopLayer,
 }
 
 impl<'a> PartialEq for DrawPayload<'a> {
@@ -103,6 +110,9 @@ impl<'a> PartialEq for DrawPayload<'a> {
             (Self::Sprite(s1 @ SpriteSource::Arc { .. }), Self::Sprite(s2 @ SpriteSource::Arc { .. })) => {
                 s1 == s2
             }
+            (Self::StyledQuad(a), Self::StyledQuad(b)) => a == b,
+            (Self::PushLayer(a), Self::PushLayer(b)) => a == b,
+            (Self::PopLayer, Self::PopLayer) => true,
             _ => false,
         }
     }
@@ -227,9 +237,35 @@ impl<'a> DrawOp<'a> {
                 mix_u32(&mut h, track_color.0);
                 mix_u32(&mut h, fill_color.0);
             }
+            DrawPayload::StyledQuad(sq) => {
+                mix(&mut h, 7);
+                sq.mix_hash(&mut h);
+            }
+            DrawPayload::PushLayer(layer) => {
+                mix(&mut h, 8);
+                layer.mix_hash(&mut h);
+            }
+            DrawPayload::PopLayer => {
+                mix(&mut h, 9);
+            }
         }
+        let eff_bounds = match self.payload {
+            DrawPayload::PushLayer(layer) => layer.expanded_bounds().intersect(self.clip),
+            DrawPayload::StyledQuad(sq) => {
+                if let Some(t) = sq.transform {
+                    let cx = self.bounds.x as f32 + self.bounds.w as f32 * 0.5;
+                    let cy = self.bounds.y as f32 + self.bounds.h as f32 * 0.5;
+                    t.centered_at(cx, cy)
+                        .transform_region(self.bounds)
+                        .intersect(self.clip)
+                } else {
+                    self.bounds.intersect(self.clip)
+                }
+            }
+            _ => self.bounds.intersect(self.clip),
+        };
         DrawOpSnapshot {
-            effective_bounds: self.bounds.intersect(self.clip),
+            effective_bounds: eff_bounds,
             payload_hash: h,
         }
     }

@@ -80,6 +80,7 @@ pub fn solve_and_flatten_with_state<'a, const MAX_OPS: usize, const MAX_HITS: us
 
     // Pass 4：垂直高度切分与指令拍平（自顶向下）
     reflatten_pass4_only(
+        arena,
         &mut root_node,
         viewport,
         interaction,
@@ -153,8 +154,15 @@ pub(crate) fn solve_and_flatten_retained_with_pool<
     // Pass 3：文本折行与垂直约束汇总（自底向上，宽度未变的未脏 SubView 跳过子树 Pass 3）
     pass3_vertical_measure_with_pool(root_node, pool, true);
 
-    let dropped_ops =
-        reflatten_pass4_only(root_node, viewport, interaction, motion, out_ops, out_hits);
+    let dropped_ops = reflatten_pass4_only(
+        arena,
+        root_node,
+        viewport,
+        interaction,
+        motion,
+        out_ops,
+        out_hits,
+    );
     let raw_ptr = root_node as *mut LayoutNode<'a, '_> as *mut LayoutNode<'static, 'static>;
     (raw_ptr, dropped_ops)
 }
@@ -386,7 +394,9 @@ fn commit_subtree_cache_ptrs(node: &mut LayoutNode<'_, '_>, pool: &crate::pod::P
 /// Pass-4-Only 极速重拍平路径：当本帧无任何 `Pod` 状态变更（仅发生指针悬停/按下、焦点切换、滚动偏移或过渡动画插值）时，
 /// 直接跳过 `View::render()` 与 Pass 1~3 水平/折行求解，仅在保留的 `LayoutNode` 树上执行 Pass 4 生成最新 `DrawOp` 与 `HitRegion`。
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn reflatten_pass4_only<'a, 'b, const MAX_OPS: usize, const MAX_HITS: usize>(
+    arena: &'a ScratchArena,
     root_node: &mut LayoutNode<'a, 'b>,
     viewport: Region,
     interaction: InteractionState,
@@ -414,6 +424,7 @@ pub(crate) fn reflatten_pass4_only<'a, 'b, const MAX_OPS: usize, const MAX_HITS:
     };
     motion.begin_frame();
     pass4_vertical_assign_and_flatten(
+        arena,
         root_node,
         root_owner,
         0x811c_9dc5,
@@ -439,6 +450,7 @@ pub(crate) fn reflatten_pass4_only<'a, 'b, const MAX_OPS: usize, const MAX_HITS:
     // 若树中存在标记了 `.overlay()` 的顶层浮层/弹窗节点，在第二遍扫描中将其统一拍平至 Z-Order 最顶层
     if has_overlays {
         pass4_vertical_assign_and_flatten(
+            arena,
             root_node,
             root_owner,
             0x811c_9dc5,

@@ -167,6 +167,7 @@ pub use velox_engine::display;
 pub use velox_engine::element;
 pub use velox_engine::engine;
 pub use velox_engine::motion;
+pub use velox_engine::paint;
 pub use velox_engine::platform;
 pub use velox_engine::pod;
 pub use velox_engine::raster;

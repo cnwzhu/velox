@@ -159,6 +159,7 @@ fn test_gallery_all_11_stories_navigation_and_interactive_controls() {
         (GalleryStory::Feedback, "Alerts & Badges"),
         (GalleryStory::Data, "Table & List"),
         (GalleryStory::SettingsIcons, "Settings & Icons"),
+        (GalleryStory::Effects, "Effects & Shaders"),
     ];
 
     // 1. 通过真实点击左侧 Sidebar 遍历切换全部 11 个 Story，确保无 panic 且每页产出绘制指令
@@ -1185,4 +1186,182 @@ fn test_gallery_tokio_reqwest_in_flight_cancel_by_task_drop() {
         started.elapsed() < Duration::from_secs(1),
         "RAII cancellation must abort immediately instead of waiting for slow 3s HTTP server"
     );
+}
+
+#[test]
+fn test_gallery_effects_story_interactions_and_dual_backend_render() {
+    use velox_kit::core::display::Xrgb8888;
+    use velox_kit::core::motion::DrawPayload;
+    use velox_kit::core::renderers::wgpu::WgpuOffscreenRenderer;
+
+    // 使用 1080×1260 视口以便同时完整展现全部 4 个特效实验区并可直接点击交互
+    let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, 1260);
+    let _ = engine.step_frame();
+    let (sx, sy) = text_center(&engine, "Effects & Shaders");
+    assert!(engine.dispatch_click(sx, sy));
+    assert_eq!(engine.view(root).unwrap().active_story, GalleryStory::Effects);
+    let _ = engine.step_frame();
+
+    // 1. 验证绘制指令序列确实涵盖 StyledQuad + PushLayer + PopLayer 全套高级管线
+    let ops = engine.cached_draw_ops();
+    let styled_count = ops
+        .iter()
+        .filter(|op| matches!(op.payload, DrawPayload::StyledQuad(_)))
+        .count();
+    let push_count = ops
+        .iter()
+        .filter(|op| matches!(op.payload, DrawPayload::PushLayer(_)))
+        .count();
+    let pop_count = ops
+        .iter()
+        .filter(|op| matches!(op.payload, DrawPayload::PopLayer))
+        .count();
+    assert!(styled_count >= 6, "expected >= 6 StyledQuad ops, got {styled_count}");
+    assert!(push_count >= 4, "expected >= 4 PushLayer ops, got {push_count}");
+    assert_eq!(push_count, pop_count, "PushLayer / PopLayer must be strictly balanced");
+
+    // 2. 验证实验室各项交互控件真实点击生效
+    let (x, y) = hit_center(&engine, 2103); // sRGB
+    assert!(engine.dispatch_click(x, y));
+    assert_eq!(engine.view(root).unwrap().fx_grad_space, GradientSpace::Srgb);
+    let _ = engine.step_frame();
+
+    let (x, y) = hit_center(&engine, 2101); // OKLab
+    assert!(engine.dispatch_click(x, y));
+    assert_eq!(engine.view(root).unwrap().fx_grad_space, GradientSpace::Oklab);
+    let _ = engine.step_frame();
+
+    let (x, y) = hit_center(&engine, 2105); // Repeat
+    assert!(engine.dispatch_click(x, y));
+    assert_eq!(engine.view(root).unwrap().fx_grad_extend, ExtendMode::Repeat);
+    let _ = engine.step_frame();
+
+    let (x, y) = hit_center(&engine, 2104); // Pad
+    assert!(engine.dispatch_click(x, y));
+    assert_eq!(engine.view(root).unwrap().fx_grad_extend, ExtendMode::Pad);
+    let _ = engine.step_frame();
+
+    let (x, y) = text_center(&engine, "Acrylic Vibrancy + Grain"); // Toggle Acrylic Switch
+    assert!(engine.dispatch_click(x, y));
+    assert!(!engine.view(root).unwrap().fx_acrylic_enabled);
+    let _ = engine.step_frame();
+    assert!(engine.dispatch_click(x, y));
+    assert!(engine.view(root).unwrap().fx_acrylic_enabled);
+    let _ = engine.step_frame();
+
+    let (x, y) = hit_center(&engine, 2123); // BlendMode::Difference
+    assert!(engine.dispatch_click(x, y));
+    assert_eq!(engine.view(root).unwrap().fx_blend_idx, 3);
+    let _ = engine.step_frame();
+
+    let (x, y) = hit_center(&engine, 2131); // Grayscale
+    assert!(engine.dispatch_click(x, y));
+    assert_eq!(engine.view(root).unwrap().fx_filter_preset, 1);
+    let _ = engine.step_frame();
+
+    let (x, y) = hit_center(&engine, 2135); // Blur 4px
+    assert!(engine.dispatch_click(x, y));
+    assert_eq!(engine.view(root).unwrap().fx_filter_preset, 5);
+    let _ = engine.step_frame();
+
+    let (x, y) = hit_center(&engine, 2130); // Original
+    assert!(engine.dispatch_click(x, y));
+    assert_eq!(engine.view(root).unwrap().fx_filter_preset, 0);
+    let _ = engine.step_frame();
+
+    let (x, y) = hit_center(&engine, 2142); // Triangle clip_path
+    assert!(engine.dispatch_click(x, y));
+    assert_eq!(engine.view(root).unwrap().fx_clip_shape, 1);
+    let _ = engine.step_frame();
+
+    let (x, y) = hit_center(&engine, 2141); // Star clip_path
+    assert!(engine.dispatch_click(x, y));
+    assert_eq!(engine.view(root).unwrap().fx_clip_shape, 0);
+    let _ = engine.step_frame();
+
+    // 3. 双后端（Software + 真实硬件 GPU）整页离屏光栅化与视觉一致性校验
+    let vp = engine.viewport_region();
+    let w = vp.w as usize;
+    let h = vp.h as usize;
+    let mut sw_buf = vec![Xrgb8888(0xFF00_0000); w * h];
+    engine.rasterize_region(vp, &mut sw_buf);
+
+    // 校验软件渲染非空且具有丰富色彩变化
+    let vivid_sw = sw_buf
+        .iter()
+        .filter(|px| {
+            let c = px.to_color();
+            c.r().abs_diff(c.g()) > 40 || c.g().abs_diff(c.b()) > 40 || c.r().abs_diff(c.b()) > 40
+        })
+        .count();
+    assert!(
+        vivid_sw > 40_000,
+        "Effects story software render should have rich colorful pixels, got {vivid_sw}"
+    );
+
+    let mut offscreen = WgpuOffscreenRenderer::new(w, h);
+    if offscreen.ensure_gpu() {
+        let ops = engine.cached_draw_ops();
+        assert!(
+            offscreen.render_draw_ops_scaled(ops, vp, 1.0),
+            "GPU offscreen render of Effects story must succeed"
+        );
+        let gpu_rgba = &offscreen.rgba_buffer;
+        let mut sum_diff = 0u64;
+        for idx in 0..(w * h) {
+            let sc = sw_buf[idx].to_color();
+            let o = idx * 4;
+            sum_diff += sc.r().abs_diff(gpu_rgba[o]) as u64
+                + sc.g().abs_diff(gpu_rgba[o + 1]) as u64
+                + sc.b().abs_diff(gpu_rgba[o + 2]) as u64;
+        }
+        let mean_channel_diff = (sum_diff as f64) / ((w * h * 3) as f64);
+        if let Ok(dump_dir) = std::env::var("VELOX_DUMP_EFFECTS_PNG") {
+            let dir = std::path::Path::new(&dump_dir);
+            let _ = std::fs::create_dir_all(dir);
+            let gpu_xrgb: Vec<Xrgb8888> = gpu_rgba
+                .chunks_exact(4)
+                .map(|c| Xrgb8888::from_color(Color::rgb(c[0], c[1], c[2])))
+                .collect();
+            let sw_path = dir.join("effects_full_sw.png");
+            let gpu_path = dir.join("effects_full_gpu.png");
+            let _ = velox_kit::platform::winit::write_uncompressed_png(
+                sw_path.to_string_lossy().as_ref(),
+                w,
+                h,
+                &sw_buf,
+            );
+            let _ = velox_kit::platform::winit::write_uncompressed_png(
+                gpu_path.to_string_lossy().as_ref(),
+                w,
+                h,
+                &gpu_xrgb,
+            );
+        }
+        // 专门校验左上角标题/侧边栏区零图层重影溢出（防 PopLayer batch_start 漂移回归）
+        let mut tl_diff_gt_4 = 0usize;
+        for y in 0..100usize {
+            for x in 0..220usize {
+                let idx = y * w + x;
+                let sc = sw_buf[idx].to_color();
+                let o = idx * 4;
+                let d = sc
+                    .r()
+                    .abs_diff(gpu_rgba[o])
+                    .max(sc.g().abs_diff(gpu_rgba[o + 1]))
+                    .max(sc.b().abs_diff(gpu_rgba[o + 2]));
+                if d > 4 {
+                    tl_diff_gt_4 += 1;
+                }
+            }
+        }
+        assert_eq!(
+            tl_diff_gt_4, 0,
+            "top-left header/sidebar must have zero offscreen layer ghosting (diff_gt_4={tl_diff_gt_4})"
+        );
+        assert!(
+            mean_channel_diff < 3.0,
+            "Effects story GPU vs Software mean per-channel diff too large: {mean_channel_diff:.2}"
+        );
+    }
 }

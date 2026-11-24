@@ -8,7 +8,7 @@
 //! - `xml`：流式零依赖 SVG XML 解析器（支持 `<svg>`、`<g>` 嵌套继承、行内 `style` 与多色矢量绘制）。
 
 mod color;
-mod math;
+pub(crate) mod math;
 mod path;
 mod raster;
 mod xml;

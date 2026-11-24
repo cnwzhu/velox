@@ -17,10 +17,18 @@ use crate::solver::Region;
 use crate::style::Color;
 
 use super::atlas::{GlyphAtlas, SpriteAtlas, SpriteCacheKey, GLYPH_ATLAS_INIT_SIZE};
-use super::{
-    color_to_f32, make_arc_primitive, make_quad_primitive, make_shadow_primitive, pod_as_bytes,
-    snap_bounds, snap_clip, GpuPrimitive, ViewportUniform, KIND_GLYPH, KIND_SPRITE,
+use super::effects_pass::{
+    clamp_rect_u32, EffectUniform, GpuEffectsEngine, GpuPassStep, EFFECT_KIND_BACKDROP,
+    EFFECT_KIND_BLIT, EFFECT_KIND_COMPOSITE, EFFECT_KIND_SHADOW_EXTRACT,
 };
+use super::ramp::GradientRampAtlas;
+use super::{
+    color_to_f32, make_arc_primitive, make_quad_primitive, make_shadow_primitive,
+    make_styled_quad_primitive, pod_as_bytes, snap_bounds, snap_clip, GpuPrimitive,
+    ViewportUniform, IDENTITY_XFORM, KIND_GLYPH, KIND_SPRITE,
+};
+use crate::paint::{BlendMode, LayerSpec, Paint, StyledQuad};
+use crate::renderers::software::{ops_have_layers_or_blend, snap_bounds_region_scaled, snap_clip_region_scaled};
 
 const SDF_WGSL: &str = include_str!("shader.wgsl");
 const INITIAL_INSTANCE_CAPACITY: usize = 512;
@@ -60,17 +68,50 @@ fn hash_layout_text(text: &str) -> u64 {
     h
 }
 
+/// 256 字节对齐的动态 `ViewportUniform` 槽位（供多 Pass 离屏图层共享单个 `viewport_buf`）。
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct AlignedViewportSlot {
+    uniform: ViewportUniform,
+    _pad: [u8; 256 - core::mem::size_of::<ViewportUniform>()],
+}
+
+impl Default for AlignedViewportSlot {
+    fn default() -> Self {
+        Self {
+            uniform: ViewportUniform::default(),
+            _pad: [0u8; 256 - core::mem::size_of::<ViewportUniform>()],
+        }
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<AlignedViewportSlot>() == 256);
+const INIT_VIEWPORT_SLOTS: usize = 8;
+
+/// 编码重试原因（任一图集满格触发扩容重编）。
+struct AtlasGrowNeed {
+    glyph_full: bool,
+    sprite_need: Option<(u32, u32)>,
+    ramp_full: bool,
+}
+
 /// 自研轻量级 `wgpu` 2D SDF 渲染管线核心（绑定任意目标 `TextureView` 即可渲染）。
 pub struct WgpuRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     viewport_buf: wgpu::Buffer,
+    viewport_capacity: usize,
+    viewport_slots: Vec<AlignedViewportSlot>,
     instance_buf: wgpu::Buffer,
     instance_capacity: usize,
     sampler: wgpu::Sampler,
+    linear_sampler: wgpu::Sampler,
     glyph_atlas: GlyphAtlas,
     sprite_atlas: SpriteAtlas,
+    ramp_atlas: GradientRampAtlas,
+    effects: Option<GpuEffectsEngine>,
+    target_format: wgpu::TextureFormat,
     primitives: Vec<GpuPrimitive>,
     sprite_scratch: Vec<Rgba8888>,
     #[cfg(not(target_endian = "little"))]
@@ -99,8 +140,10 @@ impl WgpuRenderer {
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(
+                            core::mem::size_of::<ViewportUniform>() as u64,
+                        ),
                     },
                     count: None,
                 },
@@ -136,6 +179,22 @@ impl WgpuRenderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -191,13 +250,7 @@ impl WgpuRenderer {
             );
         }
 
-        let viewport_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("velox_wgpu_viewport"),
-            size: core::mem::size_of::<ViewportUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
+        let viewport_buf = Self::create_viewport_buffer(device, INIT_VIEWPORT_SLOTS);
         let instance_buf = Self::create_instance_buffer(device, INITIAL_INSTANCE_CAPACITY);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("velox_atlas_sampler"),
@@ -209,9 +262,20 @@ impl WgpuRenderer {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
+        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("velox_linear_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
 
         let glyph_atlas = GlyphAtlas::new(device, GLYPH_ATLAS_INIT_SIZE);
         let sprite_atlas = SpriteAtlas::new(device, 1);
+        let ramp_atlas = GradientRampAtlas::new(device);
         let bind_group = Self::create_bind_group(
             device,
             &bind_group_layout,
@@ -220,6 +284,8 @@ impl WgpuRenderer {
             &glyph_atlas.view,
             &sprite_atlas.view,
             &sampler,
+            &ramp_atlas.view,
+            &linear_sampler,
         );
 
         Self {
@@ -227,11 +293,17 @@ impl WgpuRenderer {
             bind_group_layout,
             bind_group,
             viewport_buf,
+            viewport_capacity: INIT_VIEWPORT_SLOTS,
+            viewport_slots: Vec::with_capacity(INIT_VIEWPORT_SLOTS),
             instance_buf,
             instance_capacity: INITIAL_INSTANCE_CAPACITY,
             sampler,
+            linear_sampler,
             glyph_atlas,
             sprite_atlas,
+            ramp_atlas,
+            effects: None,
+            target_format,
             primitives: Vec::with_capacity(INITIAL_INSTANCE_CAPACITY),
             sprite_scratch: Vec::new(),
             #[cfg(not(target_endian = "little"))]
@@ -240,6 +312,15 @@ impl WgpuRenderer {
             text_layout_hits: 0,
             target_is_srgb: target_format.is_srgb(),
         }
+    }
+
+    fn create_viewport_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("velox_wgpu_viewport"),
+            size: (capacity.max(1) * core::mem::size_of::<AlignedViewportSlot>()) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
     }
 
     fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -251,6 +332,7 @@ impl WgpuRenderer {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_bind_group(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
@@ -259,6 +341,8 @@ impl WgpuRenderer {
         glyph_view: &wgpu::TextureView,
         sprite_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
+        ramp_view: &wgpu::TextureView,
+        linear_sampler: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("velox_wgpu_bg"),
@@ -266,7 +350,11 @@ impl WgpuRenderer {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: viewport_buf.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: viewport_buf,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(core::mem::size_of::<ViewportUniform>() as u64),
+                    }),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -283,6 +371,14 @@ impl WgpuRenderer {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(ramp_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(linear_sampler),
                 },
             ],
         })
@@ -327,6 +423,8 @@ impl WgpuRenderer {
             &self.glyph_atlas.view,
             &self.sprite_atlas.view,
             &self.sampler,
+            &self.ramp_atlas.view,
+            &self.linear_sampler,
         );
     }
 
@@ -376,15 +474,298 @@ impl WgpuRenderer {
         h
     }
 
-    /// 将 `DrawOp` 编码为 `self.primitives` 并按需上传字形与精灵图集；
-    /// 若某个图集需要扩容则返回 `Err((need_glyph_grow, sprite_need))` 以便调用方扩容并重试一次。
+    /// 将单条非图层 `DrawOp` 编码追加到 `self.primitives`，并将所有屏幕坐标减去 `(origin_x, origin_y)`。
+    #[allow(clippy::too_many_arguments)]
+    fn encode_single_op(
+        &mut self,
+        queue: &wgpu::Queue,
+        op: &DrawOp<'_>,
+        eff_clip: Region,
+        viewport: Region,
+        sf: f32,
+        use_ttf: bool,
+        origin_x: f32,
+        origin_y: f32,
+    ) -> Result<(), AtlasGrowNeed> {
+        let mut sb_f = snap_bounds(op.bounds, sf);
+        let clip_region = if op.clip_radius > 0 { op.clip } else { eff_clip };
+        let mut sc_f = snap_clip(clip_region, sf);
+        if (op.bounds.w == 1 && eff_clip.w == 1) || (op.bounds.h == 1 && eff_clip.h == 1) {
+            let vp_clip_f = snap_clip(viewport, sf);
+            if op.bounds.w == 1 && eff_clip.w == 1 {
+                sc_f[2] = sc_f[2].max(sb_f[0] + sb_f[2]).min(vp_clip_f[2]);
+            }
+            if op.bounds.h == 1 && eff_clip.h == 1 {
+                sc_f[3] = sc_f[3].max(sb_f[1] + sb_f[3]).min(vp_clip_f[3]);
+            }
+        }
+        let clip_radius_px = (op.clip_radius as f32) * sf;
+        let shifted_sb = [sb_f[0] - origin_x, sb_f[1] - origin_y, sb_f[2], sb_f[3]];
+        let shifted_sc = [
+            sc_f[0] - origin_x,
+            sc_f[1] - origin_y,
+            sc_f[2] - origin_x,
+            sc_f[3] - origin_y,
+        ];
+
+        match op.payload {
+            DrawPayload::Quad {
+                bg,
+                bg_grad,
+                border_color,
+                rounded,
+                border_width,
+            } => {
+                let raw_bw = border_width & 0x7F;
+                let bw = if raw_bw == 0 {
+                    0.0
+                } else {
+                    ((raw_bw as f32) * sf).round().max(1.0)
+                };
+                let horiz = (border_width & 0x80) != 0;
+                let r = (rounded as f32) * sf;
+                let is_shadow = border_color.a() == 0 && raw_bw > 0;
+                if is_shadow {
+                    if bg.a() > 0 {
+                        self.primitives.push(make_shadow_primitive(
+                            shifted_sb,
+                            shifted_sc,
+                            clip_radius_px,
+                            r,
+                            (raw_bw as f32) * sf,
+                            bg,
+                        ));
+                    }
+                } else if bg.a() > 0 || bg_grad.a() > 0 || (bw > 0.0 && border_color.a() > 0) {
+                    self.primitives.push(make_quad_primitive(
+                        shifted_sb,
+                        shifted_sc,
+                        clip_radius_px,
+                        r,
+                        bw,
+                        horiz,
+                        bg,
+                        bg_grad,
+                        border_color,
+                    ));
+                }
+            }
+            DrawPayload::StyledQuad(sq) => {
+                let ramp_v = match sq.paint {
+                    Paint::Solid(_) => None,
+                    Paint::LinearGradient { stops, space, .. }
+                    | Paint::RadialGradient { stops, space, .. }
+                    | Paint::ConicGradient { stops, space, .. } => {
+                        let Some(v) = self.ramp_atlas.get_or_insert(queue, stops, space, sq.opacity)
+                        else {
+                            return Err(AtlasGrowNeed {
+                                glyph_full: false,
+                                sprite_need: None,
+                                ramp_full: true,
+                            });
+                        };
+                        Some(v)
+                    }
+                };
+                if let Some(prim) = make_styled_quad_primitive(
+                    shifted_sb,
+                    shifted_sc,
+                    clip_radius_px,
+                    sq,
+                    sf,
+                    ramp_v,
+                ) {
+                    self.primitives.push(prim);
+                }
+            }
+            DrawPayload::TextRun {
+                text,
+                color,
+                font_size,
+                text_flags,
+            } => {
+                if text.is_empty() || color.a() == 0 {
+                    return Ok(());
+                }
+                let sb = Region::new(
+                    sb_f[0] as i16,
+                    sb_f[1] as i16,
+                    sb_f[2] as i16,
+                    sb_f[3] as i16,
+                );
+                let sc = Region::new(
+                    sc_f[0] as i16,
+                    sc_f[1] as i16,
+                    (sc_f[2] - sc_f[0]).max(0.0) as i16,
+                    (sc_f[3] - sc_f[1]).max(0.0) as i16,
+                );
+                let (adj_bounds, adj_sc, adj_flags, logical_fs, fs_q4) = compute_scaled_text_box(
+                    op.bounds,
+                    op.clip,
+                    viewport,
+                    sb,
+                    sc,
+                    text.as_str(),
+                    font_size,
+                    text_flags,
+                    sf,
+                );
+                let adj_sc_f = [
+                    adj_sc.x as f32 - origin_x,
+                    adj_sc.y as f32 - origin_y,
+                    adj_sc.right() as f32 - origin_x,
+                    adj_sc.bottom() as f32 - origin_y,
+                ];
+                let prim_before = self.primitives.len();
+                if !self.encode_text_run(
+                    queue,
+                    adj_bounds,
+                    adj_sc,
+                    adj_sc_f,
+                    clip_radius_px,
+                    text.as_str(),
+                    color,
+                    logical_fs,
+                    fs_q4,
+                    adj_flags,
+                    use_ttf,
+                ) {
+                    return Err(AtlasGrowNeed {
+                        glyph_full: true,
+                        sprite_need: None,
+                        ramp_full: false,
+                    });
+                }
+                if origin_x != 0.0 || origin_y != 0.0 {
+                    for p in &mut self.primitives[prim_before..] {
+                        p.bounds[0] -= origin_x;
+                        p.bounds[1] -= origin_y;
+                    }
+                }
+            }
+            DrawPayload::Sprite(SpriteSource::Arc {
+                thickness,
+                start_deg10,
+                sweep_deg10,
+                fill_sweep_deg10,
+                track_color,
+                fill_color,
+            }) => {
+                self.primitives.push(make_arc_primitive(
+                    shifted_sb,
+                    shifted_sc,
+                    clip_radius_px,
+                    ((thickness.max(1) as f32) * sf).max(1.5),
+                    start_deg10,
+                    sweep_deg10,
+                    fill_sweep_deg10,
+                    track_color,
+                    fill_color,
+                ));
+            }
+            DrawPayload::Sprite(sprite) => {
+                sb_f[0] = sb_f[0].round();
+                sb_f[1] = sb_f[1].round();
+                let sb = Region::new(
+                    sb_f[0] as i16,
+                    sb_f[1] as i16,
+                    sb_f[2] as i16,
+                    sb_f[3] as i16,
+                );
+                let sc = Region::new(
+                    sc_f[0] as i16,
+                    sc_f[1] as i16,
+                    (sc_f[2] - sc_f[0]).max(0.0) as i16,
+                    (sc_f[3] - sc_f[1]).max(0.0) as i16,
+                );
+                let eff = sc.intersect(sb);
+                if eff.is_empty() {
+                    return Ok(());
+                }
+                let w = eff.w.max(1) as usize;
+                let h = eff.h.max(1) as usize;
+                let cache_key = SpriteCacheKey {
+                    w: w as u32,
+                    h: h as u32,
+                    hash: Self::sprite_cache_hash(
+                        sprite,
+                        eff.x.saturating_sub(sb.x),
+                        eff.y.saturating_sub(sb.y),
+                        sb.w,
+                        sb.h,
+                    ),
+                };
+
+                let uv = if let Some(cached_uv) = self.sprite_atlas.lookup(cache_key) {
+                    cached_uv
+                } else {
+                    let len = w * h;
+                    if self.sprite_scratch.len() < len {
+                        self.sprite_scratch.resize(len, Rgba8888(0));
+                    }
+                    let slice = &mut self.sprite_scratch[..len];
+                    slice.fill(Rgba8888(0));
+                    rasterize_sprite_source(sb, eff, sprite, eff.x, eff.y, w, slice);
+
+                    #[cfg(target_endian = "little")]
+                    let rgba_bytes: &[u8] = pod_as_bytes(slice);
+                    #[cfg(not(target_endian = "little"))]
+                    let rgba_bytes: &[u8] = {
+                        self.sprite_bytes_scratch.clear();
+                        self.sprite_bytes_scratch.reserve(len * 4);
+                        for px in slice.iter() {
+                            self.sprite_bytes_scratch
+                                .extend_from_slice(&px.to_rgba_bytes());
+                        }
+                        &self.sprite_bytes_scratch
+                    };
+
+                    let Some(uv) = self
+                        .sprite_atlas
+                        .insert_and_upload(queue, cache_key, rgba_bytes)
+                    else {
+                        return Err(AtlasGrowNeed {
+                            glyph_full: false,
+                            sprite_need: Some((w as u32, h as u32)),
+                            ramp_full: false,
+                        });
+                    };
+                    uv
+                };
+
+                self.primitives.push(GpuPrimitive {
+                    bounds: [
+                        eff.x as f32 - origin_x,
+                        eff.y as f32 - origin_y,
+                        w as f32,
+                        h as f32,
+                    ],
+                    clip: shifted_sc,
+                    uv,
+                    color0: [1.0; 4],
+                    color1: [0.0; 4],
+                    border_color: [0.0; 4],
+                    params: [0.0, 0.0, KIND_SPRITE, 0.0],
+                    extra: [clip_radius_px, 0.0, 0.0, 0.0],
+                    radii: [0.0; 4],
+                    grad_a: [0.0; 4],
+                    grad_b: [0.0; 4],
+                    xform: IDENTITY_XFORM,
+                });
+            }
+            DrawPayload::PushLayer(_) | DrawPayload::PopLayer => {}
+        }
+        Ok(())
+    }
+
+    /// 单 Pass 无图层快路径：将 `DrawOp` 编码为 `self.primitives` 并按需上传字形、精灵与渐变图集。
     fn try_encode_ops(
         &mut self,
         queue: &wgpu::Queue,
         ops: &[DrawOp<'_>],
         viewport: Region,
         scale_factor: f32,
-    ) -> Result<(), (bool, Option<(u32, u32)>)> {
+    ) -> Result<(), AtlasGrowNeed> {
         self.primitives.clear();
         if viewport.is_empty() {
             return Ok(());
@@ -394,7 +775,10 @@ impl WgpuRenderer {
         let use_ttf = crate::display::ttf_atlas::has_system_font();
 
         for (idx, op) in ops.iter().enumerate() {
-            let raw_clip = viewport.intersect(op.clip).intersect(op.bounds);
+            let raw_clip = match op.payload {
+                DrawPayload::StyledQuad(sq) if sq.transform.is_some() => viewport.intersect(op.clip),
+                _ => viewport.intersect(op.clip).intersect(op.bounds),
+            };
             if raw_clip.is_empty() {
                 continue;
             }
@@ -402,216 +786,7 @@ impl WgpuRenderer {
             if eff_clip.is_empty() {
                 continue;
             }
-
-            let sb_f = snap_bounds(op.bounds, sf);
-            // 当父容器启用了圆角裁切时保留原始圆角裁剪盒（避免前向遮挡收缩破坏四角圆角中心）
-            let clip_region = if op.clip_radius > 0 { op.clip } else { eff_clip };
-            let mut sc_f = snap_clip(clip_region, sf);
-            // 对未被遮挡的 1px 细线（光标、分割线、缩进参考线），避免 op.clip 预交集后的奇数坐标截断稳定物理线宽
-            if (op.bounds.w == 1 && eff_clip.w == 1) || (op.bounds.h == 1 && eff_clip.h == 1) {
-                let vp_clip_f = snap_clip(viewport, sf);
-                if op.bounds.w == 1 && eff_clip.w == 1 {
-                    sc_f[2] = sc_f[2].max(sb_f[0] + sb_f[2]).min(vp_clip_f[2]);
-                }
-                if op.bounds.h == 1 && eff_clip.h == 1 {
-                    sc_f[3] = sc_f[3].max(sb_f[1] + sb_f[3]).min(vp_clip_f[3]);
-                }
-            }
-            let clip_radius_px = (op.clip_radius as f32) * sf;
-
-            match op.payload {
-                DrawPayload::Quad {
-                    bg,
-                    bg_grad,
-                    border_color,
-                    rounded,
-                    border_width,
-                } => {
-                    let raw_bw = border_width & 0x7F;
-                    let bw = if raw_bw == 0 {
-                        0.0
-                    } else {
-                        ((raw_bw as f32) * sf).round().max(1.0)
-                    };
-                    let horiz = (border_width & 0x80) != 0;
-                    let r = (rounded as f32) * sf;
-                    let is_shadow = border_color.a() == 0 && raw_bw > 0;
-                    if is_shadow {
-                        if bg.a() > 0 {
-                            self.primitives.push(make_shadow_primitive(
-                                sb_f,
-                                sc_f,
-                                clip_radius_px,
-                                r,
-                                (raw_bw as f32) * sf,
-                                bg,
-                            ));
-                        }
-                    } else if bg.a() > 0 || bg_grad.a() > 0 || (bw > 0.0 && border_color.a() > 0) {
-                        self.primitives.push(make_quad_primitive(
-                            sb_f,
-                            sc_f,
-                            clip_radius_px,
-                            r,
-                            bw,
-                            horiz,
-                            bg,
-                            bg_grad,
-                            border_color,
-                        ));
-                    }
-                }
-                DrawPayload::TextRun {
-                    text,
-                    color,
-                    font_size,
-                    text_flags,
-                } => {
-                    if text.is_empty() || color.a() == 0 {
-                        continue;
-                    }
-                    let sb = Region::new(
-                        sb_f[0] as i16,
-                        sb_f[1] as i16,
-                        sb_f[2] as i16,
-                        sb_f[3] as i16,
-                    );
-                    let sc = Region::new(
-                        sc_f[0] as i16,
-                        sc_f[1] as i16,
-                        (sc_f[2] - sc_f[0]).max(0.0) as i16,
-                        (sc_f[3] - sc_f[1]).max(0.0) as i16,
-                    );
-                    // 与软件光栅器共享同一套 0.25px 亚像素字号与单行扩框真源，确保首屏切 GPU 0.00px 零漂移
-                    let (adj_bounds, adj_sc, adj_flags, logical_fs, fs_q4) =
-                        compute_scaled_text_box(
-                            op.bounds,
-                            op.clip,
-                            viewport,
-                            sb,
-                            sc,
-                            text.as_str(),
-                            font_size,
-                            text_flags,
-                            sf,
-                        );
-                    let adj_sc_f = [
-                        adj_sc.x as f32,
-                        adj_sc.y as f32,
-                        adj_sc.right() as f32,
-                        adj_sc.bottom() as f32,
-                    ];
-                    if !self.encode_text_run(
-                        queue,
-                        adj_bounds,
-                        adj_sc,
-                        adj_sc_f,
-                        clip_radius_px,
-                        text.as_str(),
-                        color,
-                        logical_fs,
-                        fs_q4,
-                        adj_flags,
-                        use_ttf,
-                    ) {
-                        return Err((true, None));
-                    }
-                }
-                DrawPayload::Sprite(SpriteSource::Arc {
-                    thickness,
-                    start_deg10,
-                    sweep_deg10,
-                    fill_sweep_deg10,
-                    track_color,
-                    fill_color,
-                }) => {
-                    // 原生 GPU 解析圆弧 SDF：零 CPU 光栅化、零纹理上传
-                    self.primitives.push(make_arc_primitive(
-                        sb_f,
-                        sc_f,
-                        clip_radius_px,
-                        ((thickness.max(1) as f32) * sf).max(1.5),
-                        start_deg10,
-                        sweep_deg10,
-                        fill_sweep_deg10,
-                        track_color,
-                        fill_color,
-                    ));
-                }
-                DrawPayload::Sprite(sprite) => {
-                    let sb = Region::new(
-                        sb_f[0] as i16,
-                        sb_f[1] as i16,
-                        sb_f[2] as i16,
-                        sb_f[3] as i16,
-                    );
-                    let sc = Region::new(
-                        sc_f[0] as i16,
-                        sc_f[1] as i16,
-                        (sc_f[2] - sc_f[0]).max(0.0) as i16,
-                        (sc_f[3] - sc_f[1]).max(0.0) as i16,
-                    );
-                    let eff = sc.intersect(sb);
-                    if eff.is_empty() {
-                        continue;
-                    }
-                    let w = eff.w.max(1) as usize;
-                    let h = eff.h.max(1) as usize;
-                    let cache_key = SpriteCacheKey {
-                        w: w as u32,
-                        h: h as u32,
-                        hash: Self::sprite_cache_hash(
-                            sprite,
-                            eff.x.saturating_sub(sb.x),
-                            eff.y.saturating_sub(sb.y),
-                            sb.w,
-                            sb.h,
-                        ),
-                    };
-
-                    let uv = if let Some(cached_uv) = self.sprite_atlas.lookup(cache_key) {
-                        cached_uv
-                    } else {
-                        let len = w * h;
-                        if self.sprite_scratch.len() < len {
-                            self.sprite_scratch.resize(len, Rgba8888(0));
-                        }
-                        let slice = &mut self.sprite_scratch[..len];
-                        slice.fill(Rgba8888(0));
-                        rasterize_sprite_source(sb, eff, sprite, eff.x, eff.y, w, slice);
-
-                        #[cfg(target_endian = "little")]
-                        let rgba_bytes: &[u8] = pod_as_bytes(slice);
-                        #[cfg(not(target_endian = "little"))]
-                        let rgba_bytes: &[u8] = {
-                            self.sprite_bytes_scratch.clear();
-                            self.sprite_bytes_scratch.reserve(len * 4);
-                            for px in slice.iter() {
-                                self.sprite_bytes_scratch
-                                    .extend_from_slice(&px.to_rgba_bytes());
-                            }
-                            &self.sprite_bytes_scratch
-                        };
-
-                        let Some(uv) = self.sprite_atlas.insert_and_upload(queue, cache_key, rgba_bytes)
-                        else {
-                            return Err((false, Some((w as u32, h as u32))));
-                        };
-                        uv
-                    };
-
-                    self.primitives.push(GpuPrimitive {
-                        bounds: [eff.x as f32, eff.y as f32, w as f32, h as f32],
-                        clip: sc_f,
-                        uv,
-                        color0: [1.0; 4],
-                        color1: [0.0; 4],
-                        border_color: [0.0; 4],
-                        params: [0.0, 0.0, KIND_SPRITE, 0.0],
-                        extra: [clip_radius_px, 0.0, 0.0, 0.0],
-                    });
-                }
-            }
+            self.encode_single_op(queue, op, eff_clip, viewport, sf, use_ttf, 0.0, 0.0)?;
         }
         Ok(())
     }
@@ -853,6 +1028,10 @@ impl WgpuRenderer {
                         border_color: [0.0; 4],
                         params: [0.0, 0.0, KIND_GLYPH, 0.0],
                         extra: [clip_radius_px, 0.0, 0.0, 0.0],
+                        radii: [0.0; 4],
+                        grad_a: [0.0; 4],
+                        grad_b: [0.0; 4],
+                        xform: IDENTITY_XFORM,
                     });
                 }
             }
@@ -860,7 +1039,30 @@ impl WgpuRenderer {
         true
     }
 
-    /// 将当前帧 `ops` 直接渲染至目标 `target_view`（单 RenderPass，单 Draw Call，支持分数 DPI 缩放因子 `scale_factor`）。
+    fn handle_atlas_grow(&mut self, device: &wgpu::Device, need: AtlasGrowNeed) -> (bool, bool) {
+        let mut dirty = false;
+        let mut can_retry = true;
+        if need.glyph_full && self.glyph_atlas.reset_or_grow(device) {
+            dirty = true;
+        }
+        if need.ramp_full && self.ramp_atlas.reset_or_grow(device) {
+            dirty = true;
+        }
+        if let Some((sw, sh)) = need.sprite_need {
+            let (recreated, retry) = self.sprite_atlas.reset_or_grow(device, sw, sh);
+            if recreated {
+                dirty = true;
+            }
+            if !retry {
+                can_retry = false;
+            }
+        }
+        (dirty, can_retry)
+    }
+
+    /// 将当前帧 `ops` 直接渲染至目标 `target_view`：
+    /// - 无图层/混合模式时走单 RenderPass / 单 Draw Call 直出快路径（0 离屏拷贝）；
+    /// - 含 `PushLayer` / 混合 / 毛玻璃 / 滤镜时自动通过 `GpuEffectsEngine` 在单 `CommandEncoder` 内完成多 Pass 离屏合成。
     #[allow(clippy::too_many_arguments)]
     pub fn render_to_view(
         &mut self,
@@ -874,23 +1076,32 @@ impl WgpuRenderer {
         phys_height: u32,
         clear_color: wgpu::Color,
     ) {
+        if ops_have_layers_or_blend(ops) && !viewport.is_empty() {
+            self.render_to_view_multi_pass(
+                device,
+                queue,
+                ops,
+                viewport,
+                scale_factor,
+                target_view,
+                phys_width,
+                phys_height,
+                clear_color,
+            );
+            return;
+        }
+
         let mut bind_group_dirty = false;
         for _attempt in 0..4 {
             match self.try_encode_ops(queue, ops, viewport, scale_factor) {
                 Ok(()) => break,
-                Err((glyph_full, sprite_need)) => {
-                    if glyph_full && self.glyph_atlas.reset_or_grow(device) {
+                Err(need) => {
+                    let (dirty, can_retry) = self.handle_atlas_grow(device, need);
+                    if dirty {
                         bind_group_dirty = true;
                     }
-                    if let Some((sw, sh)) = sprite_need {
-                        let (recreated, can_retry) =
-                            self.sprite_atlas.reset_or_grow(device, sw, sh);
-                        if recreated {
-                            bind_group_dirty = true;
-                        }
-                        if !can_retry {
-                            break;
-                        }
+                    if !can_retry {
+                        break;
                     }
                 }
             }
@@ -905,12 +1116,15 @@ impl WgpuRenderer {
             self.rebuild_bind_group(device);
         }
 
-        let uniform = ViewportUniform {
-            size: [phys_width.max(1) as f32, phys_height.max(1) as f32],
-            is_srgb: if self.target_is_srgb { 1.0 } else { 0.0 },
-            _pad: 0.0,
+        let slot0 = AlignedViewportSlot {
+            uniform: ViewportUniform {
+                size: [phys_width.max(1) as f32, phys_height.max(1) as f32],
+                is_srgb: if self.target_is_srgb { 1.0 } else { 0.0 },
+                _pad: 0.0,
+            },
+            _pad: [0u8; 256 - core::mem::size_of::<ViewportUniform>()],
         };
-        queue.write_buffer(&self.viewport_buf, 0, pod_as_bytes(&[uniform]));
+        queue.write_buffer(&self.viewport_buf, 0, pod_as_bytes(&[slot0]));
 
         if !self.primitives.is_empty() {
             queue.write_buffer(&self.instance_buf, 0, pod_as_bytes(&self.primitives));
@@ -938,10 +1152,749 @@ impl WgpuRenderer {
             });
             if !self.primitives.is_empty() {
                 rpass.set_pipeline(&self.pipeline);
-                rpass.set_bind_group(0, &self.bind_group, &[]);
+                rpass.set_bind_group(0, &self.bind_group, &[0]);
                 rpass.draw(0..6, 0..(self.primitives.len() as u32));
             }
         }
         queue.submit([encoder.finish()]);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_to_view_multi_pass(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        ops: &[DrawOp<'_>],
+        viewport: Region,
+        scale_factor: f32,
+        target_view: &wgpu::TextureView,
+        phys_width: u32,
+        phys_height: u32,
+        clear_color: wgpu::Color,
+    ) {
+        let pw = phys_width.max(1);
+        let ph = phys_height.max(1);
+        let sf = scale_factor.clamp(0.5, 4.0);
+        let use_ttf = crate::display::ttf_atlas::has_system_font();
+        let is_srgb = self.target_is_srgb;
+
+        if self.effects.is_none() {
+            self.effects = Some(GpuEffectsEngine::new(device, queue, self.target_format));
+        }
+
+        let mut bind_group_dirty = false;
+        for _attempt in 0..4 {
+            match self.try_plan_multi_pass(device, queue, ops, viewport, sf, use_ttf, pw, ph, clear_color, is_srgb) {
+                Ok(()) => break,
+                Err(need) => {
+                    let (dirty, can_retry) = self.handle_atlas_grow(device, need);
+                    if dirty {
+                        bind_group_dirty = true;
+                    }
+                    if !can_retry {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if self.primitives.len() > self.instance_capacity {
+            self.instance_capacity = self.primitives.len().next_power_of_two();
+            self.instance_buf = Self::create_instance_buffer(device, self.instance_capacity);
+            bind_group_dirty = true;
+        }
+        if self.viewport_slots.len() > self.viewport_capacity {
+            self.viewport_capacity = self.viewport_slots.len().next_power_of_two();
+            self.viewport_buf = Self::create_viewport_buffer(device, self.viewport_capacity);
+            bind_group_dirty = true;
+        }
+        if bind_group_dirty {
+            self.rebuild_bind_group(device);
+        }
+
+        if !self.viewport_slots.is_empty() {
+            queue.write_buffer(&self.viewport_buf, 0, pod_as_bytes(&self.viewport_slots));
+        }
+        if !self.primitives.is_empty() {
+            queue.write_buffer(&self.instance_buf, 0, pod_as_bytes(&self.primitives));
+        }
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("velox_wgpu_multi_pass_encoder"),
+        });
+        if let Some(ref mut fx) = self.effects {
+            fx.execute_steps(
+                device,
+                queue,
+                &mut encoder,
+                &self.pipeline,
+                &self.bind_group,
+                &self.linear_sampler,
+                target_view,
+            );
+        }
+        queue.submit([encoder.finish()]);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_plan_multi_pass(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        ops: &[DrawOp<'_>],
+        viewport: Region,
+        sf: f32,
+        use_ttf: bool,
+        pw: u32,
+        ph: u32,
+        clear_color: wgpu::Color,
+        is_srgb: bool,
+    ) -> Result<(), AtlasGrowNeed> {
+        struct LayerFrame<'a> {
+            tex_idx: usize,
+            active_w: u32,
+            active_h: u32,
+            origin_x: f32,
+            origin_y: f32,
+            viewport_slot: u32,
+            cleared: bool,
+            clear_col: wgpu::Color,
+            batch_start: u32,
+            spec: Option<&'a LayerSpec<'a>>,
+            body_phys: Region,
+            buf_rect: Region,
+            parent_clip_phys: Region,
+        }
+
+        self.primitives.clear();
+        self.viewport_slots.clear();
+        let mut fx = self.effects.take().expect("effects engine initialized");
+        fx.begin_frame();
+
+        let root_idx = fx.pool.acquire(device, pw, ph);
+        let root_tex_sz = (fx.pool.get(root_idx).width, fx.pool.get(root_idx).height);
+        let root_vp_slot = 0u32;
+        self.viewport_slots.push(AlignedViewportSlot {
+            uniform: ViewportUniform {
+                size: [root_tex_sz.0 as f32, root_tex_sz.1 as f32],
+                is_srgb: if is_srgb { 1.0 } else { 0.0 },
+                _pad: 0.0,
+            },
+            _pad: [0u8; 256 - core::mem::size_of::<ViewportUniform>()],
+        });
+
+        let mut stack: Vec<LayerFrame<'_>> = Vec::with_capacity(8);
+        stack.push(LayerFrame {
+            tex_idx: root_idx,
+            active_w: pw,
+            active_h: ph,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            viewport_slot: root_vp_slot,
+            cleared: false,
+            clear_col: clear_color,
+            batch_start: 0,
+            spec: None,
+            body_phys: Region::new(0, 0, pw as i16, ph as i16),
+            buf_rect: Region::new(0, 0, pw as i16, ph as i16),
+            parent_clip_phys: Region::new(0, 0, pw as i16, ph as i16),
+        });
+
+        let flush_top = |stack: &mut [LayerFrame<'_>], fx: &mut GpuEffectsEngine, prim_len: u32| {
+            let Some(top) = stack.last_mut() else {
+                return;
+            };
+            if !top.cleared || prim_len > top.batch_start {
+                let clear = if !top.cleared {
+                    top.cleared = true;
+                    Some(top.clear_col)
+                } else {
+                    None
+                };
+                fx.steps.push(GpuPassStep::DrawBatch {
+                    target_idx: top.tex_idx,
+                    clear,
+                    viewport_slot: top.viewport_slot,
+                    prim_start: top.batch_start,
+                    prim_end: prim_len,
+                });
+                top.batch_start = prim_len;
+            }
+        };
+
+        let result: Result<(), AtlasGrowNeed> = (|| {
+            for op in ops {
+                match op.payload {
+                    DrawPayload::PushLayer(spec) => {
+                        flush_top(&mut stack, &mut fx, self.primitives.len() as u32);
+                        let parent = stack.last().unwrap();
+                        let parent_idx = parent.tex_idx;
+                        let parent_aw = parent.active_w;
+                        let parent_ah = parent.active_h;
+                        let parent_ox = parent.origin_x;
+                        let parent_oy = parent.origin_y;
+                        let parent_tex_sz = (fx.pool.get(parent_idx).width, fx.pool.get(parent_idx).height);
+
+                        let body_phys = snap_bounds_region_scaled(spec.bounds, sf);
+                        let parent_clip_phys = snap_clip_region_scaled(op.clip, sf);
+
+                        // 1. 实时毛玻璃 `backdrop-filter`
+                        if !spec.backdrop_filter.is_empty() && !body_phys.is_empty() {
+                            let bd = spec.backdrop_filter;
+                            let blur_px = (bd.blur_radius as f32) * sf;
+                            let pad = (blur_px * 2.0).ceil() as i16;
+                            let local_body = Region::new(
+                                body_phys.x.saturating_sub(parent_ox as i16),
+                                body_phys.y.saturating_sub(parent_oy as i16),
+                                body_phys.w,
+                                body_phys.h,
+                            );
+                            let raw_sample = Region::new(
+                                local_body.x.saturating_sub(pad),
+                                local_body.y.saturating_sub(pad),
+                                local_body.w.saturating_add(pad.saturating_mul(2)),
+                                local_body.h.saturating_add(pad.saturating_mul(2)),
+                            );
+                            let (sx, sy, sw, sh) = clamp_rect_u32(raw_sample, parent_aw, parent_ah);
+                            if sw > 0 && sh > 0 {
+                                let bd_raw = fx.pool.acquire(device, sw, sh);
+                                fx.steps.push(GpuPassStep::CopyRect {
+                                    src_idx: parent_idx,
+                                    src_origin: (sx, sy),
+                                    dst_idx: bd_raw,
+                                    dst_origin: (0, 0),
+                                    size: (sw, sh),
+                                });
+                                let bd_blurred = if blur_px >= 0.5 {
+                                    let b = fx.plan_kawase_blur(device, bd_raw, sw, sh, blur_px, is_srgb);
+                                    if b != bd_raw {
+                                        fx.pool.release(bd_raw);
+                                    }
+                                    b
+                                } else {
+                                    bd_raw
+                                };
+
+                                let snap_idx = fx.pool.acquire(device, parent_aw, parent_ah);
+                                fx.steps.push(GpuPassStep::CopyRect {
+                                    src_idx: parent_idx,
+                                    src_origin: (0, 0),
+                                    dst_idx: snap_idx,
+                                    dst_origin: (0, 0),
+                                    size: (parent_aw, parent_ah),
+                                });
+
+                                let bd_tex_sz = (fx.pool.get(bd_blurred).width, fx.pool.get(bd_blurred).height);
+                                let snap_tex_sz = (fx.pool.get(snap_idx).width, fx.pool.get(snap_idx).height);
+                                let mut u = EffectUniform::default();
+                                u.tex_sizes = [
+                                    parent_tex_sz.0 as f32,
+                                    parent_tex_sz.1 as f32,
+                                    bd_tex_sz.0 as f32,
+                                    bd_tex_sz.1 as f32,
+                                ];
+                                u.dst_rect = [
+                                    local_body.x as f32,
+                                    local_body.y as f32,
+                                    local_body.w as f32,
+                                    local_body.h as f32,
+                                ];
+                                u.src_rect = [sx as f32, sy as f32, sw as f32, sh as f32];
+                                u.clip_rect = [
+                                    parent_clip_phys.x as f32 - parent_ox,
+                                    parent_clip_phys.y as f32 - parent_oy,
+                                    parent_clip_phys.right() as f32 - parent_ox,
+                                    parent_clip_phys.bottom() as f32 - parent_oy,
+                                ];
+                                u.body_rect = u.dst_rect;
+                                u.radii = [
+                                    (spec.clip_radii.tl as f32) * sf,
+                                    (spec.clip_radii.tr as f32) * sf,
+                                    (spec.clip_radii.br as f32) * sf,
+                                    (spec.clip_radii.bl as f32) * sf,
+                                ];
+                                u.params = [
+                                    (spec.opacity as f32) * (1.0 / 255.0),
+                                    0.0,
+                                    EFFECT_KIND_BACKDROP,
+                                    0.0,
+                                ];
+                                u.set_color_matrix(bd.color_matrix);
+                                u.flags[1] = if spec.clip_path.is_some() { 1.0 } else { 0.0 };
+                                u.flags[2] = (bd.noise_amount as f32) * (1.0 / 255.0) * 0.12;
+                                u.flags[3] = if is_srgb { 1.0 } else { 0.0 };
+                                u.tint = color_to_f32(bd.tint);
+                                u.extra = [0.0, 0.0, snap_tex_sz.0 as f32, snap_tex_sz.1 as f32];
+
+                                let slot = fx.push_slot(u);
+                                let mask_path = spec.clip_path.map(|p| {
+                                    (
+                                        std::string::String::from(p.as_str()),
+                                        local_body.w.max(1) as u32,
+                                        local_body.h.max(1) as u32,
+                                    )
+                                });
+                                fx.steps.push(GpuPassStep::Effect {
+                                    dst_idx: parent_idx,
+                                    clear_dst: false,
+                                    src_idx: bd_blurred,
+                                    dst_snap_idx: snap_idx,
+                                    mask_path,
+                                    effect_slot: slot,
+                                });
+                                fx.pool.release(bd_blurred);
+                                fx.pool.release(snap_idx);
+                            }
+                        }
+
+                        // 2. 为新隔离图层分配离屏目标并压栈
+                        let (fl, ft, fr, fb) = spec.filter.outset();
+                        let pl = ((fl as f32) * sf).ceil() as i16;
+                        let pt = ((ft as f32) * sf).ceil() as i16;
+                        let pr = ((fr as f32) * sf).ceil() as i16;
+                        let pb = ((fb as f32) * sf).ceil() as i16;
+                        let buf_rect = Region::new(
+                            body_phys.x.saturating_sub(pl),
+                            body_phys.y.saturating_sub(pt),
+                            body_phys.w.saturating_add(pl).saturating_add(pr).max(1),
+                            body_phys.h.saturating_add(pt).saturating_add(pb).max(1),
+                        );
+                        let lw = buf_rect.w.max(1) as u32;
+                        let lh = buf_rect.h.max(1) as u32;
+                        let layer_tex = fx.pool.acquire(device, lw, lh);
+                        let ltex_sz = (fx.pool.get(layer_tex).width, fx.pool.get(layer_tex).height);
+                        let vp_slot = self.viewport_slots.len() as u32;
+                        self.viewport_slots.push(AlignedViewportSlot {
+                            uniform: ViewportUniform {
+                                size: [ltex_sz.0 as f32, ltex_sz.1 as f32],
+                                is_srgb: if is_srgb { 1.0 } else { 0.0 },
+                                _pad: 0.0,
+                            },
+                            _pad: [0u8; 256 - core::mem::size_of::<ViewportUniform>()],
+                        });
+
+                        stack.push(LayerFrame {
+                            tex_idx: layer_tex,
+                            active_w: lw,
+                            active_h: lh,
+                            origin_x: buf_rect.x as f32,
+                            origin_y: buf_rect.y as f32,
+                            viewport_slot: vp_slot,
+                            cleared: false,
+                            clear_col: wgpu::Color::TRANSPARENT,
+                            batch_start: self.primitives.len() as u32,
+                            spec: Some(spec),
+                            body_phys,
+                            buf_rect,
+                            parent_clip_phys,
+                        });
+                    }
+
+                    DrawPayload::PopLayer => {
+                        if stack.len() <= 1 {
+                            continue;
+                        }
+                        flush_top(&mut stack, &mut fx, self.primitives.len() as u32);
+                        let layer = stack.pop().unwrap();
+                        if let Some(parent_mut) = stack.last_mut() {
+                            parent_mut.batch_start = self.primitives.len() as u32;
+                        }
+                        let Some(spec) = layer.spec else {
+                            continue;
+                        };
+                        let parent = stack.last().unwrap();
+                        let parent_idx = parent.tex_idx;
+                        let parent_aw = parent.active_w;
+                        let parent_ah = parent.active_h;
+                        let parent_ox = parent.origin_x;
+                        let parent_oy = parent.origin_y;
+                        let parent_tex_sz = (fx.pool.get(parent_idx).width, fx.pool.get(parent_idx).height);
+
+                        let local_buf = [
+                            layer.buf_rect.x as f32 - parent_ox,
+                            layer.buf_rect.y as f32 - parent_oy,
+                            layer.buf_rect.w as f32,
+                            layer.buf_rect.h as f32,
+                        ];
+                        let local_body = [
+                            layer.body_phys.x as f32 - parent_ox,
+                            layer.body_phys.y as f32 - parent_oy,
+                            layer.body_phys.w as f32,
+                            layer.body_phys.h as f32,
+                        ];
+                        let clip_f = [
+                            layer.parent_clip_phys.x as f32 - parent_ox,
+                            layer.parent_clip_phys.y as f32 - parent_oy,
+                            layer.parent_clip_phys.right() as f32 - parent_ox,
+                            layer.parent_clip_phys.bottom() as f32 - parent_oy,
+                        ];
+
+                        // 计算经 2D 仿射变换后的目标绘制矩形
+                        let dst_rect = if let Some(mut t) = spec.transform {
+                            if !t.is_identity() {
+                                t.e *= sf;
+                                t.f *= sf;
+                                let cx = local_body[0] + local_body[2] * 0.5;
+                                let cy = local_body[1] + local_body[3] * 0.5;
+                                let xreg = t.centered_at(cx, cy).transform_region(Region::new(
+                                    local_buf[0] as i16,
+                                    local_buf[1] as i16,
+                                    local_buf[2] as i16,
+                                    local_buf[3] as i16,
+                                ));
+                                [xreg.x as f32, xreg.y as f32, xreg.w as f32, xreg.h as f32]
+                            } else {
+                                local_buf
+                            }
+                        } else {
+                            local_buf
+                        };
+
+                        // 1. 若启用任意子树 `drop_shadow`：提取 Alpha（含 SVG Path 遮罩）-> Kawase Blur -> 变换偏移合成到父层
+                        if let Some(ds) = spec.filter.drop_shadow {
+                            if ds.is_active() {
+                                let sh_raw = fx.pool.acquire(device, layer.active_w, layer.active_h);
+                                let lsz = (fx.pool.get(layer.tex_idx).width, fx.pool.get(layer.tex_idx).height);
+                                let sh_sz = (fx.pool.get(sh_raw).width, fx.pool.get(sh_raw).height);
+                                let mut eu = EffectUniform::default();
+                                eu.tex_sizes = [sh_sz.0 as f32, sh_sz.1 as f32, lsz.0 as f32, lsz.1 as f32];
+                                eu.dst_rect = [0.0, 0.0, layer.active_w as f32, layer.active_h as f32];
+                                eu.src_rect = eu.dst_rect;
+                                eu.body_rect = [
+                                    (layer.body_phys.x - layer.buf_rect.x) as f32,
+                                    (layer.body_phys.y - layer.buf_rect.y) as f32,
+                                    layer.body_phys.w as f32,
+                                    layer.body_phys.h as f32,
+                                ];
+                                eu.params = [1.0, 0.0, EFFECT_KIND_SHADOW_EXTRACT, 0.0];
+                                eu.flags[1] = if spec.clip_path.is_some() { 1.0 } else { 0.0 };
+                                eu.flags[3] = if is_srgb { 1.0 } else { 0.0 };
+                                eu.tint = color_to_f32(ds.color);
+                                let eslot = fx.push_slot(eu);
+                                let sh_mask = spec.clip_path.map(|p| {
+                                    (
+                                        std::string::String::from(p.as_str()),
+                                        layer.body_phys.w.max(1) as u32,
+                                        layer.body_phys.h.max(1) as u32,
+                                    )
+                                });
+                                fx.steps.push(GpuPassStep::Effect {
+                                    dst_idx: sh_raw,
+                                    clear_dst: true,
+                                    src_idx: layer.tex_idx,
+                                    dst_snap_idx: layer.tex_idx,
+                                    mask_path: sh_mask,
+                                    effect_slot: eslot,
+                                });
+
+                                let ds_blur = (ds.blur as f32) * sf;
+                                let sh_final = if ds_blur >= 0.5 {
+                                    let b = fx.plan_kawase_blur(
+                                        device,
+                                        sh_raw,
+                                        layer.active_w,
+                                        layer.active_h,
+                                        ds_blur,
+                                        is_srgb,
+                                    );
+                                    if b != sh_raw {
+                                        fx.pool.release(sh_raw);
+                                    }
+                                    b
+                                } else {
+                                    sh_raw
+                                };
+
+                                let snap_idx = fx.pool.acquire(device, parent_aw, parent_ah);
+                                fx.steps.push(GpuPassStep::CopyRect {
+                                    src_idx: parent_idx,
+                                    src_origin: (0, 0),
+                                    dst_idx: snap_idx,
+                                    dst_origin: (0, 0),
+                                    size: (parent_aw, parent_ah),
+                                });
+                                let sh_tex_sz = (fx.pool.get(sh_final).width, fx.pool.get(sh_final).height);
+                                let snap_sz = (fx.pool.get(snap_idx).width, fx.pool.get(snap_idx).height);
+                                let ox = (ds.offset_x as f32) * sf;
+                                let oy = (ds.offset_y as f32) * sf;
+
+                                let mut cu = EffectUniform::default();
+                                cu.tex_sizes = [
+                                    parent_tex_sz.0 as f32,
+                                    parent_tex_sz.1 as f32,
+                                    sh_tex_sz.0 as f32,
+                                    sh_tex_sz.1 as f32,
+                                ];
+                                cu.dst_rect = [
+                                    dst_rect[0] + ox,
+                                    dst_rect[1] + oy,
+                                    dst_rect[2],
+                                    dst_rect[3],
+                                ];
+                                cu.src_rect = local_buf;
+                                cu.clip_rect = clip_f;
+                                cu.body_rect = local_body;
+                                cu.params = [
+                                    (spec.opacity as f32) * (1.0 / 255.0),
+                                    spec.blend_mode as u8 as f32,
+                                    EFFECT_KIND_COMPOSITE,
+                                    0.0,
+                                ];
+                                cu.set_color_matrix(None);
+                                cu.set_transform(spec.transform, sf);
+                                cu.extra[0] += ox;
+                                cu.extra[1] += oy;
+                                cu.extra[2] = snap_sz.0 as f32;
+                                cu.extra[3] = snap_sz.1 as f32;
+                                let cslot = fx.push_slot(cu);
+                                fx.steps.push(GpuPassStep::Effect {
+                                    dst_idx: parent_idx,
+                                    clear_dst: false,
+                                    src_idx: sh_final,
+                                    dst_snap_idx: snap_idx,
+                                    mask_path: None,
+                                    effect_slot: cslot,
+                                });
+                                fx.pool.release(sh_final);
+                                fx.pool.release(snap_idx);
+                            }
+                        }
+
+                        // 2. 图层本体模糊（Dual Kawase Blur）
+                        let blur_px = (spec.filter.blur_radius as f32) * sf;
+                        let src_final = if blur_px >= 0.5 {
+                            let b = fx.plan_kawase_blur(
+                                device,
+                                layer.tex_idx,
+                                layer.active_w,
+                                layer.active_h,
+                                blur_px,
+                                is_srgb,
+                            );
+                            if b != layer.tex_idx {
+                                fx.pool.release(layer.tex_idx);
+                            }
+                            b
+                        } else {
+                            layer.tex_idx
+                        };
+
+                        // 3. 合成回父层（ColorMatrix + SVG Path 遮罩 + Transform2D + Opacity + 27 种 BlendMode）
+                        let snap_idx = fx.pool.acquire(device, parent_aw, parent_ah);
+                        fx.steps.push(GpuPassStep::CopyRect {
+                            src_idx: parent_idx,
+                            src_origin: (0, 0),
+                            dst_idx: snap_idx,
+                            dst_origin: (0, 0),
+                            size: (parent_aw, parent_ah),
+                        });
+                        let src_tex_sz = (fx.pool.get(src_final).width, fx.pool.get(src_final).height);
+                        let snap_tex_sz = (fx.pool.get(snap_idx).width, fx.pool.get(snap_idx).height);
+
+                        let mut cu = EffectUniform::default();
+                        cu.tex_sizes = [
+                            parent_tex_sz.0 as f32,
+                            parent_tex_sz.1 as f32,
+                            src_tex_sz.0 as f32,
+                            src_tex_sz.1 as f32,
+                        ];
+                        cu.dst_rect = dst_rect;
+                        cu.src_rect = local_buf;
+                        cu.clip_rect = clip_f;
+                        cu.body_rect = local_body;
+                        cu.radii = [
+                            (spec.clip_radii.tl as f32) * sf,
+                            (spec.clip_radii.tr as f32) * sf,
+                            (spec.clip_radii.br as f32) * sf,
+                            (spec.clip_radii.bl as f32) * sf,
+                        ];
+                        cu.params = [
+                            (spec.opacity as f32) * (1.0 / 255.0),
+                            spec.blend_mode as u8 as f32,
+                            EFFECT_KIND_COMPOSITE,
+                            0.0,
+                        ];
+                        cu.set_color_matrix(spec.filter.color_matrix);
+                        cu.flags[1] = if spec.clip_path.is_some() { 1.0 } else { 0.0 };
+                        cu.flags[3] = if is_srgb { 1.0 } else { 0.0 };
+                        cu.set_transform(spec.transform, sf);
+                        cu.extra[2] = snap_tex_sz.0 as f32;
+                        cu.extra[3] = snap_tex_sz.1 as f32;
+                        let cslot = fx.push_slot(cu);
+
+                        let mask_path = spec.clip_path.map(|p| {
+                            (
+                                std::string::String::from(p.as_str()),
+                                layer.body_phys.w.max(1) as u32,
+                                layer.body_phys.h.max(1) as u32,
+                            )
+                        });
+                        fx.steps.push(GpuPassStep::Effect {
+                            dst_idx: parent_idx,
+                            clear_dst: false,
+                            src_idx: src_final,
+                            dst_snap_idx: snap_idx,
+                            mask_path,
+                            effect_slot: cslot,
+                        });
+                        fx.pool.release(src_final);
+                        fx.pool.release(snap_idx);
+                    }
+
+                    // 单图元非 `SrcOver` 混合：自动借用微型临时层执行精确 27 种 W3C 混合模式
+                    DrawPayload::StyledQuad(sq) if !sq.blend_mode.is_normal() => {
+                        flush_top(&mut stack, &mut fx, self.primitives.len() as u32);
+                        let parent = stack.last().unwrap();
+                        let parent_idx = parent.tex_idx;
+                        let parent_aw = parent.active_w;
+                        let parent_ah = parent.active_h;
+                        let parent_ox = parent.origin_x;
+                        let parent_oy = parent.origin_y;
+                        let parent_tex_sz = (fx.pool.get(parent_idx).width, fx.pool.get(parent_idx).height);
+
+                        let body_phys = snap_bounds_region_scaled(op.bounds, sf);
+                        let buf_rect = if let Some(mut t) = sq.transform {
+                            if !t.is_identity() {
+                                t.e *= sf;
+                                t.f *= sf;
+                                let cx = body_phys.x as f32 + body_phys.w as f32 * 0.5;
+                                let cy = body_phys.y as f32 + body_phys.h as f32 * 0.5;
+                                t.centered_at(cx, cy).transform_region(body_phys)
+                            } else {
+                                body_phys
+                            }
+                        } else {
+                            body_phys
+                        };
+                        let lw = buf_rect.w.max(1) as u32;
+                        let lh = buf_rect.h.max(1) as u32;
+                        let tmp_tex = fx.pool.acquire(device, lw, lh);
+                        let tmp_sz = (fx.pool.get(tmp_tex).width, fx.pool.get(tmp_tex).height);
+                        let vp_slot = self.viewport_slots.len() as u32;
+                        self.viewport_slots.push(AlignedViewportSlot {
+                            uniform: ViewportUniform {
+                                size: [tmp_sz.0 as f32, tmp_sz.1 as f32],
+                                is_srgb: if is_srgb { 1.0 } else { 0.0 },
+                                _pad: 0.0,
+                            },
+                            _pad: [0u8; 256 - core::mem::size_of::<ViewportUniform>()],
+                        });
+
+                        let normal_sq = StyledQuad {
+                            blend_mode: BlendMode::SrcOver,
+                            ..*sq
+                        };
+                        let tmp_op = DrawOp {
+                            payload: DrawPayload::StyledQuad(&normal_sq),
+                            ..*op
+                        };
+                        let pstart = self.primitives.len() as u32;
+                        self.encode_single_op(
+                            queue,
+                            &tmp_op,
+                            op.clip,
+                            viewport,
+                            sf,
+                            use_ttf,
+                            buf_rect.x as f32,
+                            buf_rect.y as f32,
+                        )?;
+                        let pend = self.primitives.len() as u32;
+                        fx.steps.push(GpuPassStep::DrawBatch {
+                            target_idx: tmp_tex,
+                            clear: Some(wgpu::Color::TRANSPARENT),
+                            viewport_slot: vp_slot,
+                            prim_start: pstart,
+                            prim_end: pend,
+                        });
+                        if let Some(top) = stack.last_mut() {
+                            top.batch_start = pend;
+                        }
+
+                        let snap_idx = fx.pool.acquire(device, parent_aw, parent_ah);
+                        fx.steps.push(GpuPassStep::CopyRect {
+                            src_idx: parent_idx,
+                            src_origin: (0, 0),
+                            dst_idx: snap_idx,
+                            dst_origin: (0, 0),
+                            size: (parent_aw, parent_ah),
+                        });
+                        let snap_sz = (fx.pool.get(snap_idx).width, fx.pool.get(snap_idx).height);
+                        let clip_phys = snap_clip_region_scaled(op.clip, sf);
+                        let local_buf = [
+                            buf_rect.x as f32 - parent_ox,
+                            buf_rect.y as f32 - parent_oy,
+                            buf_rect.w as f32,
+                            buf_rect.h as f32,
+                        ];
+                        let mut cu = EffectUniform::default();
+                        cu.tex_sizes = [
+                            parent_tex_sz.0 as f32,
+                            parent_tex_sz.1 as f32,
+                            tmp_sz.0 as f32,
+                            tmp_sz.1 as f32,
+                        ];
+                        cu.dst_rect = local_buf;
+                        cu.src_rect = local_buf;
+                        cu.clip_rect = [
+                            clip_phys.x as f32 - parent_ox,
+                            clip_phys.y as f32 - parent_oy,
+                            clip_phys.right() as f32 - parent_ox,
+                            clip_phys.bottom() as f32 - parent_oy,
+                        ];
+                        cu.body_rect = local_buf;
+                        cu.params = [1.0, sq.blend_mode as u8 as f32, EFFECT_KIND_COMPOSITE, 0.0];
+                        cu.set_color_matrix(None);
+                        cu.inv_xform = [1.0, 0.0, 0.0, 1.0];
+                        cu.extra = [0.0, 0.0, snap_sz.0 as f32, snap_sz.1 as f32];
+                        let cslot = fx.push_slot(cu);
+                        fx.steps.push(GpuPassStep::Effect {
+                            dst_idx: parent_idx,
+                            clear_dst: false,
+                            src_idx: tmp_tex,
+                            dst_snap_idx: snap_idx,
+                            mask_path: None,
+                            effect_slot: cslot,
+                        });
+                        fx.pool.release(tmp_tex);
+                        fx.pool.release(snap_idx);
+                    }
+
+                    _ => {
+                        let raw_clip = match op.payload {
+                            DrawPayload::StyledQuad(sq) if sq.transform.is_some() => {
+                                viewport.intersect(op.clip)
+                            }
+                            _ => viewport.intersect(op.clip).intersect(op.bounds),
+                        };
+                        if raw_clip.is_empty() {
+                            continue;
+                        }
+                        let (ox, oy) = {
+                            let top = stack.last().unwrap();
+                            (top.origin_x, top.origin_y)
+                        };
+                        self.encode_single_op(queue, op, raw_clip, viewport, sf, use_ttf, ox, oy)?;
+                    }
+                }
+            }
+
+            // 冲刷根画布最后一批图元并 Blit 至外部 `target_view`
+            flush_top(&mut stack, &mut fx, self.primitives.len() as u32);
+            let mut blit_u = EffectUniform::default();
+            blit_u.tex_sizes = [pw as f32, ph as f32, root_tex_sz.0 as f32, root_tex_sz.1 as f32];
+            blit_u.dst_rect = [0.0, 0.0, pw as f32, ph as f32];
+            blit_u.src_rect = [0.0, 0.0, pw as f32, ph as f32];
+            blit_u.params = [1.0, 0.0, EFFECT_KIND_BLIT, 0.0];
+            let blit_slot = fx.push_slot(blit_u);
+            fx.steps.push(GpuPassStep::BlitToTarget {
+                src_idx: root_idx,
+                effect_slot: blit_slot,
+            });
+            Ok(())
+        })();
+
+        self.effects = Some(fx);
+        result
     }
 }

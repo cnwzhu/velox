@@ -64,7 +64,7 @@ impl View for GalleryCounter {
     }
 }";
 
-/// Gallery 侧边栏组件故事页枚举（11 个交互式故事页）。
+/// Gallery 侧边栏组件故事页枚举（12 个交互式故事页）。
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum GalleryStory {
     Overview,
@@ -78,6 +78,7 @@ pub enum GalleryStory {
     Feedback,
     Data,
     SettingsIcons,
+    Effects,
 }
 
 /// 兼容旧命名的类型别名。
@@ -99,6 +100,7 @@ impl GalleryStory {
             Self::Feedback => 9,
             Self::Data => 10,
             Self::SettingsIcons => 11,
+            Self::Effects => 12,
         }
     }
 
@@ -116,7 +118,8 @@ impl GalleryStory {
             8 => Self::Overlays,
             9 => Self::Feedback,
             10 => Self::Data,
-            _ => Self::SettingsIcons,
+            11 => Self::SettingsIcons,
+            _ => Self::Effects,
         }
     }
 
@@ -165,6 +168,12 @@ impl GalleryStory {
             Some(Self::Data)
         } else if name.eq_ignore_ascii_case("settings") || name.eq_ignore_ascii_case("icons") {
             Some(Self::SettingsIcons)
+        } else if name.eq_ignore_ascii_case("effects")
+            || name.eq_ignore_ascii_case("shader")
+            || name.eq_ignore_ascii_case("shaders")
+            || name.eq_ignore_ascii_case("fx")
+        {
+            Some(Self::Effects)
         } else {
             None
         }
@@ -185,6 +194,7 @@ impl GalleryStory {
             Self::Feedback => "story.feedback",
             Self::Data => "story.data",
             Self::SettingsIcons => "story.icons",
+            Self::Effects => "story.effects",
         }
     }
 }
@@ -284,6 +294,17 @@ pub struct GalleryApp {
     pub vsync_enabled: bool,
     pub hidpi_enabled: bool,
     pub damage_overlay_hint: bool,
+
+    // Effects & Shaders Lab
+    pub fx_grad_angle: i32,
+    pub fx_grad_space: GradientSpace,
+    pub fx_grad_extend: ExtendMode,
+    pub fx_blend_idx: usize,
+    pub fx_backdrop_blur: i32,
+    pub fx_acrylic_enabled: bool,
+    pub fx_filter_preset: usize,
+    pub fx_rotation_deg: i32,
+    pub fx_clip_shape: usize,
 }
 
 /// 兼容旧示例主视图命名的类型别名。
@@ -372,6 +393,15 @@ impl GalleryApp {
             vsync_enabled: true,
             hidpi_enabled: true,
             damage_overlay_hint: true,
+            fx_grad_angle: 135,
+            fx_grad_space: GradientSpace::Oklab,
+            fx_grad_extend: ExtendMode::Pad,
+            fx_blend_idx: 0,
+            fx_backdrop_blur: 10,
+            fx_acrylic_enabled: true,
+            fx_filter_preset: 0,
+            fx_rotation_deg: 18,
+            fx_clip_shape: 0,
         }
     }
 
@@ -645,6 +675,9 @@ impl View for GalleryApp {
             SidebarItem::new(GalleryStory::SettingsIcons.id(), cx.t("story.icons").as_str(), "G")
                 .icon_name(IconName::Settings)
                 .badge("19"),
+            SidebarItem::new(GalleryStory::Effects.id(), cx.t("story.effects").as_str(), "F")
+                .icon_name(IconName::Star)
+                .badge("FX"),
         ]);
 
         let sidebar_sections = cx.arena().alloc_iter([
@@ -688,6 +721,13 @@ impl View for GalleryApp {
             GalleryStory::Feedback => self.render_story_feedback(cx, theme),
             GalleryStory::Data => self.render_story_data(cx, theme),
             GalleryStory::SettingsIcons => self.render_story_settings_icons(cx, theme),
+            GalleryStory::Effects => self.render_story_effects(cx, theme),
+        };
+
+        let content_scroll_max = if self.active_story == GalleryStory::Effects {
+            760
+        } else {
+            420
         };
 
         let body_row = div()
@@ -705,7 +745,7 @@ impl View for GalleryApp {
                     .flex_grow(1)
                     .h_full()
                     .p(20)
-                    .scrollable(420)
+                    .scrollable(content_scroll_max)
                     .overflow_hidden()
                     .child(cx, content_inner),
             );

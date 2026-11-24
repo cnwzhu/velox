@@ -330,7 +330,10 @@ pub fn collect_a11y_nodes<'a, const CAP: usize>(
                     scroll_info: None,
                 });
             }
-            DrawPayload::Quad { .. } => {}
+            DrawPayload::Quad { .. }
+            | DrawPayload::StyledQuad(_)
+            | DrawPayload::PushLayer(_)
+            | DrawPayload::PopLayer => {}
         }
     }
 

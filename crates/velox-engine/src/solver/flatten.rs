@@ -1,8 +1,9 @@
 //! Pass 4（自顶向下纵向坐标分配与扁平化）：在单次深度优先遍历中生成 `DrawOp` 与 `HitRegion` 序列。
 
-use crate::arena::SmallVec;
+use crate::arena::{ScratchArena, SmallVec};
 use crate::element::{DivNode, Element, SpriteSource, TransitionSpec};
 use crate::motion::{DrawOp, DrawPayload, MotionCache, MotionState};
+use crate::paint::{BlendMode, CornerRadii, LayerSpec, Paint, StyledQuad};
 use crate::style::{AlignItems, Color, FlexDir, Justify, Length};
 
 use super::types::{
@@ -13,6 +14,7 @@ use super::types::{
 /// Pass 4（自顶向下）：求解所有节点的最终 `y` 与 `h`，并在同一次遍历中将层级树拍平为一维连续的 `DrawOp` 数组。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const MAX_HITS: usize>(
+    arena: &'a ScratchArena,
     node: &mut LayoutNode<'a, '_>,
     owner_pod: u16,
     path_hash: u32,
@@ -238,11 +240,58 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                 }
             }
             let my_opacity = ((inherited_opacity as u16 * opacity as u16) / 255) as u8;
+            let effects = div.effects();
+            let has_children = !node.children.is_empty();
+            let layer_pushed = if emit_here {
+                if let Some(eff) = effects {
+                    if eff.needs_layer(has_children, my_opacity) {
+                        let clip_radii = eff.corner_radii.unwrap_or(CornerRadii::all(rounded));
+                        let spec = LayerSpec {
+                            bounds,
+                            clip_radii,
+                            clip_path: eff.clip_path,
+                            opacity: my_opacity,
+                            blend_mode: eff.blend_mode,
+                            filter: eff.filter,
+                            backdrop_filter: eff.backdrop_filter,
+                            transform: eff.transform,
+                        };
+                        let exp_bounds = spec.expanded_bounds();
+                        if let Some(spec_ref) = arena.try_alloc(spec) {
+                            if out_ops.push(DrawOp {
+                                id: Some(effective_id ^ 0x6C00_0000),
+                                bounds: exp_bounds,
+                                clip: eff_parent_clip,
+                                clip_radius: eff_parent_clip_radius,
+                                payload: DrawPayload::PushLayer(spec_ref),
+                            }) {
+                                Some(exp_bounds)
+                            } else {
+                                *dropped_ops = dropped_ops.saturating_add(1);
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
-            bg = bg.scale_alpha(my_opacity);
-            border_color = border_color.scale_alpha(my_opacity);
+            // 若当前容器已推入隔离合成图层，则图层内部的自绘与子树均按完全不透明（255）渲染，
+            // 最终由 `PopLayer` 统一执行真正的 Group Opacity、混合模式、模糊/色彩滤镜与路径裁切。
+            let inner_opacity = if layer_pushed.is_some() { 255 } else { my_opacity };
+
+            let raw_bg = bg;
+            bg = bg.scale_alpha(inner_opacity);
+            border_color = border_color.scale_alpha(inner_opacity);
             let (bg_grad, grad_horiz) = match div.bg_grad() {
-                Some((to_col, horiz)) => (to_col.scale_alpha(my_opacity), horiz),
+                Some((to_col, horiz)) => (to_col.scale_alpha(inner_opacity), horiz),
                 None => (bg, false),
             };
             let encoded_bw = (border_width & 0x7F) | (if grad_horiz { 0x80 } else { 0 });
@@ -273,7 +322,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                         bounds.w.saturating_add(b_i16.saturating_mul(2)),
                         bounds.h.saturating_add(b_i16.saturating_mul(2)),
                     );
-                    let sh_col = scol.scale_alpha(my_opacity);
+                    let sh_col = scol.scale_alpha(inner_opacity);
                     if sh_col.a() > 0
                         && !out_ops.push(DrawOp {
                             id: Some(effective_id ^ 0x5A00_0000),
@@ -294,7 +343,56 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                 }
             }
 
-            if emit_here && (bg.a() > 0 || bg_grad.a() > 0 || (border_width > 0 && border_color.a() > 0)) {
+            let use_styled_quad = effects.is_some_and(|eff| {
+                eff.bg_paint.is_some()
+                    || eff.corner_radii.is_some()
+                    || (layer_pushed.is_none()
+                        && (eff.transform.is_some() || !eff.blend_mode.is_normal()))
+            });
+
+            if emit_here && use_styled_quad {
+                let eff = effects.unwrap();
+                let paint = eff.bg_paint.unwrap_or(Paint::Solid(raw_bg));
+                let radii = eff.corner_radii.unwrap_or(CornerRadii::all(rounded));
+                let has_fill = !paint.is_fully_transparent() && inner_opacity > 0;
+                let has_border = border_width > 0 && border_color.a() > 0;
+                if has_fill || has_border {
+                    let sq = StyledQuad {
+                        paint,
+                        border_color,
+                        border_width: border_width & 0x7F,
+                        radii,
+                        opacity: inner_opacity,
+                        blend_mode: if layer_pushed.is_some() {
+                            BlendMode::SrcOver
+                        } else {
+                            eff.blend_mode
+                        },
+                        transform: if layer_pushed.is_some() {
+                            None
+                        } else {
+                            eff.transform
+                        },
+                    };
+                    if let Some(sq_ref) = arena.try_alloc(sq) {
+                        if !out_ops.push(DrawOp {
+                            id: div.id().or(if div.transition.is_some() {
+                                Some(effective_id)
+                            } else {
+                                None
+                            }),
+                            bounds,
+                            clip: eff_parent_clip,
+                            clip_radius: eff_parent_clip_radius,
+                            payload: DrawPayload::StyledQuad(sq_ref),
+                        }) {
+                            *dropped_ops = dropped_ops.saturating_add(1);
+                        }
+                    } else {
+                        *dropped_ops = dropped_ops.saturating_add(1);
+                    }
+                }
+            } else if emit_here && (bg.a() > 0 || bg_grad.a() > 0 || (border_width > 0 && border_color.a() > 0)) {
                 if !out_ops.push(DrawOp {
                     id: div.id().or(if div.transition.is_some() {
                         Some(effective_id)
@@ -397,6 +495,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                         )
                     });
                     pass4_vertical_assign_and_flatten(
+                        arena,
                         child,
                         cur_owner_pod,
                         child_hash,
@@ -405,7 +504,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                         my_clip,
                         my_clip_radius,
                         child_transition,
-                        my_opacity,
+                        inner_opacity,
                         child_offset,
                         child_text_size,
                         child_text_color,
@@ -458,6 +557,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                                 )
                             });
                             pass4_vertical_assign_and_flatten(
+                                arena,
                                 child,
                                 cur_owner_pod,
                                 child_hash,
@@ -466,7 +566,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                                 my_clip,
                                 my_clip_radius,
                                 child_transition,
-                                my_opacity,
+                                inner_opacity,
                                 child_offset,
                                 child_text_size,
                                 child_text_color,
@@ -495,6 +595,18 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                         Some(nz) => cur_z = nz,
                         None => break,
                     }
+                }
+            }
+
+            if let Some(exp_bounds) = layer_pushed {
+                if !out_ops.push(DrawOp {
+                    id: Some(effective_id ^ 0x6D00_0000),
+                    bounds: exp_bounds,
+                    clip: eff_parent_clip,
+                    clip_radius: eff_parent_clip_radius,
+                    payload: DrawPayload::PopLayer,
+                }) {
+                    *dropped_ops = dropped_ops.saturating_add(1);
                 }
             }
         }

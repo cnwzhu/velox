@@ -7,6 +7,7 @@
 //! - `compositor`：局部脏区光栅化、DMA2D 硬件加速、多线程条带并行合成与 `OffscreenCompositor`。
 
 mod compositor;
+mod effects;
 mod sdf;
 mod sprite;
 mod text;
@@ -28,6 +29,8 @@ pub use sdf::{
 pub(crate) use sdf::rasterize_quad;
 pub(crate) use sprite::rasterize_sprite_source;
 pub use text::rasterize_text;
+#[cfg(feature = "gpu")]
+pub(crate) use effects::ops_have_layers_or_blend;
 #[cfg(feature = "gpu")]
 pub(crate) use text::{align_offset_x, compute_scaled_text_box, split_text_lines};
 

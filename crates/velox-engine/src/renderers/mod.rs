@@ -241,6 +241,26 @@ pub fn lower_draw_ops<S: LoweredPrimitiveSink + ?Sized>(
                 DrawPayload::Sprite(sprite) => {
                     sink.draw_sprite(scaled_bounds, scaled_clip, sprite);
                 }
+                DrawPayload::StyledQuad(sq) => {
+                    let r = sq.radii.max_radius().saturating_mul(s as u8);
+                    let bw = sq.border_width.saturating_mul(s as u8);
+                    let fill_col = match sq.paint {
+                        crate::paint::Paint::Solid(c) => c.scale_alpha(sq.opacity),
+                        crate::paint::Paint::LinearGradient { stops, .. }
+                        | crate::paint::Paint::RadialGradient { stops, .. }
+                        | crate::paint::Paint::ConicGradient { stops, .. } => stops
+                            .first()
+                            .map(|st| st.color.scale_alpha(sq.opacity))
+                            .unwrap_or(Color::TRANSPARENT),
+                    };
+                    if fill_col.a() > 0 {
+                        sink.fill_rect(scaled_bounds, r, fill_col, fill_col, false);
+                    }
+                    if bw > 0 && sq.border_color.a() > 0 {
+                        sink.stroke_rect(scaled_bounds, r, bw, sq.border_color);
+                    }
+                }
+                DrawPayload::PushLayer(_) | DrawPayload::PopLayer => {}
             }
 
             if needs_elem_clip {
