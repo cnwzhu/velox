@@ -52,7 +52,7 @@ pub use components::{
     SettingsValue, Sheet, SheetSide, Sidebar, SidebarItem, SidebarItemState, SidebarSection,
     SimpleDate, Skeleton, SkeletonShape, Slider, SliderState, SortDirection, Speech, SpeechState,
     SpeechStatus, Spinner, SplitAxis, StatusBar, StatusBarItem, StepItem, StepStatus, Stepper,
-    StepperItemState, Svg, Switch, SwitchLabelSide, SwitchState, TabBar, TabBarItemState,
+    StepperItemState, SurfaceCanvas, Svg, Switch, SwitchLabelSide, SwitchState, TabBar, TabBarItemState,
     TabItemState, Table, TableCellState, TableColumn, TableHeaderState, Tabs, TabsVariant, Tag,
     TagVariant, TextInput, TextView, TextViewFormat, Theme, ThemeMode, TimeField, TimeFieldState,
     TimePrecision, TimeSegment, TimeSegmentState, Toast, Toggle, ToggleGroup, ToggleItemState,

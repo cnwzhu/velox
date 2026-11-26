@@ -11,14 +11,18 @@ pub use ::wgpu;
 
 mod atlas;
 mod effects_pass;
+pub mod interop;
 mod layer_pool;
 mod offscreen;
 mod pipeline;
 mod ramp;
+mod shared_exporter;
 mod window;
 
+pub use interop::{ExportedHandle, ExternalSyncHandle};
 pub use offscreen::WgpuOffscreenRenderer;
 pub use pipeline::WgpuRenderer;
+pub use shared_exporter::{SharedFrameLease, SharedSlot, WgpuSharedExportRenderer};
 pub use window::{PreparedWgpuContext, WgpuWindowRenderer};
 
 use core::future::Future;
@@ -511,6 +515,9 @@ impl WgpuScene {
                         }
                     }
                     DrawPayload::PushLayer(_) | DrawPayload::PopLayer => {}
+                    DrawPayload::ExternalTexture(_) => {
+                        self.sprite_count += 1;
+                    }
                 }
             }
         }

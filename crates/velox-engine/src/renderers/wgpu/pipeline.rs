@@ -19,7 +19,7 @@ use crate::style::Color;
 use super::atlas::{GlyphAtlas, SpriteAtlas, SpriteCacheKey, GLYPH_ATLAS_INIT_SIZE};
 use super::effects_pass::{
     clamp_rect_u32, EffectUniform, GpuEffectsEngine, GpuPassStep, EFFECT_KIND_BACKDROP,
-    EFFECT_KIND_BLIT, EFFECT_KIND_COMPOSITE, EFFECT_KIND_SHADOW_EXTRACT,
+    EFFECT_KIND_BLIT, EFFECT_KIND_COMPOSITE, EFFECT_KIND_EXTERNAL_TEX, EFFECT_KIND_SHADOW_EXTRACT,
 };
 use super::ramp::GradientRampAtlas;
 use super::{
@@ -27,7 +27,7 @@ use super::{
     make_styled_quad_primitive, pod_as_bytes, snap_bounds, snap_clip, GpuPrimitive,
     ViewportUniform, IDENTITY_XFORM, KIND_GLYPH, KIND_SPRITE,
 };
-use crate::paint::{BlendMode, LayerSpec, Paint, StyledQuad};
+use crate::paint::{BlendMode, ExternalTextureId, LayerSpec, Paint, StyledQuad};
 use crate::renderers::software::{ops_have_layers_or_blend, snap_bounds_region_scaled, snap_clip_region_scaled};
 
 const SDF_WGSL: &str = include_str!("shader.wgsl");
@@ -95,6 +95,12 @@ struct AtlasGrowNeed {
     ramp_full: bool,
 }
 
+/// 外部零拷贝 GPU 纹理注册条目（由外部渲染引擎共享 `wgpu::TextureView` 与可选采样器）。
+pub(crate) struct ExternalTextureEntry {
+    pub(crate) view: wgpu::TextureView,
+    pub(crate) sampler: Option<wgpu::Sampler>,
+}
+
 /// 自研轻量级 `wgpu` 2D SDF 渲染管线核心（绑定任意目标 `TextureView` 即可渲染）。
 pub struct WgpuRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -111,6 +117,8 @@ pub struct WgpuRenderer {
     sprite_atlas: SpriteAtlas,
     ramp_atlas: GradientRampAtlas,
     effects: Option<GpuEffectsEngine>,
+    external_textures: HashMap<ExternalTextureId, ExternalTextureEntry>,
+    next_external_id: u32,
     target_format: wgpu::TextureFormat,
     primitives: Vec<GpuPrimitive>,
     sprite_scratch: Vec<Rgba8888>,
@@ -303,6 +311,8 @@ impl WgpuRenderer {
             sprite_atlas,
             ramp_atlas,
             effects: None,
+            external_textures: HashMap::new(),
+            next_external_id: 1,
             target_format,
             primitives: Vec::with_capacity(INITIAL_INSTANCE_CAPACITY),
             sprite_scratch: Vec::new(),
@@ -412,6 +422,56 @@ impl WgpuRenderer {
     #[inline]
     pub fn text_layout_cache_len(&self) -> usize {
         self.text_layout_cache.len()
+    }
+
+    /// 注册一张外部零拷贝 GPU 纹理（如海图、雷达、视频解码器或 3D 视口产出的 `wgpu::TextureView`），
+    /// 返回可供 `div().external_texture(id)` 或 `SurfaceCanvas` 引用的句柄 ID。
+    pub fn register_external_texture(
+        &mut self,
+        view: wgpu::TextureView,
+        sampler: Option<wgpu::Sampler>,
+    ) -> ExternalTextureId {
+        let mut id = self.next_external_id;
+        while id == 0 || self.external_textures.contains_key(&ExternalTextureId(id)) {
+            id = id.wrapping_add(1);
+        }
+        self.next_external_id = id.wrapping_add(1).max(1);
+        let tex_id = ExternalTextureId(id);
+        self.external_textures
+            .insert(tex_id, ExternalTextureEntry { view, sampler });
+        tex_id
+    }
+
+    /// 按显式 ID 注册或替换外部零拷贝 GPU 纹理（便于固定槽位号与跨语言 FFI 绑定）。
+    pub fn register_external_texture_with_id(
+        &mut self,
+        id: ExternalTextureId,
+        view: wgpu::TextureView,
+        sampler: Option<wgpu::Sampler>,
+    ) {
+        self.external_textures
+            .insert(id, ExternalTextureEntry { view, sampler });
+    }
+
+    /// 原地更新已注册外部纹理的 `wgpu::TextureView`（如外部引擎 Resize 或双缓冲翻页时调用）。
+    pub fn update_external_texture(&mut self, id: ExternalTextureId, view: wgpu::TextureView) -> bool {
+        if let Some(entry) = self.external_textures.get_mut(&id) {
+            entry.view = view;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 注销外部零拷贝纹理槽位并释放 `TextureView` 引用。
+    pub fn unregister_external_texture(&mut self, id: ExternalTextureId) -> bool {
+        self.external_textures.remove(&id).is_some()
+    }
+
+    /// 返回当前已注册的外部零拷贝 GPU 纹理数量。
+    #[inline]
+    pub fn external_texture_count(&self) -> usize {
+        self.external_textures.len()
     }
 
     fn rebuild_bind_group(&mut self, device: &wgpu::Device) {
@@ -753,7 +813,9 @@ impl WgpuRenderer {
                     xform: IDENTITY_XFORM,
                 });
             }
-            DrawPayload::PushLayer(_) | DrawPayload::PopLayer => {}
+            DrawPayload::PushLayer(_)
+            | DrawPayload::PopLayer
+            | DrawPayload::ExternalTexture(_) => {}
         }
         Ok(())
     }
@@ -1230,6 +1292,7 @@ impl WgpuRenderer {
                 &self.pipeline,
                 &self.bind_group,
                 &self.linear_sampler,
+                &self.external_textures,
                 target_view,
             );
         }
@@ -1858,6 +1921,112 @@ impl WgpuRenderer {
                         });
                         fx.pool.release(tmp_tex);
                         fx.pool.release(snap_idx);
+                    }
+
+                    // 外部零拷贝 GPU 纹理采样（直接消费外部引擎共享的 `wgpu::TextureView`）
+                    DrawPayload::ExternalTexture(ext) => {
+                        let raw_clip = viewport.intersect(op.clip).intersect(op.bounds);
+                        if raw_clip.is_empty() {
+                            continue;
+                        }
+                        if self.external_textures.contains_key(&ext.id) {
+                            flush_top(&mut stack, &mut fx, self.primitives.len() as u32);
+                            let parent = stack.last().unwrap();
+                            let parent_idx = parent.tex_idx;
+                            let parent_aw = parent.active_w;
+                            let parent_ah = parent.active_h;
+                            let parent_ox = parent.origin_x;
+                            let parent_oy = parent.origin_y;
+                            let parent_tex_sz =
+                                (fx.pool.get(parent_idx).width, fx.pool.get(parent_idx).height);
+
+                            let snap_idx = fx.pool.acquire(device, parent_aw, parent_ah);
+                            fx.steps.push(GpuPassStep::CopyRect {
+                                src_idx: parent_idx,
+                                src_origin: (0, 0),
+                                dst_idx: snap_idx,
+                                dst_origin: (0, 0),
+                                size: (parent_aw, parent_ah),
+                            });
+                            let snap_sz =
+                                (fx.pool.get(snap_idx).width, fx.pool.get(snap_idx).height);
+
+                            let body_phys = snap_bounds_region_scaled(op.bounds, sf);
+                            let clip_phys = snap_clip_region_scaled(raw_clip, sf);
+                            let local_body = [
+                                body_phys.x as f32 - parent_ox,
+                                body_phys.y as f32 - parent_oy,
+                                body_phys.w as f32,
+                                body_phys.h as f32,
+                            ];
+
+                            let mut eu = EffectUniform::default();
+                            eu.tex_sizes = [
+                                parent_tex_sz.0 as f32,
+                                parent_tex_sz.1 as f32,
+                                1.0,
+                                1.0,
+                            ];
+                            eu.dst_rect = local_body;
+                            eu.src_rect = ext.uv_rect;
+                            eu.clip_rect = [
+                                clip_phys.x as f32 - parent_ox,
+                                clip_phys.y as f32 - parent_oy,
+                                clip_phys.right() as f32 - parent_ox,
+                                clip_phys.bottom() as f32 - parent_oy,
+                            ];
+                            eu.body_rect = local_body;
+                            eu.radii = [
+                                (ext.radii.tl as f32) * sf,
+                                (ext.radii.tr as f32) * sf,
+                                (ext.radii.br as f32) * sf,
+                                (ext.radii.bl as f32) * sf,
+                            ];
+                            eu.params = [
+                                (ext.opacity as f32) * (1.0 / 255.0),
+                                ext.blend_mode as u8 as f32,
+                                EFFECT_KIND_EXTERNAL_TEX,
+                                0.0,
+                            ];
+                            eu.flags = [
+                                if ext.premultiplied { 1.0 } else { 0.0 },
+                                0.0,
+                                0.0,
+                                if is_srgb { 1.0 } else { 0.0 },
+                            ];
+                            eu.inv_xform = [1.0, 0.0, 0.0, 1.0];
+                            eu.extra = [0.0, 0.0, snap_sz.0 as f32, snap_sz.1 as f32];
+                            let eslot = fx.push_slot(eu);
+
+                            fx.steps.push(GpuPassStep::DrawExternal {
+                                dst_idx: parent_idx,
+                                dst_snap_idx: snap_idx,
+                                tex_id: ext.id,
+                                effect_slot: eslot,
+                            });
+                            fx.pool.release(snap_idx);
+                        } else if ext.fallback_bg.a() > 0 {
+                            let fallback_sq = StyledQuad {
+                                paint: Paint::Solid(ext.fallback_bg),
+                                border_color: Color::TRANSPARENT,
+                                border_width: 0,
+                                radii: ext.radii,
+                                opacity: ext.opacity,
+                                blend_mode: BlendMode::SrcOver,
+                                transform: None,
+                            };
+                            let tmp_op = DrawOp {
+                                payload: DrawPayload::StyledQuad(&fallback_sq),
+                                ..*op
+                            };
+                            let (ox, oy) = {
+                                let top = stack.last().unwrap();
+                                (top.origin_x, top.origin_y)
+                            };
+                            self.encode_single_op(
+                                queue, &tmp_op, raw_clip, viewport, sf, use_ttf, ox, oy,
+                            )?;
+                        }
                     }
 
                     _ => {

@@ -24,7 +24,7 @@ struct OffscreenGpuState {
     height: u32,
     queue: wgpu::Queue,
     device: wgpu::Device,
-    _instance: wgpu::Instance,
+    _instance: Option<wgpu::Instance>,
 }
 
 impl OffscreenGpuState {
@@ -100,8 +100,28 @@ impl OffscreenGpuState {
             height: h,
             queue,
             device,
-            _instance: instance,
+            _instance: Some(instance),
         })
+    }
+
+    fn from_shared(device: wgpu::Device, queue: wgpu::Queue, width: u32, height: u32) -> Self {
+        let w = width.max(1);
+        let h = height.max(1);
+        let (target_texture, target_view, readback_buf, padded_bytes_per_row) =
+            Self::create_targets(&device, w, h);
+        let renderer = WgpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        Self {
+            renderer,
+            target_texture,
+            target_view,
+            readback_buf,
+            padded_bytes_per_row,
+            width: w,
+            height: h,
+            queue,
+            device,
+            _instance: None,
+        }
     }
 
     fn new(width: u32, height: u32) -> Option<Self> {
@@ -248,6 +268,86 @@ impl WgpuOffscreenRenderer {
             self.gpu = OffscreenGpuState::new(self.width as u32, self.height as u32);
         }
         self.gpu.is_some()
+    }
+
+    /// 复用外部引擎已有的 `wgpu::Device` 与 `wgpu::Queue` 创建离屏渲染器（实现同设备零拷贝外部纹理导入测试与离屏合成）。
+    pub fn from_shared_device(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        width: usize,
+        height: usize,
+    ) -> Self {
+        let w = width.max(1);
+        let h = height.max(1);
+        Self {
+            scene: WgpuScene::new(),
+            rgba_buffer: vec![0u8; w * h * 4],
+            width: w,
+            height: h,
+            fallback_pixmap: vec![Rgba8888(0); w * h],
+            gpu: Some(OffscreenGpuState::from_shared(device, queue, w as u32, h as u32)),
+            gpu_probed: true,
+        }
+    }
+
+    /// 返回底层 `wgpu::Device` 引用（若 GPU 已就绪）。
+    #[inline]
+    pub fn device(&self) -> Option<&wgpu::Device> {
+        self.gpu.as_ref().map(|g| &g.device)
+    }
+
+    /// 返回底层 `wgpu::Queue` 引用（若 GPU 已就绪）。
+    #[inline]
+    pub fn queue(&self) -> Option<&wgpu::Queue> {
+        self.gpu.as_ref().map(|g| &g.queue)
+    }
+
+    /// 向离屏渲染器注册外部零拷贝 GPU 纹理（如海图/视频/3D 视口）。
+    #[inline]
+    pub fn register_external_texture(
+        &mut self,
+        view: wgpu::TextureView,
+        sampler: Option<wgpu::Sampler>,
+    ) -> Option<crate::paint::ExternalTextureId> {
+        self.gpu
+            .as_mut()
+            .map(|g| g.renderer.register_external_texture(view, sampler))
+    }
+
+    /// 按显式 ID 注册或替换外部零拷贝 GPU 纹理。
+    #[inline]
+    pub fn register_external_texture_with_id(
+        &mut self,
+        id: crate::paint::ExternalTextureId,
+        view: wgpu::TextureView,
+        sampler: Option<wgpu::Sampler>,
+    ) -> bool {
+        if let Some(g) = &mut self.gpu {
+            g.renderer.register_external_texture_with_id(id, view, sampler);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 更新已注册的外部零拷贝 GPU 纹理视图。
+    #[inline]
+    pub fn update_external_texture(
+        &mut self,
+        id: crate::paint::ExternalTextureId,
+        view: wgpu::TextureView,
+    ) -> bool {
+        self.gpu
+            .as_mut()
+            .is_some_and(|g| g.renderer.update_external_texture(id, view))
+    }
+
+    /// 注销外部零拷贝 GPU 纹理。
+    #[inline]
+    pub fn unregister_external_texture(&mut self, id: crate::paint::ExternalTextureId) -> bool {
+        self.gpu
+            .as_mut()
+            .is_some_and(|g| g.renderer.unregister_external_texture(id))
     }
 
     /// 返回当前帧编译出的图元总数。

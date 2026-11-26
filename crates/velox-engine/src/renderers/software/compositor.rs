@@ -151,6 +151,27 @@ pub fn rasterize_region<P: PixelFormat>(
                 let _ = layer;
             }
             DrawPayload::PopLayer => {}
+            DrawPayload::ExternalTexture(ext) => {
+                let sq = crate::paint::StyledQuad {
+                    paint: crate::paint::Paint::Solid(ext.fallback_bg),
+                    border_color: Color::TRANSPARENT,
+                    border_width: 0,
+                    radii: ext.radii,
+                    opacity: ext.opacity,
+                    blend_mode: ext.blend_mode,
+                    transform: None,
+                };
+                rasterize_styled_quad(
+                    op.bounds,
+                    sub_clip,
+                    &sq,
+                    1.0,
+                    buffer_origin_x,
+                    buffer_origin_y,
+                    buffer_stride,
+                    dst,
+                );
+            }
         };
 
         if corner_clip_active {
@@ -533,6 +554,27 @@ pub(crate) fn rasterize_region_scaled<P: PixelFormat>(
                 );
             }
             DrawPayload::PushLayer(_) | DrawPayload::PopLayer => {}
+            DrawPayload::ExternalTexture(ext) => {
+                let sq = crate::paint::StyledQuad {
+                    paint: crate::paint::Paint::Solid(ext.fallback_bg),
+                    border_color: Color::TRANSPARENT,
+                    border_width: 0,
+                    radii: ext.radii,
+                    opacity: ext.opacity,
+                    blend_mode: ext.blend_mode,
+                    transform: None,
+                };
+                rasterize_styled_quad(
+                    sb,
+                    sub_clip,
+                    &sq,
+                    sf,
+                    buffer_origin_x,
+                    buffer_origin_y,
+                    buffer_stride,
+                    dst,
+                );
+            }
         };
 
         if corner_clip_active {

@@ -1515,7 +1515,127 @@ impl BackdropFilter {
 // 5. 冷路径节点特效包与高级 DrawOp 载荷（分配在 ScratchArena，常规节点 0 字节开销）
 // ============================================================================
 
-/// 按需分配于 `ScratchArena` 的 `Div` 高级渲染特效包（多色标渐变、独立圆角、混合模式、滤镜、2D 变换与路径裁剪）。
+/// 外部零拷贝 GPU 纹理槽位 ID（如海图渲染引擎、视频帧或 3D 视口注册至 `WgpuRenderer` 的共享纹理标识）。
+#[repr(transparent)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default, Hash)]
+pub struct ExternalTextureId(pub u32);
+
+/// 外部零拷贝纹理绘制描述（分配于 `ScratchArena`，通过 8B 引用挂入 `DrawPayload::ExternalTexture`，零膨胀 `DrawOp`）。
+#[derive(Copy, Clone, Debug)]
+pub struct ExternalTextureSpec {
+    /// 外部纹理注册表中的句柄 ID。
+    pub id: ExternalTextureId,
+    /// 归一化采样 UV 矩形 `[u0, v0, u1, v1]`（默认 `[0.0, 0.0, 1.0, 1.0]`）。
+    pub uv_rect: [f32; 4],
+    /// 四角独立圆角裁切（逻辑像素，复用 GPU SDF 抗锯齿圆角裁切）。
+    pub radii: CornerRadii,
+    /// 整体不透明度（`0..=255`）。
+    pub opacity: u8,
+    /// 外部纹理是否已为预乘 Alpha（`false` 时采样后自动执行预乘）。
+    pub premultiplied: bool,
+    /// 与下方画布的合成混合模式（默认 `BlendMode::SrcOver`，支持全部 27 种混合）。
+    pub blend_mode: BlendMode,
+    /// 外部画面内容版本号（同一纹理被外部引擎重绘时递增此值以精确触发 `DamageTracker` 局部刷新）。
+    pub content_revision: u64,
+    /// 软件光栅器或无 GPU 环境下显示的占位回退颜色。
+    pub fallback_bg: Color,
+}
+
+impl ExternalTextureSpec {
+    /// 按外部纹理 ID 构造默认全幅（`[0,0,1,1]`）绘制描述。
+    #[inline(always)]
+    pub const fn new(id: ExternalTextureId) -> Self {
+        Self {
+            id,
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            radii: CornerRadii::ZERO,
+            opacity: 255,
+            premultiplied: true,
+            blend_mode: BlendMode::SrcOver,
+            content_revision: 0,
+            fallback_bg: Color::rgb(12, 18, 28),
+        }
+    }
+
+    #[inline(always)]
+    pub const fn with_uv(mut self, uv_rect: [f32; 4]) -> Self {
+        self.uv_rect = uv_rect;
+        self
+    }
+
+    #[inline(always)]
+    pub const fn with_radii(mut self, radii: CornerRadii) -> Self {
+        self.radii = radii;
+        self
+    }
+
+    #[inline(always)]
+    pub const fn with_opacity(mut self, opacity: u8) -> Self {
+        self.opacity = opacity;
+        self
+    }
+
+    #[inline(always)]
+    pub const fn with_premultiplied(mut self, premultiplied: bool) -> Self {
+        self.premultiplied = premultiplied;
+        self
+    }
+
+    #[inline(always)]
+    pub const fn with_blend_mode(mut self, blend_mode: BlendMode) -> Self {
+        self.blend_mode = blend_mode;
+        self
+    }
+
+    #[inline(always)]
+    pub const fn with_revision(mut self, rev: u64) -> Self {
+        self.content_revision = rev;
+        self
+    }
+
+    #[inline(always)]
+    pub const fn with_fallback_bg(mut self, color: Color) -> Self {
+        self.fallback_bg = color;
+        self
+    }
+
+    pub fn mix_hash(&self, h: &mut u32) {
+        mix_u32(h, self.id.0);
+        for v in self.uv_rect {
+            mix_u32(h, canonical_f32_bits(v));
+        }
+        mix_u8(h, self.radii.tl);
+        mix_u8(h, self.radii.tr);
+        mix_u8(h, self.radii.br);
+        mix_u8(h, self.radii.bl);
+        mix_u8(h, self.opacity);
+        mix_u8(h, if self.premultiplied { 1 } else { 0 });
+        mix_u8(h, self.blend_mode as u8);
+        mix_u32(h, self.content_revision as u32);
+        mix_u32(h, (self.content_revision >> 32) as u32);
+        mix_u32(h, self.fallback_bg.0);
+    }
+}
+
+impl PartialEq for ExternalTextureSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && canonical_f32_bits(self.uv_rect[0]) == canonical_f32_bits(other.uv_rect[0])
+            && canonical_f32_bits(self.uv_rect[1]) == canonical_f32_bits(other.uv_rect[1])
+            && canonical_f32_bits(self.uv_rect[2]) == canonical_f32_bits(other.uv_rect[2])
+            && canonical_f32_bits(self.uv_rect[3]) == canonical_f32_bits(other.uv_rect[3])
+            && self.radii == other.radii
+            && self.opacity == other.opacity
+            && self.premultiplied == other.premultiplied
+            && self.blend_mode == other.blend_mode
+            && self.content_revision == other.content_revision
+            && self.fallback_bg == other.fallback_bg
+    }
+}
+
+impl Eq for ExternalTextureSpec {}
+
+/// 按需分配于 `ScratchArena` 的 `Div` 高级渲染特效包（多色标渐变、独立圆角、混合模式、滤镜、2D 变换、路径裁剪与外部零拷贝纹理）。
 #[derive(Copy, Clone, Debug, Default)]
 pub struct PaintEffects<'a> {
     pub bg_paint: Option<Paint<'a>>,
@@ -1526,6 +1646,7 @@ pub struct PaintEffects<'a> {
     pub backdrop_filter: BackdropFilter,
     pub transform: Option<Transform2D>,
     pub clip_path: Option<StrRef<'a>>,
+    pub external_texture: Option<&'a ExternalTextureSpec>,
 }
 
 impl<'a> PaintEffects<'a> {
@@ -1538,6 +1659,7 @@ impl<'a> PaintEffects<'a> {
         backdrop_filter: BackdropFilter::NONE,
         transform: None,
         clip_path: None,
+        external_texture: None,
     };
 
     /// 判断是否未配置任何高级视觉特效。
@@ -1551,6 +1673,7 @@ impl<'a> PaintEffects<'a> {
             && self.backdrop_filter.is_empty()
             && self.transform.is_none()
             && self.clip_path.is_none()
+            && self.external_texture.is_none()
     }
 
     /// 判断是否需要创建独立离屏合成图层（`PushLayer` / `PopLayer`）。

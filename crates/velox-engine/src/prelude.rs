@@ -36,7 +36,8 @@ pub use crate::i18n::{
 pub use crate::motion::{DrawOp, DrawPayload, MotionCache, MotionState, Presence, Tween};
 pub use crate::paint::{
     BackdropFilter, BlendMode, ColorMatrix, ColorStop, CornerRadii, DropShadow, ExtendMode,
-    GradientSpace, LayerFilter, LayerSpec, Paint, PaintEffects, StyledQuad,
+    ExternalTextureId, ExternalTextureSpec, GradientSpace, LayerFilter, LayerSpec, Paint,
+    PaintEffects, StyledQuad,
 };
 pub use crate::platform::{
     clipboard_has_text, clipboard_read_into, clipboard_write_text, AsyncPlatform,

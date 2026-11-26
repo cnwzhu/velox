@@ -67,17 +67,108 @@ pub struct DivStateStyles<'a> {
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::size_of::<DivStateStyles<'static>>() == 32);
 
-/// 冷路径二级扩展包（仅 16 字节，按需挂在 [`DivVisual`] 上以同时保持 `DivVisual == 64B` 与 `DivStateStyles == 32B`）。
+/// 冷路径二级扩展包（仅 16 字节，仅当节点同时拥有 `DivStateStyles` 与 `PaintEffects` 时按需分配）。
 #[derive(Copy, Clone, Debug, Default)]
 pub struct DivExtended<'a> {
     pub state_styles: Option<&'a DivStateStyles<'a>>,
     pub effects: Option<&'a PaintEffects<'a>>,
 }
 
+/// 8 字节紧凑 Tagged Pointer，直接嵌入 [`DivVisual`]：
+/// - `0b00`: 无扩展（0 字节分配）；
+/// - `0b01`: 直接指向 `&'a DivStateStyles<'a>`（免去 16B `DivExtended` 包装，护航 `no_std` 4.9KB `ScratchArena`）；
+/// - `0b10`: 直接指向 `&'a PaintEffects<'a>`（免去 16B `DivExtended` 包装）；
+/// - `0b11`: 同时存在两者时指向 `&'a DivExtended<'a>`。
+#[derive(Copy, Clone)]
+pub struct DivExtPtr<'a> {
+    raw: *const u8,
+    _marker: core::marker::PhantomData<&'a ()>,
+}
+
+// SAFETY: `DivExtPtr<'a>` 仅持有指向只读静态或 `'a` 帧内存的不可变指针。
+unsafe impl<'a> Send for DivExtPtr<'a> {}
+unsafe impl<'a> Sync for DivExtPtr<'a> {}
+
+impl<'a> core::fmt::Debug for DivExtPtr<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DivExtPtr")
+            .field("tag", &(self.raw.addr() & 0b11))
+            .finish()
+    }
+}
+
+const EXT_TAG_MASK: usize = 0b11;
+const EXT_TAG_STATE_ONLY: usize = 0b01;
+const EXT_TAG_EFFECTS_ONLY: usize = 0b10;
+const EXT_TAG_BOTH: usize = 0b11;
+
+const _: () = assert!(core::mem::align_of::<DivStateStyles<'static>>() >= 4);
+const _: () = assert!(core::mem::align_of::<PaintEffects<'static>>() >= 4);
+const _: () = assert!(core::mem::align_of::<DivExtended<'static>>() >= 4);
+
+impl<'a> DivExtPtr<'a> {
+    pub const NONE: Self = Self {
+        raw: core::ptr::null(),
+        _marker: core::marker::PhantomData,
+    };
+
+    #[inline(always)]
+    pub fn from_state_styles(s: &'a DivStateStyles<'a>) -> Self {
+        Self {
+            raw: (s as *const DivStateStyles<'a> as *const u8).map_addr(|a| a | EXT_TAG_STATE_ONLY),
+            _marker: core::marker::PhantomData,
+        }
+    }
+
+    #[inline(always)]
+    pub fn from_effects(e: &'a PaintEffects<'a>) -> Self {
+        Self {
+            raw: (e as *const PaintEffects<'a> as *const u8).map_addr(|a| a | EXT_TAG_EFFECTS_ONLY),
+            _marker: core::marker::PhantomData,
+        }
+    }
+
+    #[inline(always)]
+    pub fn from_both(ext: &'a DivExtended<'a>) -> Self {
+        Self {
+            raw: (ext as *const DivExtended<'a> as *const u8).map_addr(|a| a | EXT_TAG_BOTH),
+            _marker: core::marker::PhantomData,
+        }
+    }
+
+    #[inline(always)]
+    pub fn state_styles(&self) -> Option<&'a DivStateStyles<'a>> {
+        if self.raw.is_null() {
+            return None;
+        }
+        let tag = self.raw.addr() & EXT_TAG_MASK;
+        let base = self.raw.map_addr(|a| a & !EXT_TAG_MASK);
+        match tag {
+            EXT_TAG_STATE_ONLY => Some(unsafe { &*(base as *const DivStateStyles<'a>) }),
+            EXT_TAG_BOTH => unsafe { &*(base as *const DivExtended<'a>) }.state_styles,
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn effects(&self) -> Option<&'a PaintEffects<'a>> {
+        if self.raw.is_null() {
+            return None;
+        }
+        let tag = self.raw.addr() & EXT_TAG_MASK;
+        let base = self.raw.map_addr(|a| a & !EXT_TAG_MASK);
+        match tag {
+            EXT_TAG_EFFECTS_ONLY => Some(unsafe { &*(base as *const PaintEffects<'a>) }),
+            EXT_TAG_BOTH => unsafe { &*(base as *const DivExtended<'a>) }.effects,
+            _ => None,
+        }
+    }
+}
+
 /// 按需分配在 [`crate::arena::ScratchArena`] 中的扩展视觉与布局约束属性（严格紧凑 **64 字节**，零对齐空洞）。
 #[derive(Copy, Clone, Debug)]
 pub struct DivVisual<'a> {
-    pub extended: Option<&'a DivExtended<'a>>,
+    pub extended: DivExtPtr<'a>,
     pub transition: Option<&'a TransitionSpec>,
     pub margin: Edges<i16>,
     pub extra_padding: Edges<i16>,
@@ -179,7 +270,7 @@ impl<'a> DivVisual<'a> {
 }
 
 static DEFAULT_DIV_VISUAL: DivVisual<'static> = DivVisual {
-    extended: None,
+    extended: DivExtPtr::NONE,
     transition: None,
     margin: Edges::all(0),
     extra_padding: Edges::all(0),
@@ -203,7 +294,7 @@ static DEFAULT_DIV_VISUAL: DivVisual<'static> = DivVisual {
 
 /// 仅禁用了默认焦点边框（`.no_focus_border()`）的零分配共享只读扩展节点。
 pub(super) static NO_FOCUS_BORDER_DIV_VISUAL: DivVisual<'static> = DivVisual {
-    extended: None,
+    extended: DivExtPtr::NONE,
     transition: None,
     margin: Edges::all(0),
     extra_padding: Edges::all(0),
@@ -270,12 +361,12 @@ impl<'a> core::ops::Deref for DivNode<'a> {
 impl<'a> DivNode<'a> {
     #[inline(always)]
     pub fn state_styles(&self) -> Option<&'a DivStateStyles<'a>> {
-        self.extended.and_then(|e| e.state_styles)
+        self.extended.state_styles()
     }
 
     #[inline(always)]
     pub fn effects(&self) -> Option<&'a PaintEffects<'a>> {
-        self.extended.and_then(|e| e.effects)
+        self.extended.effects()
     }
 
     #[inline(always)]

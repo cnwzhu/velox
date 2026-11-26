@@ -23,10 +23,12 @@ pub struct PreparedWgpuContext {
     precompiled_renderer: Option<(wgpu::TextureFormat, WgpuRenderer)>,
     queue: wgpu::Queue,
     device: wgpu::Device,
-    adapter: wgpu::Adapter,
-    instance: wgpu::Instance,
+    adapter: Option<wgpu::Adapter>,
+    instance: Option<wgpu::Instance>,
     adapter_name: String,
     backend_name: &'static str,
+    adapter_luid: Option<[u8; 8]>,
+    device_uuid: Option<[u8; 16]>,
 }
 
 // SAFETY: `wgpu::Instance`/`Adapter`/`Device`/`Queue` 及内部仅含 `Arc` 与 wgpu 句柄的 `WgpuRenderer`
@@ -114,10 +116,12 @@ impl PreparedWgpuContext {
             precompiled_renderer: Some((preferred_fmt, renderer)),
             queue,
             device,
-            adapter,
-            instance,
+            adapter: Some(adapter),
+            instance: Some(instance),
             adapter_name: info.name,
             backend_name,
+            adapter_luid: None,
+            device_uuid: None,
         })
     }
 
@@ -136,6 +140,138 @@ impl PreparedWgpuContext {
         #[cfg(not(target_os = "windows"))]
         {
             Self::try_init_headless_with_backends(wgpu::Backends::PRIMARY)
+        }
+    }
+
+    /// 直接复用外部引擎（如海图/3D/视频渲染器）已创建的 `wgpu::Device` 与 `wgpu::Queue` 构建共享上下文。
+    ///
+    /// 外部引擎与 Velox 共享同一物理 GPU 与命令队列后，可将外部 `wgpu::TextureView` 通过
+    /// [`WgpuRenderer::register_external_texture`] 零拷贝嵌入 Velox UI，无需任何跨 API 句柄转换或 CPU 回读。
+    pub fn from_shared_device(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        adapter: Option<wgpu::Adapter>,
+        instance: Option<wgpu::Instance>,
+        preferred_format: wgpu::TextureFormat,
+        adapter_name: impl Into<String>,
+        backend_name: &'static str,
+    ) -> Self {
+        let renderer = WgpuRenderer::new(&device, preferred_format);
+        Self {
+            precompiled_renderer: Some((preferred_format, renderer)),
+            queue,
+            device,
+            adapter,
+            instance,
+            adapter_name: adapter_name.into(),
+            backend_name,
+            adapter_luid: None,
+            device_uuid: None,
+        }
+    }
+
+    /// 按宿主物理显卡标识（Windows DX12 `LUID` 或 Linux/Android Vulkan `deviceUUID`）对齐并创建上下文。
+    ///
+    /// - 启用 `gpu-interop` feature 时，通过底层 `wgpu-hal` 精确匹配与宿主 Qt/GTK4/WPF/WinUI 相同的物理 GPU
+    ///   并激活跨进程/跨 API 外部显存与信号量扩展；
+    /// - 未启用 `gpu-interop` 或参数均为 `None` 时自动退化为默认硬件无头初始化。
+    pub fn from_host_adapter_id(
+        adapter_luid: Option<[u8; 8]>,
+        device_uuid: Option<[u8; 16]>,
+    ) -> Option<Self> {
+        #[cfg(feature = "gpu-interop")]
+        {
+            if let Some(ctx) = super::interop::init_aligned_wgpu_context(adapter_luid, device_uuid) {
+                return Some(ctx);
+            }
+        }
+        let mut ctx = Self::init_headless()?;
+        ctx.adapter_luid = adapter_luid;
+        ctx.device_uuid = device_uuid;
+        Some(ctx)
+    }
+
+    /// 供 `gpu-interop` 内部组装带精确硬件 LUID/UUID 标识的上下文。
+    #[cfg(feature = "gpu-interop")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_interop_parts(
+        instance: wgpu::Instance,
+        adapter: wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        preferred_format: wgpu::TextureFormat,
+        adapter_name: String,
+        backend_name: &'static str,
+        adapter_luid: Option<[u8; 8]>,
+        device_uuid: Option<[u8; 16]>,
+    ) -> Self {
+        let renderer = WgpuRenderer::new(&device, preferred_format);
+        Self {
+            precompiled_renderer: Some((preferred_format, renderer)),
+            queue,
+            device,
+            adapter: Some(adapter),
+            instance: Some(instance),
+            adapter_name,
+            backend_name,
+            adapter_luid,
+            device_uuid,
+        }
+    }
+
+    /// 返回底层 `wgpu::Device` 句柄引用（供外部渲染器同设备创建共享纹理）。
+    #[inline]
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// 返回底层 `wgpu::Queue` 句柄引用。
+    #[inline]
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    /// 返回可选 `wgpu::Adapter` 引用。
+    #[inline]
+    pub fn adapter(&self) -> Option<&wgpu::Adapter> {
+        self.adapter.as_ref()
+    }
+
+    /// 返回可选 `wgpu::Instance` 引用。
+    #[inline]
+    pub fn instance(&self) -> Option<&wgpu::Instance> {
+        self.instance.as_ref()
+    }
+
+    /// 返回适配器名称。
+    #[inline]
+    pub fn adapter_name(&self) -> &str {
+        &self.adapter_name
+    }
+
+    /// 返回后端图形 API 名称。
+    #[inline]
+    pub const fn backend_name(&self) -> &'static str {
+        self.backend_name
+    }
+
+    /// 返回匹配到的 Windows DX12 适配器 LUID（若可用）。
+    #[inline]
+    pub const fn adapter_luid(&self) -> Option<[u8; 8]> {
+        self.adapter_luid
+    }
+
+    /// 返回匹配到的 Vulkan 物理设备 UUID（若可用）。
+    #[inline]
+    pub const fn device_uuid(&self) -> Option<[u8; 16]> {
+        self.device_uuid
+    }
+
+    /// 取出预编译的 `WgpuRenderer`（若格式一致）或按指定像素格式即时构建。
+    pub fn take_or_create_renderer(&mut self, format: wgpu::TextureFormat) -> WgpuRenderer {
+        match self.precompiled_renderer.take() {
+            Some((fmt, r)) if fmt == format => r,
+            _ => WgpuRenderer::new(&self.device, format),
         }
     }
 }
@@ -305,8 +441,11 @@ impl WgpuWindowRenderer {
             instance,
             adapter_name,
             backend_name,
+            ..
         } = prepared;
 
+        let instance = instance?;
+        let adapter = adapter?;
         let surface = instance.create_surface(target).ok()?;
         let caps = surface.get_capabilities(&adapter);
         if caps.formats.is_empty() || caps.alpha_modes.is_empty() {
@@ -411,6 +550,56 @@ impl WgpuWindowRenderer {
     #[inline]
     pub const fn atlas_sizes(&self) -> (u32, u32) {
         self.renderer.atlas_sizes()
+    }
+
+    /// 返回底层 `wgpu::Device` 句柄引用（供外部引擎同设备零拷贝创建共享纹理）。
+    #[inline]
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// 返回底层 `wgpu::Queue` 句柄引用。
+    #[inline]
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    /// 返回内部 `WgpuRenderer` 只读引用。
+    #[inline]
+    pub fn renderer(&self) -> &WgpuRenderer {
+        &self.renderer
+    }
+
+    /// 返回内部 `WgpuRenderer` 可变引用。
+    #[inline]
+    pub fn renderer_mut(&mut self) -> &mut WgpuRenderer {
+        &mut self.renderer
+    }
+
+    /// 向窗口渲染器注册外部零拷贝 GPU 纹理（如海图/视频/3D 视口），返回句柄 ID。
+    #[inline]
+    pub fn register_external_texture(
+        &mut self,
+        view: wgpu::TextureView,
+        sampler: Option<wgpu::Sampler>,
+    ) -> crate::paint::ExternalTextureId {
+        self.renderer.register_external_texture(view, sampler)
+    }
+
+    /// 原地更新已注册外部零拷贝纹理的 `TextureView`（如外部引擎 Swap/Resize 后切换目标）。
+    #[inline]
+    pub fn update_external_texture(
+        &mut self,
+        id: crate::paint::ExternalTextureId,
+        view: wgpu::TextureView,
+    ) -> bool {
+        self.renderer.update_external_texture(id, view)
+    }
+
+    /// 注销外部零拷贝纹理槽位。
+    #[inline]
+    pub fn unregister_external_texture(&mut self, id: crate::paint::ExternalTextureId) -> bool {
+        self.renderer.unregister_external_texture(id)
     }
 
     /// 调整 Swapchain 表面物理像素尺寸。

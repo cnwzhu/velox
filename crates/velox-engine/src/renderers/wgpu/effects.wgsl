@@ -313,6 +313,43 @@ fn fs_effect(in: VsOut) -> @location(0) vec4<f32> {
     let duv = p * inv_dst;
     let dst_pm = textureSampleLevel(dst_tex, linear_sampler, duv, 0.0);
 
+    if (kind == 6u) {
+        // 6 = 外部零拷贝 GPU 纹理采样（支持四角独立圆角 SDF 裁剪、UV 裁切、预乘/直通 Alpha 与 27 种混合）
+        let half_b = u.body_rect.zw * 0.5;
+        let center_b = u.body_rect.xy + half_b;
+        let cov = clamp(0.5 - sdf_rounded_box_4(p, center_b, half_b, u.radii), 0.0, 1.0);
+        if (cov <= 0.0001) {
+            return dst_pm;
+        }
+        let local_uv = clamp(
+            (p - u.body_rect.xy) / max(u.body_rect.zw, vec2<f32>(1.0)),
+            vec2<f32>(0.0),
+            vec2<f32>(1.0),
+        );
+        // `u.src_rect` 保存归一化 UV 区间 `[u0, v0, u1, v1]`
+        let suv = mix(u.src_rect.xy, u.src_rect.zw, local_uv);
+        let sampled = textureSampleLevel(src_tex, linear_sampler, suv, 0.0);
+        var src_pm = sampled;
+        if (u.flags.x < 0.5) {
+            // 直通 Alpha：转换为预乘格式
+            let c = maybe_linear(sampled);
+            src_pm = vec4<f32>(c.rgb * c.a, c.a);
+        } else if (u.flags.w > 0.5) {
+            // 已预乘 sRGB -> Linear 预乘
+            let a = max(sampled.a, 0.0001);
+            let unpm = sampled.rgb / a;
+            let lin = vec3<f32>(
+                srgb_ch_to_linear(unpm.r),
+                srgb_ch_to_linear(unpm.g),
+                srgb_ch_to_linear(unpm.b),
+            );
+            src_pm = vec4<f32>(lin * sampled.a, sampled.a);
+        }
+        src_pm = src_pm * (cov * u.params.x);
+        let blend_mode = u32(u.params.y + 0.5);
+        return blend_premul(src_pm, dst_pm, blend_mode);
+    }
+
     if (kind == 1u) {
         // 1 = BackdropFilter 毛玻璃合成
         // `u.src_rect` 保存 `sample_rect` 在父画布中的物理坐标 `[sx, sy, sw, sh]`，

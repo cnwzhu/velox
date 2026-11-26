@@ -2,7 +2,7 @@
 
 use crate::arena::StrRef;
 use crate::element::SpriteSource;
-use crate::paint::{LayerSpec, StyledQuad};
+use crate::paint::{ExternalTextureSpec, LayerSpec, StyledQuad};
 use crate::solver::Region;
 use crate::style::Color;
 
@@ -47,6 +47,8 @@ pub enum DrawPayload<'a> {
     PushLayer(&'a LayerSpec<'a>),
     /// 弹出当前隔离合成图层并执行滤镜后处理与合成回父画布（0B）。
     PopLayer,
+    /// 外部零拷贝 GPU 纹理（如海图/视频/3D 视口共享的 `wgpu::TextureView`，8B Arena 引用，零膨胀 `DrawOp`）。
+    ExternalTexture(&'a ExternalTextureSpec),
 }
 
 impl<'a> PartialEq for DrawPayload<'a> {
@@ -113,6 +115,7 @@ impl<'a> PartialEq for DrawPayload<'a> {
             (Self::StyledQuad(a), Self::StyledQuad(b)) => a == b,
             (Self::PushLayer(a), Self::PushLayer(b)) => a == b,
             (Self::PopLayer, Self::PopLayer) => true,
+            (Self::ExternalTexture(a), Self::ExternalTexture(b)) => a == b,
             _ => false,
         }
     }
@@ -247,6 +250,10 @@ impl<'a> DrawOp<'a> {
             }
             DrawPayload::PopLayer => {
                 mix(&mut h, 9);
+            }
+            DrawPayload::ExternalTexture(ext) => {
+                mix(&mut h, 10);
+                ext.mix_hash(&mut h);
             }
         }
         let eff_bounds = match self.payload {

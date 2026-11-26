@@ -12,23 +12,23 @@ use crate::pod::{ActionScope, CursorShape, DragEvent, FrameScope};
 use crate::style::{AlignItems, Color, Easing, Edges, LoopMode, Style, StyleRefinement, Styled};
 
 use super::div_node::{
-    duration_to_ms, pack_visual_flags, DivExtended, DivInteractivity, DivNode, DivRareHandlers,
-    DivStateStyles, DivVisual, EnterFrom, TransitionSpec, FOCUS_BORDER_NONE,
+    duration_to_ms, pack_visual_flags, DivExtPtr, DivExtended, DivInteractivity, DivNode,
+    DivRareHandlers, DivStateStyles, DivVisual, EnterFrom, TransitionSpec, FOCUS_BORDER_NONE,
     NO_FOCUS_BORDER_DIV_VISUAL,
 };
 use super::{Element, ElementNode, IntoElement};
 
 impl<'a> IntoElement<'a> for Div<'a> {
     #[inline(always)]
-    fn into_element(self, cx: &'a FrameScope) -> Element<'a> {
+    fn into_element(mut self, cx: &'a FrameScope) -> Element<'a> {
         let has_state_styles = self.text_color.is_some()
             || self.text_size.is_some()
             || self.hover_style.is_some()
             || self.active_style.is_some()
             || self.focus_style.is_some();
-        let has_effects = !self.effects.is_empty();
+        let has_effects = !self.effects.is_empty() || self.external_texture.is_some();
 
-        let alloc_visual = |extended: Option<&'a DivExtended<'a>>,
+        let alloc_visual = |extended: DivExtPtr<'a>,
                             transition: Option<&'a TransitionSpec>|
          -> &'a DivVisual<'a> {
             let (pos_x, pos_y) = self.pos.unwrap_or((0, 0));
@@ -88,17 +88,21 @@ impl<'a> IntoElement<'a> for Div<'a> {
                 None
             };
             let effects = if has_effects {
+                if let Some(ext_spec) = self.external_texture {
+                    self.effects.external_texture = Some(&*cx.arena().alloc_temp(ext_spec));
+                }
                 Some(&*cx.arena().alloc_temp(self.effects))
             } else {
                 None
             };
-            let extended = if state_styles.is_some() || effects.is_some() {
-                Some(&*cx.arena().alloc_temp(DivExtended {
-                    state_styles,
-                    effects,
-                }))
-            } else {
-                None
+            let extended = match (state_styles, effects) {
+                (None, None) => DivExtPtr::NONE,
+                (Some(s), None) => DivExtPtr::from_state_styles(s),
+                (None, Some(e)) => DivExtPtr::from_effects(e),
+                (Some(s), Some(e)) => DivExtPtr::from_both(&*cx.arena().alloc_temp(DivExtended {
+                    state_styles: Some(s),
+                    effects: Some(e),
+                })),
             };
             let transition = self.transition.map(|t| &*cx.arena().alloc_temp(t));
             Some(alloc_visual(extended, transition))
@@ -106,7 +110,7 @@ impl<'a> IntoElement<'a> for Div<'a> {
             if fw == 0 && fc == Color::TRANSPARENT {
                 Some(&NO_FOCUS_BORDER_DIV_VISUAL)
             } else {
-                Some(alloc_visual(None, None))
+                Some(alloc_visual(DivExtPtr::NONE, None))
             }
         } else {
             None
@@ -265,6 +269,8 @@ pub struct Div<'a> {
     pub items_baseline: bool,
     /// 高级视觉特效包（多色标渐变、四角独立圆角、混合模式、模糊/色彩滤镜、毛玻璃、2D 变换与路径裁剪；未设置时零分配）。
     pub effects: PaintEffects<'a>,
+    /// 外部零拷贝 GPU 纹理描述（仅在绑定时按需在帧内分配，对常规节点零内存开销）。
+    pub external_texture: Option<crate::paint::ExternalTextureSpec>,
 }
 
 /// 构造一个基础弹性盒容器（完全复刻 HTML/Tailwind 的 `div` 直觉）。
@@ -314,6 +320,7 @@ pub fn div<'a>() -> Div<'a> {
         focus_style: None,
         items_baseline: false,
         effects: PaintEffects::EMPTY,
+        external_texture: None,
     }
 }
 
@@ -347,6 +354,7 @@ impl<'a> Div<'a> {
             || self.focus_style.is_some()
             || self.items_baseline
             || !self.effects.is_empty()
+            || self.external_texture.is_some()
     }
 
     #[inline(always)]
@@ -1547,6 +1555,51 @@ impl<'a> Div<'a> {
         // SAFETY: `buf` 刚刚完整拷贝自合法 UTF-8 `&str`
         let s = unsafe { core::str::from_utf8_unchecked(buf) };
         self.effects.clip_path = Some(StrRef::Scratch(s));
+        self
+    }
+
+    /// 绑定外部零拷贝 GPU 纹理槽位（如海图/雷达/视频/3D 引擎共享的 `wgpu::TextureView`）。
+    ///
+    /// - 硬件 `wgpu` 后端直接零拷贝采样该纹理并支持四角圆角、混合与上方实时毛玻璃联动；
+    /// - 软件光栅或无 GPU 模式下自动降级为 `fallback_bg` 圆角占位。
+    #[inline(always)]
+    pub fn external_texture(mut self, id: crate::paint::ExternalTextureId) -> Self {
+        self.external_texture = Some(crate::paint::ExternalTextureSpec::new(id));
+        self
+    }
+
+    /// 绑定完整配置的外部零拷贝纹理描述 [`ExternalTextureSpec`](crate::paint::ExternalTextureSpec)。
+    #[inline(always)]
+    pub fn external_texture_spec(mut self, spec: crate::paint::ExternalTextureSpec) -> Self {
+        self.external_texture = Some(spec);
+        self
+    }
+
+    /// 配置外部纹理的归一化采样 UV 矩形 `[u0, v0, u1, v1]`。
+    #[inline(always)]
+    pub fn external_texture_uv(mut self, uv_rect: [f32; 4]) -> Self {
+        if let Some(ext) = &mut self.external_texture {
+            ext.uv_rect = uv_rect;
+        }
+        self
+    }
+
+    /// 更新外部纹理内容版本号（外部引擎重绘同一纹理时递增此值，精准驱动脏区刷新）。
+    #[inline(always)]
+    pub fn external_texture_revision(mut self, revision: u64) -> Self {
+        if let Some(ext) = &mut self.external_texture {
+            ext.content_revision = revision;
+        }
+        self
+    }
+
+    /// 配置外部纹理的 Alpha 预乘约定与软件降级占位色。
+    #[inline(always)]
+    pub fn external_texture_format(mut self, premultiplied: bool, fallback_bg: Color) -> Self {
+        if let Some(ext) = &mut self.external_texture {
+            ext.premultiplied = premultiplied;
+            ext.fallback_bg = fallback_bg;
+        }
         self
     }
 }

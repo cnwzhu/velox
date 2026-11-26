@@ -414,6 +414,43 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                 }
             }
 
+            if emit_here {
+                if let Some(mut ext) = effects.and_then(|e| e.external_texture).copied() {
+                    if ext.radii.is_zero() {
+                        ext.radii = effects
+                            .and_then(|e| e.corner_radii)
+                            .unwrap_or(CornerRadii::all(rounded));
+                    }
+                    ext.opacity = ((ext.opacity as u16 * inner_opacity as u16) / 255) as u8;
+                    if layer_pushed.is_some() {
+                        ext.blend_mode = BlendMode::SrcOver;
+                    } else if ext.blend_mode.is_normal() {
+                        if let Some(e) = effects {
+                            ext.blend_mode = e.blend_mode;
+                        }
+                    }
+                    if ext.opacity > 0 {
+                        if let Some(ext_ref) = arena.try_alloc(ext) {
+                            if !out_ops.push(DrawOp {
+                                id: div.id().or(if div.transition.is_some() {
+                                    Some(effective_id)
+                                } else {
+                                    None
+                                }),
+                                bounds,
+                                clip: eff_parent_clip,
+                                clip_radius: eff_parent_clip_radius,
+                                payload: DrawPayload::ExternalTexture(ext_ref),
+                            }) {
+                                *dropped_ops = dropped_ops.saturating_add(1);
+                            }
+                        } else {
+                            *dropped_ops = dropped_ops.saturating_add(1);
+                        }
+                    }
+                }
+            }
+
             let scroll_target = resolved_scroll_max.map(|max_s| (effective_id, max_s));
             let scroll_horizontal = div.style.flex_dir() == FlexDir::Row
                 && div.grid_cols == 0

@@ -18,6 +18,7 @@ winit = ["std", "velox-engine/winit"]
 
 # GPU 硬件加速后端（内置 software 软光栅始终可用；关闭 default-features 并启用 std 即纯软件渲染）
 gpu = ["std", "velox-engine/gpu"]
+gpu-interop = ["gpu", "velox-engine/gpu-interop"]
 
 # 组件层（关闭 default-features 即仅使用 velox-engine）
 base = ["dep:velox-base"]
@@ -28,7 +29,7 @@ tokio = ["std", "dep:velox-async", "velox-async/tokio"]
 smol = ["std", "dep:velox-async", "velox-async/smol"]
 
 [dependencies]
-velox-engine = { version = "0.1.0", path = "../velox-engine", default-features = false }
-velox-base = { version = "0.1.0", path = "../velox-base", optional = true }
-velox-component = { version = "0.1.0", path = "../velox-component", optional = true }
-velox-async = { version = "0.1.0", path = "../velox-async", default-features = false, optional = true }
+velox-engine = { version = "0.2.0", path = "../velox-engine", default-features = false }
+velox-base = { version = "0.2.0", path = "../velox-base", optional = true }
+velox-component = { version = "0.2.0", path = "../velox-component", optional = true }
+velox-async = { version = "0.2.0", path = "../velox-async", default-features = false, optional = true }

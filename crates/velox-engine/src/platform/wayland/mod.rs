@@ -4,9 +4,12 @@
 //! - `wire`：Wayland 二进制协议对象、事件与 UNIX Socket 线协议客户端状态机；
 //! - `mod`：[`WaylandPlatform`] 双缓冲驱动与 [`Platform`] / [`PlatformSurface`] 实现。
 
+pub mod dmabuf;
 #[cfg(unix)]
 mod unix_socket;
 mod wire;
+
+pub use dmabuf::{DmaBufPlaneDesc, WaylandDmaBufDriver, WaylandDmaBufPacket};
 
 use std::string::String;
 use std::time::{Duration, Instant};

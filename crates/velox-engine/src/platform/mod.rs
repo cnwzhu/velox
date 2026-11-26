@@ -21,6 +21,7 @@ pub use clipboard::{clipboard_has_text, clipboard_read_into, clipboard_write_tex
 pub use clipboard::clipboard_read_text;
 
 pub mod android;
+pub mod embed_ffi;
 pub mod harmony;
 pub mod ios;
 pub mod shm_driver;

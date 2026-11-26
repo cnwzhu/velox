@@ -5,8 +5,7 @@
 use crate::display::PixelFormat;
 use crate::motion::{DrawOp, DrawPayload};
 use crate::paint::{
-    BlendMode, Paint, StyledQuad, bake_gradient_lut, blend_premul_f32, color_to_premul_f32,
-    premul_f32_to_color,
+    BlendMode, Paint, StyledQuad, bake_gradient_lut, blend_premul_f32, color_to_premul_f32, premul_f32_to_color,
 };
 use crate::solver::Region;
 use crate::style::Color;
@@ -1197,6 +1196,18 @@ mod std_layers {
                 rasterize_sprite_source(sb, sub_clip, sprite, origin_x, origin_y, stride, dst);
             }
             DrawPayload::PushLayer(_) | DrawPayload::PopLayer => {}
+            DrawPayload::ExternalTexture(ext) => {
+                let sq = crate::paint::StyledQuad {
+                    paint: crate::paint::Paint::Solid(ext.fallback_bg),
+                    border_color: Color::TRANSPARENT,
+                    border_width: 0,
+                    radii: ext.radii,
+                    opacity: ext.opacity,
+                    blend_mode: ext.blend_mode,
+                    transform: None,
+                };
+                rasterize_styled_quad(sb, sub_clip, &sq, sf, origin_x, origin_y, stride, dst);
+            }
         };
 
         if clip_r_16 > 0 {
@@ -1219,11 +1230,11 @@ mod std_layers {
 
 pub(crate) use std_layers::rasterize_ops_with_layers;
 
-/// 检测绘制指令流是否包含隔离合成图层或非默认混合模式。
+/// 检测绘制指令流是否包含隔离合成图层、外部零拷贝纹理或非默认混合模式。
 #[inline]
 pub(crate) fn ops_have_layers_or_blend(ops: &[DrawOp<'_>]) -> bool {
     ops.iter().any(|op| match op.payload {
-        DrawPayload::PushLayer(_) | DrawPayload::PopLayer => true,
+        DrawPayload::PushLayer(_) | DrawPayload::PopLayer | DrawPayload::ExternalTexture(_) => true,
         DrawPayload::StyledQuad(sq) => !sq.blend_mode.is_normal(),
         _ => false,
     })

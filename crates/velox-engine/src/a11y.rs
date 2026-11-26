@@ -333,7 +333,8 @@ pub fn collect_a11y_nodes<'a, const CAP: usize>(
             DrawPayload::Quad { .. }
             | DrawPayload::StyledQuad(_)
             | DrawPayload::PushLayer(_)
-            | DrawPayload::PopLayer => {}
+            | DrawPayload::PopLayer
+            | DrawPayload::ExternalTexture(_) => {}
         }
     }
 

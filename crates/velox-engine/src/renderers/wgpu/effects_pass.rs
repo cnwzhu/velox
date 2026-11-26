@@ -44,6 +44,7 @@ pub(crate) const EFFECT_KIND_KAWASE_DOWN: f32 = 2.0;
 pub(crate) const EFFECT_KIND_KAWASE_UP: f32 = 3.0;
 pub(crate) const EFFECT_KIND_SHADOW_EXTRACT: f32 = 4.0;
 pub(crate) const EFFECT_KIND_BLIT: f32 = 5.0;
+pub(crate) const EFFECT_KIND_EXTERNAL_TEX: f32 = 6.0;
 
 impl EffectUniform {
     pub(crate) fn set_color_matrix(&mut self, cm: Option<ColorMatrix>) {
@@ -107,6 +108,13 @@ pub(crate) enum GpuPassStep {
         src_idx: usize,
         dst_snap_idx: usize,
         mask_path: Option<(std::string::String, u32, u32)>,
+        effect_slot: u32,
+    },
+    /// 将已注册的外部零拷贝 `wgpu::TextureView` 合成到 `dst_idx` 离屏纹理（支持独立圆角、UV 裁切与 27 种混合）。
+    DrawExternal {
+        dst_idx: usize,
+        dst_snap_idx: usize,
+        tex_id: crate::paint::ExternalTextureId,
         effect_slot: u32,
     },
     /// 最终将根离屏画布 Blit 到外部传入的 `target_view`。
@@ -389,6 +397,10 @@ impl GpuEffectsEngine {
         main_pipeline: &wgpu::RenderPipeline,
         main_bind_group: &wgpu::BindGroup,
         linear_sampler: &wgpu::Sampler,
+        external_textures: &std::collections::HashMap<
+            crate::paint::ExternalTextureId,
+            super::pipeline::ExternalTextureEntry,
+        >,
         target_view: &wgpu::TextureView,
     ) {
         if self.slots.len() > self.uniform_capacity {
@@ -559,6 +571,71 @@ impl GpuEffectsEngine {
                                 } else {
                                     wgpu::LoadOp::Load
                                 },
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                        multiview_mask: None,
+                    });
+                    rpass.set_pipeline(&self.pipeline);
+                    rpass.set_bind_group(0, &bg, &[*effect_slot * 256]);
+                    rpass.draw(0..6, 0..1);
+                }
+
+                GpuPassStep::DrawExternal {
+                    dst_idx,
+                    dst_snap_idx,
+                    tex_id,
+                    effect_slot,
+                } => {
+                    let Some(entry) = external_textures.get(tex_id) else {
+                        continue;
+                    };
+                    let snap_view = &self.pool.get(*dst_snap_idx).view;
+                    let dst_view = &self.pool.get(*dst_idx).view;
+                    let mask_view = self.pool.white_mask_view();
+                    let sampler = entry.sampler.as_ref().unwrap_or(linear_sampler);
+
+                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("velox_external_tex_bg"),
+                        layout: &self.bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: &self.uniform_buf,
+                                    offset: 0,
+                                    size: wgpu::BufferSize::new(256),
+                                }),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&entry.view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(snap_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(mask_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::Sampler(sampler),
+                            },
+                        ],
+                    });
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("velox_external_tex_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: dst_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
                                 store: wgpu::StoreOp::Store,
                             },
                         })],

@@ -261,6 +261,13 @@ pub fn lower_draw_ops<S: LoweredPrimitiveSink + ?Sized>(
                     }
                 }
                 DrawPayload::PushLayer(_) | DrawPayload::PopLayer => {}
+                DrawPayload::ExternalTexture(ext) => {
+                    let c = ext.fallback_bg.scale_alpha(ext.opacity);
+                    if c.a() > 0 {
+                        let r = ext.radii.max_radius().saturating_mul(s as u8);
+                        sink.fill_rect(scaled_bounds, r, c, c, false);
+                    }
+                }
             }
 
             if needs_elem_clip {

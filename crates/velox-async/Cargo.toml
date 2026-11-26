@@ -16,7 +16,7 @@ tokio = ["std", "dep:tokio"]
 smol = ["std", "dep:async-executor", "dep:async-io"]
 
 [dependencies]
-velox-engine = { version = "0.1.0", path = "../velox-engine", default-features = false }
+velox-engine = { version = "0.2.0", path = "../velox-engine", default-features = false }
 tokio = { workspace = true, optional = true }
 async-executor = { workspace = true, optional = true }
 async-io = { workspace = true, optional = true }
