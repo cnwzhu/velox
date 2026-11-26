@@ -20,8 +20,7 @@ use tokio::net::TcpListener;
 use crate::i18n::DESKTOP_CATALOG;
 use crate::reactive::GallerySignals;
 use crate::stories::state_pill;
-use crate::style::{self, BasePalette};
-use velox_kit::base::{Badge, Button, ProgressBar, Spinner};
+use velox_kit::component::{Badge, Button, ProgressBar, Spinner};
 use velox_kit::platform::shm_driver::{SoftwareSurfaceDriver, WlSurface};
 use velox_kit::prelude::*;
 
@@ -279,7 +278,6 @@ impl View for AsyncTaskView {
         cx.override_locale(locale);
         cx.override_i18n_catalog(&DESKTOP_CATALOG);
 
-        let p = BasePalette::from_theme(theme);
         let is_busy = self.status.is_busy();
         let progress_pct: u8 = match &self.status {
             AsyncTaskStatus::Idle => 0,
@@ -303,39 +301,20 @@ impl View for AsyncTaskView {
         });
 
         let status_badge = match &self.status {
-            AsyncTaskStatus::Idle => {
-                style::badge_subtle(Badge::new(cx.t("async.badge_idle")), theme)
+            AsyncTaskStatus::Idle => Badge::new(cx.t("async.badge_idle")).secondary(),
+            AsyncTaskStatus::Running { progress_pct, .. } => {
+                Badge::new(fmt!(cx, "{} {}%", cx.t("async.badge_running"), progress_pct)).info()
             }
-            AsyncTaskStatus::Running { progress_pct, .. } => style::badge_tint(
-                Badge::new(fmt!(cx, "{} {}%", cx.t("async.badge_running"), progress_pct)),
-                theme.info,
-                theme,
-            ),
-            AsyncTaskStatus::HttpPending { .. } => style::badge_tint(
-                Badge::new(cx.t("async.badge_http_req")),
-                theme.info,
-                theme,
-            ),
-            AsyncTaskStatus::HttpOk { status_code, .. } => style::badge_tint(
-                Badge::new(fmt!(cx, "{} {}", cx.t("async.badge_http_ok"), status_code)),
-                theme.success,
-                theme,
-            ),
-            AsyncTaskStatus::HttpErr { .. } => style::badge_tint(
-                Badge::new(cx.t("async.badge_http_err")),
-                theme.danger,
-                theme,
-            ),
-            AsyncTaskStatus::Completed { .. } => style::badge_tint(
-                Badge::new(fmt!(cx, "{} #{}", cx.t("async.badge_done"), self.completed_runs)),
-                theme.success,
-                theme,
-            ),
-            AsyncTaskStatus::Cancelled => style::badge_tint(
-                Badge::new(cx.t("async.badge_cancelled")),
-                theme.warning,
-                theme,
-            ),
+            AsyncTaskStatus::HttpPending { .. } => Badge::new(cx.t("async.badge_http_req")).info(),
+            AsyncTaskStatus::HttpOk { status_code, .. } => {
+                Badge::new(fmt!(cx, "{} {}", cx.t("async.badge_http_ok"), status_code)).success()
+            }
+            AsyncTaskStatus::HttpErr { .. } => Badge::new(cx.t("async.badge_http_err")).danger(),
+            AsyncTaskStatus::Completed { .. } => {
+                Badge::new(fmt!(cx, "{} #{}", cx.t("async.badge_done"), self.completed_runs))
+                    .success()
+            }
+            AsyncTaskStatus::Cancelled => Badge::new(cx.t("async.badge_cancelled")).warning(),
         };
 
         let detail_text = match &self.status {
@@ -385,7 +364,7 @@ impl View for AsyncTaskView {
                 cx,
                 Spinner::new(354, 24, 0)
                     .thickness(3)
-                    .color(p.fg)
+                    .color(theme.foreground)
                     .spinning(cx, 900),
             );
         } else {
@@ -393,14 +372,14 @@ impl View for AsyncTaskView {
                 AsyncTaskStatus::Completed { .. } | AsyncTaskStatus::HttpOk { .. } => theme.success,
                 AsyncTaskStatus::HttpErr { .. } => theme.danger,
                 AsyncTaskStatus::Cancelled => theme.warning,
-                _ => p.muted_fg,
+                _ => theme.muted_foreground,
             };
             status_left = status_left.child(
                 cx,
                 svg_icon(14, 14, "M13 2 3 14h9l-1 8 10-12h-9l1-8Z").tint(icon_color),
             );
         }
-        status_left = status_left.child(cx, text(detail_text).size(12).color(p.muted_fg));
+        status_left = status_left.child(cx, text(detail_text).size(12).color(theme.muted_foreground));
 
         let pill_text = match &self.status {
             AsyncTaskStatus::HttpPending { .. } => {
@@ -421,8 +400,9 @@ impl View for AsyncTaskView {
             .h(126)
             .p(16)
             .gap(10)
-            .bg(p.surface)
-            .border(1, p.border)
+            .rounded(8)
+            .bg(theme.card)
+            .border(1, theme.border)
             .justify_between()
             .child(
                 cx,
@@ -444,9 +424,9 @@ impl View for AsyncTaskView {
                                     14,
                                     "M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8M21 3v5h-5",
                                 )
-                                .tint(p.fg),
+                                .tint(theme.foreground),
                             )
-                            .child(cx, text(cx.t("async.title")).size(13).color(p.fg))
+                            .child(cx, text(cx.t("async.title")).size(13).color(theme.foreground))
                             .child(cx, status_badge),
                     )
                     .child(
@@ -457,50 +437,44 @@ impl View for AsyncTaskView {
                             .items_center()
                             .child(
                                 cx,
-                                style::btn_outline(
-                                    Button::new(352, cx.t("async.btn_cancel"))
-                                        .font_size(12)
-                                        .h(28)
-                                        .px(10)
-                                        .disabled(!is_busy)
-                                        .on_click(on_cancel),
-                                    theme,
-                                ),
+                                Button::new(352, cx.t("async.btn_cancel"))
+                                    .outline()
+                                    .small()
+                                    .font_size(12)
+                                    .h(28)
+                                    .px(10)
+                                    .disabled(!is_busy)
+                                    .on_click(on_cancel),
                             )
                             .child(
                                 cx,
-                                style::btn_outline(
-                                    Button::new(355, cx.t("async.btn_http"))
-                                        .font_size(12)
-                                        .h(28)
-                                        .px(10)
-                                        .disabled(is_busy)
-                                        .on_click(on_http),
-                                    theme,
-                                ),
+                                Button::new(355, cx.t("async.btn_http"))
+                                    .outline()
+                                    .small()
+                                    .font_size(12)
+                                    .h(28)
+                                    .px(10)
+                                    .disabled(is_busy)
+                                    .on_click(on_http),
                             )
                             .child(
                                 cx,
-                                style::btn_solid(
-                                    Button::new(351, cx.t("async.btn_run"))
-                                        .font_size(12)
-                                        .h(28)
-                                        .px(10)
-                                        .disabled(is_busy)
-                                        .on_click(on_run),
-                                    theme,
-                                ),
+                                Button::new(351, cx.t("async.btn_run"))
+                                    .primary()
+                                    .small()
+                                    .font_size(12)
+                                    .h(28)
+                                    .px(10)
+                                    .disabled(is_busy)
+                                    .on_click(on_run),
                             ),
                     ),
             )
             .child(
                 cx,
-                style::progress_bar(
-                    ProgressBar::new(353, 720, progress_pct)
-                        .height(8)
-                        .animated(true),
-                    theme,
-                ),
+                ProgressBar::new(353, 720, progress_pct)
+                    .height(8)
+                    .animated(true),
             )
             .child(cx, footer_row)
             .into_element(cx)

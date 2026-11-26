@@ -6,6 +6,10 @@ pub(crate) mod font_ttf;
 mod pixel;
 
 pub(crate) use font_ttf as ttf_atlas;
+pub use font_ttf::{
+    get_cached_glyph_styled_q4, register_font_bytes, register_font_vec,
+    registered_custom_font_count,
+};
 pub use pixel::{PixelFormat, Rgb565, Rgba8888, SpriteFormat, Xrgb8888};
 
 use crate::solver::Region;
@@ -53,6 +57,26 @@ pub fn measure_char_advance_f32(ch: char, font_size: u8) -> f32 {
         }
     }
     measure_char_advance(ch, font_size) as f32
+}
+
+/// 按 [`FontSpec`](crate::text_rich::FontSpec) 测量单个字符的高精度浮点水平步进宽度（全平台无堆可用）。
+#[inline]
+pub fn measure_char_advance_styled_f32(
+    ch: char,
+    font_size: u8,
+    spec: crate::text_rich::FontSpec,
+) -> f32 {
+    {
+        if let Some(adv) = ttf_atlas::measure_ttf_char_advance_styled_f32(ch, font_size, spec) {
+            return adv.max(1.0);
+        }
+    }
+    let base = measure_char_advance_f32(ch, font_size);
+    if spec.weight.is_bold() {
+        base + 0.8
+    } else {
+        base
+    }
 }
 
 /// 测量相邻字符对 `(prev, curr)` 在指定字号下的高精度浮点水平字距微调像素。

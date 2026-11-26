@@ -49,6 +49,12 @@ pub enum DrawPayload<'a> {
     PopLayer,
     /// 外部零拷贝 GPU 纹理（如海图/视频/3D 视口共享的 `wgpu::TextureView`，8B Arena 引用，零膨胀 `DrawOp`）。
     ExternalTexture(&'a ExternalTextureSpec),
+    /// 行内多字族/字重/BiDi/彩色 Emoji 富文本段落（8B Arena 引用，零膨胀 `DrawOp`）。
+    RichText(&'a crate::text_rich::RichTextSpec<'a>),
+    /// 支持 `ObjectFit` / `NineSlice` / LRU 纹理缓存的通用解码图像（8B Arena 引用）。
+    DecodedImage(&'a crate::image_pipeline::DecodedImageSpec),
+    /// 原生抗锯齿 2D 矢量画布（8B Arena 引用）。
+    Vector(&'a crate::vector_canvas::VectorDrawSpec<'a>),
 }
 
 impl<'a> PartialEq for DrawPayload<'a> {
@@ -116,6 +122,9 @@ impl<'a> PartialEq for DrawPayload<'a> {
             (Self::PushLayer(a), Self::PushLayer(b)) => a == b,
             (Self::PopLayer, Self::PopLayer) => true,
             (Self::ExternalTexture(a), Self::ExternalTexture(b)) => a == b,
+            (Self::RichText(a), Self::RichText(b)) => a == b,
+            (Self::DecodedImage(a), Self::DecodedImage(b)) => a == b,
+            (Self::Vector(a), Self::Vector(b)) => a == b,
             _ => false,
         }
     }
@@ -254,6 +263,18 @@ impl<'a> DrawOp<'a> {
             DrawPayload::ExternalTexture(ext) => {
                 mix(&mut h, 10);
                 ext.mix_hash(&mut h);
+            }
+            DrawPayload::RichText(rt) => {
+                mix(&mut h, 11);
+                rt.mix_hash(&mut h);
+            }
+            DrawPayload::DecodedImage(img) => {
+                mix(&mut h, 12);
+                img.mix_hash(&mut h);
+            }
+            DrawPayload::Vector(vec_spec) => {
+                mix(&mut h, 13);
+                vec_spec.mix_hash(&mut h);
             }
         }
         let eff_bounds = match self.payload {

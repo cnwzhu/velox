@@ -32,7 +32,10 @@ pub use text::rasterize_text;
 #[cfg(feature = "gpu")]
 pub(crate) use effects::ops_have_layers_or_blend;
 #[cfg(feature = "gpu")]
-pub(crate) use text::{align_offset_x, compute_scaled_text_box, split_text_lines};
+pub(crate) use text::{
+    align_offset_x, compute_scaled_text_box, rasterize_decoded_image, rasterize_rich_text,
+    split_text_lines,
+};
 
 /// 将逻辑矩形按分数/整数 `sf` 映射并对齐至物理像素边界（与 `wgpu::snap_bounds` 严格同源，锁定 1px 细线恒定物理宽）。
 #[inline(always)]

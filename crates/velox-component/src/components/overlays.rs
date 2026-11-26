@@ -38,6 +38,9 @@ crate::define_themed_component! {
     disableable: false,
     init: |base| {
         base.focus_ring = true;
+        {
+            base.animated = true;
+        }
     },
     apply_tw: |base, theme| {
         let (def_confirm_bg, def_confirm_fg) = if base.destructive {
@@ -77,6 +80,7 @@ crate::define_themed_component! {
     },
     forward: [
         destructive(destructive: bool),
+        animated(enabled: bool),
         on_confirm(handler: &'a dyn Fn(&mut ActionScope)),
         on_cancel(handler: &'a dyn Fn(&mut ActionScope)),
     ],

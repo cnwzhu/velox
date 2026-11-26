@@ -160,6 +160,7 @@ pub struct OtpInput<'a> {
     pub focus_ring: bool,
     pub style: Style,
     pub style_ext: StyleExt,
+    pub on_focus: Option<&'a dyn Fn(&mut ActionScope)>,
     pub on_key_input: Option<&'a dyn Fn(KeyCode, &mut ActionScope)>,
     pub slot_renderer: Option<&'a dyn Fn(Div<'a>, OtpSlotState, &'a FrameScope) -> Element<'a>>,
 }
@@ -175,7 +176,7 @@ impl<'a> OtpInput<'a> {
             masked: false,
             focused: false,
             group_size: 3,
-            slot_size: 36,
+            slot_size: 38,
             bg: Color::TRANSPARENT,
             border_color: Color::TRANSPARENT,
             active_border_color: Color::TRANSPARENT,
@@ -185,9 +186,17 @@ impl<'a> OtpInput<'a> {
             focus_ring: false,
             style: Style::DEFAULT,
             style_ext: StyleExt::DEFAULT,
+            on_focus: None,
             on_key_input: None,
             slot_renderer: None,
         }
+    }
+
+    /// 绑定点击聚焦回调（点击任意验证码格时激活输入态）。
+    #[inline(always)]
+    pub fn on_focus(mut self, handler: &'a dyn Fn(&mut ActionScope)) -> Self {
+        self.on_focus = Some(handler);
+        self
     }
 
     /// 设置是否以掩码圆点（`•`）隐藏已输入的验证码。
@@ -259,28 +268,39 @@ impl<'a> Widget<'a> for OtpInput<'a> {
         };
         let rounded = self.rounded;
 
+        // 外层行容器始终移除外围焦环边框，焦点状态由单个活跃验证码格自身高亮呈现
         let mut row = div()
             .id(self.id)
             .flex_row()
             .items_center()
             .gap(6)
-            .focusable();
-        if !self.focus_ring {
-            row = row.no_focus_border();
-        }
+            .focusable()
+            .no_focus_border();
 
+        if let Some(fcb) = self.on_focus {
+            row = row.on_click_raw(fcb);
+        }
         if let Some(kcb) = self.on_key_input {
             row = row.on_key_input(kcb);
         }
 
         let bytes = self.value.as_bytes();
         let active_idx = bytes.len().min(self.length.saturating_sub(1));
+        let hover_tint = if active_border_color != Color::TRANSPARENT {
+            active_border_color.scale_alpha(20)
+        } else {
+            fg.scale_alpha(14)
+        };
 
         for idx in 0..self.length {
             if self.group_size > 0 && idx > 0 && idx % self.group_size == 0 {
                 row = row.child(
                     cx,
-                    text("-").size(14).color(separator_color),
+                    div()
+                        .w(10)
+                        .h(2)
+                        .rounded(1)
+                        .bg(separator_color.scale_alpha(150)),
                 );
             }
 
@@ -311,8 +331,15 @@ impl<'a> Widget<'a> for OtpInput<'a> {
             } else {
                 let border_col = if is_active {
                     active_border_color
+                } else if is_filled && border_color != Color::TRANSPARENT {
+                    border_color.lerp(fg, 44)
                 } else {
                     border_color
+                };
+                let slot_bg = if is_active && bg != Color::TRANSPARENT {
+                    bg.lerp(active_border_color, 18)
+                } else {
+                    bg
                 };
 
                 let mut slot = div()
@@ -320,7 +347,14 @@ impl<'a> Widget<'a> for OtpInput<'a> {
                     .w(self.slot_size)
                     .h(self.slot_size)
                     .rounded(rounded)
-                    .bg(bg)
+                    .bg(slot_bg)
+                    .hover_bg(if slot_bg != Color::TRANSPARENT {
+                        slot_bg.lerp(hover_tint, 40)
+                    } else {
+                        hover_tint
+                    })
+                    .animate_color(Duration::from_millis(120))
+                    .cursor(CursorShape::Text)
                     .items_center()
                     .justify_center();
                 if border_col != Color::TRANSPARENT {
@@ -336,6 +370,24 @@ impl<'a> Widget<'a> for OtpInput<'a> {
                         unsafe { core::str::from_utf8_unchecked(b) }
                     };
                     slot = slot.child(cx, text(cell_str).size(15).color(text_color));
+                } else if is_active {
+                    // 聚焦空槽显示 530ms 周期闪烁竖线光标
+                    cx.request_frame();
+                    let caret_on = (cx.now_ms() / 530) % 2 == 0;
+                    if caret_on {
+                        slot = slot.child(
+                            cx,
+                            div()
+                                .w(2)
+                                .h(16)
+                                .rounded(1)
+                                .bg(if active_border_color != Color::TRANSPARENT {
+                                    active_border_color
+                                } else {
+                                    text_color
+                                }),
+                        );
+                    }
                 }
 
                 row = row.child(cx, slot);

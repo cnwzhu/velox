@@ -18,6 +18,7 @@ pub(crate) struct PooledTarget {
     pub(crate) view: wgpu::TextureView,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    pub(crate) generation: u64,
     in_use: bool,
 }
 
@@ -32,6 +33,7 @@ const MAX_CACHED_MASKS: usize = 64;
 pub(crate) struct LayerTargetPool {
     format: wgpu::TextureFormat,
     targets: Vec<PooledTarget>,
+    next_gen: u64,
     white_mask: CachedPathMask,
     path_masks: HashMap<u64, CachedPathMask>,
 }
@@ -75,6 +77,7 @@ impl LayerTargetPool {
         Self {
             format,
             targets: Vec::with_capacity(8),
+            next_gen: 1,
             white_mask: CachedPathMask {
                 _texture: white_tex,
                 view: white_view,
@@ -133,11 +136,14 @@ impl LayerTargetPool {
             view_formats: &[],
         });
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let generation = self.next_gen;
+        self.next_gen = self.next_gen.wrapping_add(1).max(1);
         let entry = PooledTarget {
             texture: tex,
             view,
             width: bw,
             height: bh,
+            generation,
             in_use: true,
         };
 

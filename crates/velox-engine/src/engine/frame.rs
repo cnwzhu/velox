@@ -438,7 +438,7 @@ impl VeloxEngine {
     }
 
     #[inline]
-    pub(super) fn cached_hit_regions<'a>(&self) -> &'a [HitRegion<'a>] {
+    pub(crate) fn cached_hit_regions<'a>(&self) -> &'a [HitRegion<'a>] {
         if !self.frame_cached || self.cached_hits_len == 0 || self.cached_hits_ptr.is_null() {
             &[]
         } else {

@@ -8,6 +8,7 @@ use crate::solver::Region;
 use crate::style::Color;
 
 /// 16 倍定点数（$1/16\text{ px}$ 亚像素精度）有向距离场（SDF）计算（支持 1/16px 亚像素圆角半径 `r_16`）。
+#[allow(dead_code)]
 #[inline(always)]
 pub(super) fn compute_sdf_dist_16_r16(px: i16, py: i16, box_reg: Region, r_16: i32) -> i32 {
     let max_r_16 = (box_reg.w.min(box_reg.h).max(0) as i32) * 8;
@@ -52,14 +53,20 @@ pub(super) fn compute_sdf_coverage_r16(px: i16, py: i16, box_reg: Region, r_16: 
         return 255;
     }
 
-    let sd_16 = compute_sdf_dist_16_r16(px, py, box_reg, r_16);
-    if sd_16 <= -8 {
-        255
-    } else if sd_16 >= 8 {
-        0
-    } else {
-        (((8 - sd_16) * 255) / 16) as u8
+    {
+        let half_w = (box_reg.w as f32) * 0.5;
+        let half_h = (box_reg.h as f32) * 0.5;
+        let cx = (box_reg.x as f32) + half_w;
+        let cy = (box_reg.y as f32) + half_h;
+        let r = ((r_16 as f32) * (1.0 / 16.0)).clamp(0.0, half_w.min(half_h));
+        let qx = ((px as f32 + 0.5) - cx).abs() - (half_w - r);
+        let qy = ((py as f32 + 0.5) - cy).abs() - (half_h - r);
+        let ox = qx.max(0.0);
+        let oy = qy.max(0.0);
+        let sd = (ox * ox + oy * oy).sqrt() + qx.max(qy).min(0.0) - r;
+        return ((0.5 - sd).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     }
+
 }
 
 /// 定点数 SDF（有向距离场）圆角矩形单像素 Alpha 覆盖率计算（零浮点，纯整数运算）。
@@ -436,7 +443,6 @@ pub(crate) fn rasterize_quad_precise<P: PixelFormat>(
         return;
     }
 
-    let bw_16 = (border_width as i32) * 16;
     let h_denom = bounds.h.max(1) as i32;
     let w_denom = bounds.w.max(1) as i32;
     // 圆角与边框内侧的 100% 满覆盖平坦核心水平跨度 [flat_x0, flat_x1)
@@ -484,16 +490,25 @@ pub(crate) fn rasterize_quad_precise<P: PixelFormat>(
                 continue;
             }
 
-            let sd_outer_16 = compute_sdf_dist_16_r16(px, py, bounds, rounded_16);
-            if sd_outer_16 >= 8 {
+            let (outer_cov, sd_outer_f32) = {
+                let half_w = (bounds.w as f32) * 0.5;
+                let half_h = (bounds.h as f32) * 0.5;
+                let cx = (bounds.x as f32) + half_w;
+                let cy = (bounds.y as f32) + half_h;
+                let r = ((rounded_16.max(0) as f32) * (1.0 / 16.0)).clamp(0.0, half_w.min(half_h));
+                let qx = ((px as f32 + 0.5) - cx).abs() - (half_w - r);
+                let qy = ((py as f32 + 0.5) - cy).abs() - (half_h - r);
+                let ox = qx.max(0.0);
+                let oy = qy.max(0.0);
+                let sd = (ox * ox + oy * oy).sqrt() + qx.max(qy).min(0.0) - r;
+                let cov = ((0.5 - sd).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                (cov, sd)
+            };
+            if outer_cov == 0 {
                 px += 1;
                 continue;
             }
-            let outer_cov = if sd_outer_16 <= -8 {
-                255u8
-            } else {
-                (((8 - sd_outer_16) * 255) / 16) as u8
-            };
+
 
             let idx = row_offset + ((px - origin_x) as usize);
             let Some(dst) = target.get_mut(idx) else {
@@ -510,13 +525,9 @@ pub(crate) fn rasterize_quad_precise<P: PixelFormat>(
             };
 
             if has_border {
-                let sd_inner_16 = sd_outer_16 + bw_16;
-                let inner_cov = if sd_inner_16 <= -8 {
-                    255u32
-                } else if sd_inner_16 >= 8 {
-                    0u32
-                } else {
-                    (((8 - sd_inner_16) * 255) / 16) as u32
+                let inner_cov = {
+                    let sd_in = sd_outer_f32 + (border_width as f32);
+                    ((0.5 - sd_in).clamp(0.0, 1.0) * 255.0 + 0.5) as u32
                 };
 
                 if inner_cov == 255 {

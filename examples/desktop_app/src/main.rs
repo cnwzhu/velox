@@ -4,7 +4,7 @@
 //! - 默认 / `--window`：启动原生桌面画廊窗口（Windows / macOS / Linux Pure Wayland，默认启用 `wgpu` 2D SDF GPU 硬件加速）；
 //! - `--software`：运行时切换至内置软件光栅渲染器（`DesktopRenderBackend::Software`）；
 //! - `--light`：以亮色主题（`ThemeMode::Light`）启动画廊；
-//! - `--story <name>`：直接打开指定故事页（`overview` / `buttons` / `selection` / `sliders` / `inputs` / `navigation` / `editor` / `overlays` / `feedback` / `data` / `icons` / `effects`）；
+//! - `--story <name>`：直接打开指定故事页（`overview` / `buttons` / `selection` / `sliders` / `inputs` / `navigation` / `editor` / `overlays` / `feedback` / `data` / `icons` / `effects` / `motion` / `engine` / `chat`）；
 //! - `--lang <en|zh|ja>`：指定初始显示语言；
 //! - `--scale <1|2>`：设置 HiDPI 缩放倍率（默认 `2`）；
 //! - `--save-png <path>`：渲染首帧并导出无损 PNG 画廊快照；
@@ -109,11 +109,20 @@ fn main() {
                 engine.set_locale(loc);
             }
             let _ = mount_desktop_app(&mut engine, app_state);
+            // 先步进入场动效（最多 48 帧 ≈ 768ms，提前收敛即停），确保图表/弹簧卡片等展示完整终态
+            let _ = engine.step_frame_dt(16);
+            for _ in 0..48 {
+                if !engine.needs_redraw() {
+                    break;
+                }
+                let _ = engine.step_frame_dt(16);
+            }
             let runner = WinitPlatform::new(
                 "Velox Base Gallery — Component Showcase",
                 DEFAULT_DESKTOP_WIDTH as usize,
                 DEFAULT_DESKTOP_HEIGHT as usize,
             )
+            .with_backend(backend)
             .with_dpi_scale(headless_scale);
             runner
                 .render_to_png(&mut engine, path)
@@ -157,12 +166,22 @@ fn main() {
         assert!(r2.has_updates(), "Frame 2 must repaint notification dirty region");
         assert!(engine.view(root).unwrap().notification_open);
 
-        let r3 = winit_plat.flush_frame_dt(&mut engine, 16);
-        assert_eq!(r3.dirty_regions, 0, "Frame 3 idle frame must have 0 dirty regions");
+        // 步进 Notification 的 210ms 物理弹簧入场动画直至完全收敛，验证随后立即归零进入 0% CPU 休眠
+        let mut r_idle = winit_plat.flush_frame_dt(&mut engine, 16);
+        for _ in 0..24 {
+            if r_idle.dirty_regions == 0 {
+                break;
+            }
+            r_idle = winit_plat.flush_frame_dt(&mut engine, 16);
+        }
+        assert_eq!(
+            r_idle.dirty_regions, 0,
+            "Notification spring enter animation must settle to 0 dirty regions"
+        );
 
         println!(
-            "[Gallery/Winit] Frame 1: dirty={}, pixels={} | Frame 2 (Toast): dirty={}, pixels={} | Frame 3 (Idle): dirty={}",
-            r1.dirty_regions, r1.pixels_updated, r2.dirty_regions, r2.pixels_updated, r3.dirty_regions
+            "[Gallery/Winit] Frame 1: dirty={}, pixels={} | Frame 2 (Toast): dirty={}, pixels={} | Settled Idle: dirty={}",
+            r1.dirty_regions, r1.pixels_updated, r2.dirty_regions, r2.pixels_updated, r_idle.dirty_regions
         );
 
         {

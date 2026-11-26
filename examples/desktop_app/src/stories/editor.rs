@@ -1,10 +1,9 @@
-//! `Code Editor` 故事页：展示参照 `pop-os/cosmic-text` 重构的 Velox 文本编辑引擎
-//! （`BufferLine` / `TextDocBuffer` / `CosmicEditor` / `SyntaxEditor<RustSyntaxHighlighter>`）。
+//! `Code Editor` 故事页：完全基于 `velox-component` 的 `CodeEditor` 与 `Button`，
+//! 展示参照 `pop-os/cosmic-text` 重构的 Velox 文本编辑引擎。
 
 use super::story_header;
-use crate::style::{self, BasePalette};
 use crate::{ContextMenuTarget, GalleryApp};
-use velox_kit::base::{BufferPoint, Button, CodeEditor, Edit, Wrap};
+use velox_kit::component::{BufferPoint, Button, CodeEditor, Edit, Wrap};
 use velox_kit::prelude::*;
 
 impl GalleryApp {
@@ -13,7 +12,6 @@ impl GalleryApp {
         cx: &'a Scope<Self>,
         theme: CoreTheme,
     ) -> Div<'a> {
-        let p = BasePalette::from_theme(theme);
         // 每帧进入前同步暗/亮主题语法配色、软折行容器宽度并按需惰性重排
         self.editor_buf.sync_theme(&theme);
         let content_wrap_w = if self.sidebar_collapsed { 868.0 } else { 700.0 };
@@ -127,7 +125,7 @@ impl GalleryApp {
                     theme,
                     cx.t("ed.title"),
                     "cosmic-text inspired BufferLine / LayoutRun shaping, incremental Rust highlighting, soft-wrap, subpixel hit-testing & Change::reverse() undo/redo.",
-                    "velox_base::input::text_engine",
+                    "velox_component::CodeEditor",
                 ),
             )
             .child(
@@ -141,7 +139,10 @@ impl GalleryApp {
                     .justify_between()
                     .child(
                         cx,
-                        text(summary_text).size(12).color(p.muted_fg).ellipsis(),
+                        text(summary_text)
+                            .size(12)
+                            .color(theme.muted_foreground)
+                            .ellipsis(),
                     )
                     .child(
                         cx,
@@ -151,68 +152,55 @@ impl GalleryApp {
                             .items_center()
                             .child(
                                 cx,
-                                style::btn_toolbar(
-                                    Button::new(313, wrap_btn_label)
-                                        .w(88)
-                                        .on_click(on_toggle_wrap),
-                                    false,
-                                    theme,
-                                ),
+                                Button::new(313, wrap_btn_label)
+                                    .outline()
+                                    .small()
+                                    .w(88)
+                                    .on_click(on_toggle_wrap),
                             )
                             .child(
                                 cx,
-                                style::btn_toolbar(
-                                    Button::new(314, "Select All")
-                                        .w(82)
-                                        .on_click(on_select_all),
-                                    false,
-                                    theme,
-                                ),
+                                Button::new(314, "Select All")
+                                    .outline()
+                                    .small()
+                                    .w(82)
+                                    .on_click(on_select_all),
                             )
                             .child(
                                 cx,
-                                style::btn_toolbar(
-                                    Button::new(310, cx.t("ed.undo"))
-                                        .w(66)
-                                        .on_click(on_undo),
-                                    false,
-                                    theme,
-                                ),
+                                Button::new(310, cx.t("ed.undo"))
+                                    .outline()
+                                    .small()
+                                    .w(66)
+                                    .on_click(on_undo),
                             )
                             .child(
                                 cx,
-                                style::btn_toolbar(
-                                    Button::new(311, cx.t("ed.redo"))
-                                        .w(66)
-                                        .on_click(on_redo),
-                                    false,
-                                    theme,
-                                ),
+                                Button::new(311, cx.t("ed.redo"))
+                                    .outline()
+                                    .small()
+                                    .w(66)
+                                    .on_click(on_redo),
                             )
                             .child(
                                 cx,
-                                style::btn_toolbar(
-                                    Button::new(312, cx.t("ed.insert_fn"))
-                                        .w(92)
-                                        .on_click(on_insert_fn),
-                                    true,
-                                    theme,
-                                ),
+                                Button::new(312, cx.t("ed.insert_fn"))
+                                    .primary()
+                                    .small()
+                                    .w(92)
+                                    .on_click(on_insert_fn),
                             ),
                     ),
             )
             .child(
                 cx,
-                style::code_editor(
-                    CodeEditor::from_edit(cx, 320, &self.editor_buf, self.editor_focused)
-                        .size(0, 440)
-                        .blink_epoch(self.editor_buf.blink_epoch_ms())
-                        .on_focus(raw_focus_ed)
-                        .on_key_input(on_ed_key)
-                        .on_pointer_action(on_ed_ptr)
-                        .on_secondary_click(on_ed_sec),
-                    theme,
-                ),
+                CodeEditor::from_edit(cx, 320, &self.editor_buf, self.editor_focused)
+                    .size(0, 440)
+                    .blink_epoch(self.editor_buf.blink_epoch_ms())
+                    .on_focus(raw_focus_ed)
+                    .on_key_input(on_ed_key)
+                    .on_pointer_action(on_ed_ptr)
+                    .on_secondary_click(on_ed_sec),
             )
     }
 }

@@ -14,20 +14,21 @@ crate::define_themed_component! {
     sizable: false,
     disableable: false,
     init: |base| {
-        base.focus_ring = true;
+        base.focus_ring = false;
     },
     apply_tw: |base, theme| {
-        fill_color(&mut base.bg, theme.input);
+        fill_color(&mut base.bg, theme.background);
         fill_color(&mut base.border_color, theme.border);
         fill_color(&mut base.active_border_color, theme.ring);
         fill_color(&mut base.text_color, theme.foreground);
         fill_color(&mut base.separator_color, theme.muted_foreground);
-        fill_rounded(&mut base.rounded, 6);
+        fill_rounded(&mut base.rounded, 8);
     },
     forward: [
         masked(masked: bool),
         focused(focused: bool),
         groups(group_size: usize),
+        on_focus(handler: &'a dyn Fn(&mut ActionScope)),
         on_key_input(handler: &'a dyn Fn(KeyCode, &mut ActionScope)),
     ],
 }

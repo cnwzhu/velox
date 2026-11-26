@@ -118,7 +118,11 @@ impl<'a> Widget<'a> for ProgressBar {
             .bg(fg);
 
         if self.animated {
-            fill = fill.animate_bounds(Duration::from_millis(200));
+            {
+                fill = fill
+                    .animate_bounds(Duration::from_millis(260))
+                    .ease(Easing::Spring);
+            }
         }
 
         let track = div()

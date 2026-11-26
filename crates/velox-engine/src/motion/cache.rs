@@ -541,7 +541,10 @@ impl MotionCache {
                     } else {
                         target.bg
                     },
-                    border: if s.animate_color || in_flight {
+                    border: if (s.animate_color || in_flight)
+                        && cur.border.a() > 0
+                        && target.border.a() > 0
+                    {
                         cur.border
                     } else {
                         target.border

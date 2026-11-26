@@ -3,6 +3,7 @@
 //! 2D 仿射变换、SVG Path 裁剪遮罩与完整 27 种 W3C / Porter-Duff 混合模式的 GPU 编排。
 
 use ::wgpu;
+use std::collections::HashMap;
 use std::vec::Vec;
 
 use crate::paint::{ColorMatrix, Transform2D};
@@ -109,6 +110,8 @@ pub(crate) enum GpuPassStep {
         dst_snap_idx: usize,
         mask_path: Option<(std::string::String, u32, u32)>,
         effect_slot: u32,
+        /// `true` 时使用硬件预乘 Alpha 直出管线（`SrcOver` 零背景快照、零纹理拷贝）。
+        use_hw_blend: bool,
     },
     /// 将已注册的外部零拷贝 `wgpu::TextureView` 合成到 `dst_idx` 离屏纹理（支持独立圆角、UV 裁切与 27 种混合）。
     DrawExternal {
@@ -116,6 +119,7 @@ pub(crate) enum GpuPassStep {
         dst_snap_idx: usize,
         tex_id: crate::paint::ExternalTextureId,
         effect_slot: u32,
+        use_hw_blend: bool,
     },
     /// 最终将根离屏画布 Blit 到外部传入的 `target_view`。
     BlitToTarget {
@@ -127,9 +131,14 @@ pub(crate) enum GpuPassStep {
 /// 懒初始化的 GPU 离屏合成与后处理子引擎（常规无图层 UI 启动与运行期 0 成本）。
 pub(crate) struct GpuEffectsEngine {
     pipeline: wgpu::RenderPipeline,
+    /// 硬件 `PREMULTIPLIED_ALPHA_BLENDING` 直出管线：供 `BlendMode::SrcOver` 图层/投影/外部纹理零快照直出。
+    pipeline_src_over: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
     uniform_capacity: usize,
+    uniform_gen: u64,
+    /// 跨帧 `BindGroup` 复用缓存：键 `(uniform_gen, src_gen, snap_gen, mask_key)`，消除每帧驱动层重分配。
+    bg_cache: HashMap<(u64, u64, u64, u64), wgpu::BindGroup>,
     pub(crate) pool: LayerTargetPool,
     pub(crate) slots: Vec<EffectUniform>,
     pub(crate) steps: Vec<GpuPassStep>,
@@ -239,17 +248,93 @@ impl GpuEffectsEngine {
             cache: None,
         });
 
+        // 硬件 `SrcOver` 直出管线：对所有 `BlendMode::SrcOver` 图层/投影/外部纹理跳过整屏快照与拷贝
+        let pipeline_src_over = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("velox_wgpu_effects_pipeline_src_over"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_fullscreen"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_effect"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let uniform_buf = Self::create_uniform_buf(device, INIT_EFFECT_SLOTS);
         let pool = LayerTargetPool::new(device, queue, target_format);
         Self {
             pipeline,
+            pipeline_src_over,
             bgl,
             uniform_buf,
             uniform_capacity: INIT_EFFECT_SLOTS,
+            uniform_gen: 1,
+            bg_cache: HashMap::with_capacity(32),
             pool,
             slots: Vec::with_capacity(INIT_EFFECT_SLOTS),
             steps: Vec::with_capacity(32),
         }
+    }
+
+    /// 仅拷贝父画布与 `dst_rect ∩ clip_rect` 相交的局部矩形快照，将显存拷贝带宽从整屏降低 20×~100×。
+    /// 返回 `(snap_idx, snap_origin_x, snap_origin_y, snap_tex_w, snap_tex_h)`。
+    pub(crate) fn acquire_subrect_snapshot(
+        &mut self,
+        device: &wgpu::Device,
+        parent_idx: usize,
+        parent_aw: u32,
+        parent_ah: u32,
+        dst_rect: [f32; 4],
+        clip_rect: [f32; 4],
+    ) -> (usize, f32, f32, f32, f32) {
+        let x0 = dst_rect[0].max(clip_rect[0]).floor().max(0.0) as u32;
+        let y0 = dst_rect[1].max(clip_rect[1]).floor().max(0.0) as u32;
+        let x1 = (dst_rect[0] + dst_rect[2])
+            .min(clip_rect[2])
+            .ceil()
+            .max(0.0) as u32;
+        let y1 = (dst_rect[1] + dst_rect[3])
+            .min(clip_rect[3])
+            .ceil()
+            .max(0.0) as u32;
+        let sx = x0.min(parent_aw.saturating_sub(1));
+        let sy = y0.min(parent_ah.saturating_sub(1));
+        let sw = x1.min(parent_aw).saturating_sub(sx).max(1);
+        let sh = y1.min(parent_ah).saturating_sub(sy).max(1);
+
+        let snap_idx = self.pool.acquire(device, sw, sh);
+        self.steps.push(GpuPassStep::CopyRect {
+            src_idx: parent_idx,
+            src_origin: (sx, sy),
+            dst_idx: snap_idx,
+            dst_origin: (0, 0),
+            size: (sw, sh),
+        });
+        let tex_sz = (self.pool.get(snap_idx).width, self.pool.get(snap_idx).height);
+        (snap_idx, sx as f32, sy as f32, tex_sz.0 as f32, tex_sz.1 as f32)
     }
 
     fn create_uniform_buf(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -333,6 +418,7 @@ impl GpuEffectsEngine {
                 dst_snap_idx: prev_idx,
                 mask_path: None,
                 effect_slot: slot,
+                use_hw_blend: false,
             });
             chain.push((dst_idx, next_w, next_h));
             cur_w = next_w;
@@ -368,6 +454,7 @@ impl GpuEffectsEngine {
                 dst_snap_idx: cur_idx,
                 mask_path: None,
                 effect_slot: slot,
+                use_hw_blend: false,
             });
 
             if cur_idx != src_idx {
@@ -406,6 +493,11 @@ impl GpuEffectsEngine {
         if self.slots.len() > self.uniform_capacity {
             self.uniform_capacity = self.slots.len().next_power_of_two();
             self.uniform_buf = Self::create_uniform_buf(device, self.uniform_capacity);
+            self.uniform_gen = self.uniform_gen.wrapping_add(1).max(1);
+            self.bg_cache.clear();
+        }
+        if self.bg_cache.len() > 256 {
+            self.bg_cache.clear();
         }
         if !self.slots.is_empty() {
             queue.write_buffer(&self.uniform_buf, 0, pod_as_bytes(&self.slots));
@@ -518,47 +610,65 @@ impl GpuEffectsEngine {
                     dst_snap_idx,
                     mask_path,
                     effect_slot,
+                    use_hw_blend,
                 } => {
                     let mask_key = mask_path
                         .as_ref()
                         .map(|(path_d, mw, mh)| {
                             self.pool.ensure_path_mask(device, queue, path_d, *mw, *mh)
                         });
-                    let mask_view = self.pool.path_mask_view(mask_key);
-                    let src_view = &self.pool.get(*src_idx).view;
-                    let snap_view = &self.pool.get(*dst_snap_idx).view;
+                    let src_gen = self.pool.get(*src_idx).generation;
+                    let use_src_as_dummy_snap = *use_hw_blend || *dst_snap_idx == *dst_idx;
+                    let snap_gen = if use_src_as_dummy_snap {
+                        src_gen
+                    } else {
+                        self.pool.get(*dst_snap_idx).generation
+                    };
+                    let cache_key = (self.uniform_gen, src_gen, snap_gen, mask_key.unwrap_or(0));
+
+                    if !self.bg_cache.contains_key(&cache_key) {
+                        let mask_view = self.pool.path_mask_view(mask_key);
+                        let src_view = &self.pool.get(*src_idx).view;
+                        let snap_view = if use_src_as_dummy_snap {
+                            src_view
+                        } else {
+                            &self.pool.get(*dst_snap_idx).view
+                        };
+                        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("velox_effect_bg"),
+                            layout: &self.bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                        buffer: &self.uniform_buf,
+                                        offset: 0,
+                                        size: wgpu::BufferSize::new(256),
+                                    }),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(src_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::TextureView(snap_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 3,
+                                    resource: wgpu::BindingResource::TextureView(mask_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 4,
+                                    resource: wgpu::BindingResource::Sampler(linear_sampler),
+                                },
+                            ],
+                        });
+                        self.bg_cache.insert(cache_key, bg);
+                    }
+                    let bg = &self.bg_cache[&cache_key];
                     let dst_view = &self.pool.get(*dst_idx).view;
 
-                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("velox_effect_bg"),
-                        layout: &self.bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                    buffer: &self.uniform_buf,
-                                    offset: 0,
-                                    size: wgpu::BufferSize::new(256),
-                                }),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::TextureView(src_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::TextureView(snap_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: wgpu::BindingResource::TextureView(mask_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: wgpu::BindingResource::Sampler(linear_sampler),
-                            },
-                        ],
-                    });
                     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("velox_effect_pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -579,8 +689,12 @@ impl GpuEffectsEngine {
                         timestamp_writes: None,
                         multiview_mask: None,
                     });
-                    rpass.set_pipeline(&self.pipeline);
-                    rpass.set_bind_group(0, &bg, &[*effect_slot * 256]);
+                    rpass.set_pipeline(if *use_hw_blend {
+                        &self.pipeline_src_over
+                    } else {
+                        &self.pipeline
+                    });
+                    rpass.set_bind_group(0, bg, &[*effect_slot * 256]);
                     rpass.draw(0..6, 0..1);
                 }
 
@@ -589,11 +703,17 @@ impl GpuEffectsEngine {
                     dst_snap_idx,
                     tex_id,
                     effect_slot,
+                    use_hw_blend,
                 } => {
                     let Some(entry) = external_textures.get(tex_id) else {
                         continue;
                     };
-                    let snap_view = &self.pool.get(*dst_snap_idx).view;
+                    // 硬件 SrcOver 直出不采样背景快照，绑定只读外部纹理作占位以避免与 dst_view 同 Pass 冲突
+                    let snap_view = if *use_hw_blend || *dst_snap_idx == *dst_idx {
+                        &entry.view
+                    } else {
+                        &self.pool.get(*dst_snap_idx).view
+                    };
                     let dst_view = &self.pool.get(*dst_idx).view;
                     let mask_view = self.pool.white_mask_view();
                     let sampler = entry.sampler.as_ref().unwrap_or(linear_sampler);
@@ -644,7 +764,11 @@ impl GpuEffectsEngine {
                         timestamp_writes: None,
                         multiview_mask: None,
                     });
-                    rpass.set_pipeline(&self.pipeline);
+                    rpass.set_pipeline(if *use_hw_blend {
+                        &self.pipeline_src_over
+                    } else {
+                        &self.pipeline
+                    });
                     rpass.set_bind_group(0, &bg, &[*effect_slot * 256]);
                     rpass.draw(0..6, 0..1);
                 }
@@ -653,38 +777,44 @@ impl GpuEffectsEngine {
                     src_idx,
                     effect_slot,
                 } => {
-                    let src_view = &self.pool.get(*src_idx).view;
-                    let mask_view = self.pool.white_mask_view();
-                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("velox_blit_bg"),
-                        layout: &self.bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                    buffer: &self.uniform_buf,
-                                    offset: 0,
-                                    size: wgpu::BufferSize::new(256),
-                                }),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::TextureView(src_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::TextureView(src_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: wgpu::BindingResource::TextureView(mask_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: wgpu::BindingResource::Sampler(linear_sampler),
-                            },
-                        ],
-                    });
+                    let src_gen = self.pool.get(*src_idx).generation;
+                    let cache_key = (self.uniform_gen, src_gen, src_gen, 0);
+                    if !self.bg_cache.contains_key(&cache_key) {
+                        let src_view = &self.pool.get(*src_idx).view;
+                        let mask_view = self.pool.white_mask_view();
+                        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("velox_blit_bg"),
+                            layout: &self.bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                        buffer: &self.uniform_buf,
+                                        offset: 0,
+                                        size: wgpu::BufferSize::new(256),
+                                    }),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(src_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::TextureView(src_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 3,
+                                    resource: wgpu::BindingResource::TextureView(mask_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 4,
+                                    resource: wgpu::BindingResource::Sampler(linear_sampler),
+                                },
+                            ],
+                        });
+                        self.bg_cache.insert(cache_key, bg);
+                    }
+                    let bg = &self.bg_cache[&cache_key];
                     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("velox_blit_to_target"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -702,7 +832,7 @@ impl GpuEffectsEngine {
                         multiview_mask: None,
                     });
                     rpass.set_pipeline(&self.pipeline);
-                    rpass.set_bind_group(0, &bg, &[*effect_slot * 256]);
+                    rpass.set_bind_group(0, bg, &[*effect_slot * 256]);
                     rpass.draw(0..6, 0..1);
                 }
             }

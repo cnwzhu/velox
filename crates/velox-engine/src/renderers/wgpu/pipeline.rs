@@ -813,6 +813,213 @@ impl WgpuRenderer {
                     xform: IDENTITY_XFORM,
                 });
             }
+            DrawPayload::RichText(rt) => {
+                let sb = snap_bounds_region_scaled(op.bounds, sf);
+                let sc = Region::new(
+                    sc_f[0] as i16,
+                    sc_f[1] as i16,
+                    (sc_f[2] - sc_f[0]).max(0.0) as i16,
+                    (sc_f[3] - sc_f[1]).max(0.0) as i16,
+                );
+                let eff = sc.intersect(sb);
+                if eff.is_empty() {
+                    return Ok(());
+                }
+                let w = eff.w.max(1) as usize;
+                let h = eff.h.max(1) as usize;
+                let mut kh: u32 = 0x5254_4558;
+                rt.mix_hash(&mut kh);
+                let hash = ((kh as u64) << 32)
+                    | (((eff.x.saturating_sub(sb.x) as u16 as u64) << 16)
+                        | (eff.y.saturating_sub(sb.y) as u16 as u64))
+                    ^ ((sf * 16.0).round() as u64);
+                let cache_key = SpriteCacheKey {
+                    w: w as u32,
+                    h: h as u32,
+                    hash,
+                };
+                let uv = if let Some(cached) = self.sprite_atlas.lookup(cache_key) {
+                    cached
+                } else {
+                    let len = w * h;
+                    if self.sprite_scratch.len() < len {
+                        self.sprite_scratch.resize(len, Rgba8888(0));
+                    }
+                    let slice = &mut self.sprite_scratch[..len];
+                    slice.fill(Rgba8888(0));
+                    crate::renderers::software::rasterize_rich_text(
+                        rt, sb, eff, sf, eff.x, eff.y, w, slice,
+                    );
+                    let rgba_bytes = pod_as_bytes(slice);
+                    let Some(u) = self.sprite_atlas.insert_and_upload(queue, cache_key, rgba_bytes)
+                    else {
+                        return Err(AtlasGrowNeed {
+                            glyph_full: false,
+                            sprite_need: Some((w as u32, h as u32)),
+                            ramp_full: false,
+                        });
+                    };
+                    u
+                };
+                self.primitives.push(GpuPrimitive {
+                    bounds: [
+                        eff.x as f32 - origin_x,
+                        eff.y as f32 - origin_y,
+                        w as f32,
+                        h as f32,
+                    ],
+                    clip: shifted_sc,
+                    uv,
+                    color0: [1.0; 4],
+                    color1: [0.0; 4],
+                    border_color: [0.0; 4],
+                    params: [0.0, 0.0, KIND_SPRITE, 0.0],
+                    extra: [clip_radius_px, 0.0, 0.0, 0.0],
+                    radii: [0.0; 4],
+                    grad_a: [0.0; 4],
+                    grad_b: [0.0; 4],
+                    xform: IDENTITY_XFORM,
+                });
+            }
+            DrawPayload::DecodedImage(img) => {
+                let sb = snap_bounds_region_scaled(op.bounds, sf);
+                let sc = Region::new(
+                    sc_f[0] as i16,
+                    sc_f[1] as i16,
+                    (sc_f[2] - sc_f[0]).max(0.0) as i16,
+                    (sc_f[3] - sc_f[1]).max(0.0) as i16,
+                );
+                let eff = sc.intersect(sb);
+                if eff.is_empty() {
+                    return Ok(());
+                }
+                let w = eff.w.max(1) as usize;
+                let h = eff.h.max(1) as usize;
+                let cache_rev = crate::image_pipeline::get_cached_image(img.id)
+                    .map(|p| p.revision)
+                    .unwrap_or(0);
+                let mut kh: u32 = 0x4449_4D47 ^ (cache_rev as u32);
+                img.mix_hash(&mut kh);
+                let hash = ((kh as u64) << 32)
+                    | (((eff.x.saturating_sub(sb.x) as u16 as u64) << 16)
+                        | (eff.y.saturating_sub(sb.y) as u16 as u64))
+                    ^ ((sf * 16.0).round() as u64);
+                let cache_key = SpriteCacheKey {
+                    w: w as u32,
+                    h: h as u32,
+                    hash,
+                };
+                let uv = if let Some(cached) = self.sprite_atlas.lookup(cache_key) {
+                    cached
+                } else {
+                    let len = w * h;
+                    if self.sprite_scratch.len() < len {
+                        self.sprite_scratch.resize(len, Rgba8888(0));
+                    }
+                    let slice = &mut self.sprite_scratch[..len];
+                    slice.fill(Rgba8888(0));
+                    crate::renderers::software::rasterize_decoded_image(
+                        img, sb, eff, sf, eff.x, eff.y, w, slice,
+                    );
+                    let rgba_bytes = pod_as_bytes(slice);
+                    let Some(u) = self.sprite_atlas.insert_and_upload(queue, cache_key, rgba_bytes)
+                    else {
+                        return Err(AtlasGrowNeed {
+                            glyph_full: false,
+                            sprite_need: Some((w as u32, h as u32)),
+                            ramp_full: false,
+                        });
+                    };
+                    u
+                };
+                self.primitives.push(GpuPrimitive {
+                    bounds: [
+                        eff.x as f32 - origin_x,
+                        eff.y as f32 - origin_y,
+                        w as f32,
+                        h as f32,
+                    ],
+                    clip: shifted_sc,
+                    uv,
+                    color0: [1.0; 4],
+                    color1: [0.0; 4],
+                    border_color: [0.0; 4],
+                    params: [0.0, 0.0, KIND_SPRITE, 0.0],
+                    extra: [clip_radius_px, 0.0, 0.0, 0.0],
+                    radii: [0.0; 4],
+                    grad_a: [0.0; 4],
+                    grad_b: [0.0; 4],
+                    xform: IDENTITY_XFORM,
+                });
+            }
+            DrawPayload::Vector(vec_spec) => {
+                let sb = snap_bounds_region_scaled(op.bounds, sf);
+                let sc = Region::new(
+                    sc_f[0] as i16,
+                    sc_f[1] as i16,
+                    (sc_f[2] - sc_f[0]).max(0.0) as i16,
+                    (sc_f[3] - sc_f[1]).max(0.0) as i16,
+                );
+                let eff = sc.intersect(sb);
+                if eff.is_empty() {
+                    return Ok(());
+                }
+                let w = eff.w.max(1) as usize;
+                let h = eff.h.max(1) as usize;
+                let mut kh: u32 = 0x5645_4354;
+                vec_spec.mix_hash(&mut kh);
+                let hash = ((kh as u64) << 32)
+                    | (((eff.x.saturating_sub(sb.x) as u16 as u64) << 16)
+                        | (eff.y.saturating_sub(sb.y) as u16 as u64))
+                    ^ ((sf * 16.0).round() as u64);
+                let cache_key = SpriteCacheKey {
+                    w: w as u32,
+                    h: h as u32,
+                    hash,
+                };
+                let uv = if let Some(cached) = self.sprite_atlas.lookup(cache_key) {
+                    cached
+                } else {
+                    let len = w * h;
+                    if self.sprite_scratch.len() < len {
+                        self.sprite_scratch.resize(len, Rgba8888(0));
+                    }
+                    let slice = &mut self.sprite_scratch[..len];
+                    slice.fill(Rgba8888(0));
+                    crate::vector_canvas::rasterize_vector_spec(
+                        vec_spec, sb, eff, sf, eff.x, eff.y, w, slice,
+                    );
+                    let rgba_bytes = pod_as_bytes(slice);
+                    let Some(u) = self.sprite_atlas.insert_and_upload(queue, cache_key, rgba_bytes)
+                    else {
+                        return Err(AtlasGrowNeed {
+                            glyph_full: false,
+                            sprite_need: Some((w as u32, h as u32)),
+                            ramp_full: false,
+                        });
+                    };
+                    u
+                };
+                self.primitives.push(GpuPrimitive {
+                    bounds: [
+                        eff.x as f32 - origin_x,
+                        eff.y as f32 - origin_y,
+                        w as f32,
+                        h as f32,
+                    ],
+                    clip: shifted_sc,
+                    uv,
+                    color0: [1.0; 4],
+                    color1: [0.0; 4],
+                    border_color: [0.0; 4],
+                    params: [0.0, 0.0, KIND_SPRITE, 0.0],
+                    extra: [clip_radius_px, 0.0, 0.0, 0.0],
+                    radii: [0.0; 4],
+                    grad_a: [0.0; 4],
+                    grad_b: [0.0; 4],
+                    xform: IDENTITY_XFORM,
+                });
+            }
             DrawPayload::PushLayer(_)
             | DrawPayload::PopLayer
             | DrawPayload::ExternalTexture(_) => {}
@@ -1221,6 +1428,119 @@ impl WgpuRenderer {
         queue.submit([encoder.finish()]);
     }
 
+    /// 面向持久离屏画布的 GPU 硬件脏区 Scissor 局部增量渲染（仅重绘 `dirty_regions` 覆盖的物理像素，保留未脏区域以压低 4K 功耗）。
+    ///
+    /// 若本帧包含复杂离屏图层/毛玻璃或 `dirty_regions` 为空，自动无缝回退至标准整帧 `render_to_view`。
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_to_view_dirty(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        ops: &[DrawOp<'_>],
+        viewport: Region,
+        scale_factor: f32,
+        target_view: &wgpu::TextureView,
+        phys_width: u32,
+        phys_height: u32,
+        dirty_regions: &[Region],
+        clear_color: wgpu::Color,
+    ) {
+        if dirty_regions.is_empty()
+            || crate::renderers::software::ops_have_layers_or_blend(ops)
+        {
+            self.render_to_view(
+                device,
+                queue,
+                ops,
+                viewport,
+                scale_factor,
+                target_view,
+                phys_width,
+                phys_height,
+                clear_color,
+            );
+            return;
+        }
+        let sf = scale_factor.clamp(0.5, 4.0);
+        let pw = phys_width.max(1);
+        let ph = phys_height.max(1);
+
+        let mut bind_group_dirty = false;
+        for _attempt in 0..4 {
+            match self.try_encode_ops(queue, ops, viewport, sf) {
+                Ok(()) => break,
+                Err(need) => {
+                    let (dirty, can_retry) = self.handle_atlas_grow(device, need);
+                    if dirty {
+                        bind_group_dirty = true;
+                    }
+                    if !can_retry {
+                        break;
+                    }
+                }
+            }
+        }
+        if self.primitives.len() > self.instance_capacity {
+            self.instance_capacity = self.primitives.len().next_power_of_two();
+            self.instance_buf = Self::create_instance_buffer(device, self.instance_capacity);
+            bind_group_dirty = true;
+        }
+        if bind_group_dirty {
+            self.rebuild_bind_group(device);
+        }
+
+        let slot0 = AlignedViewportSlot {
+            uniform: ViewportUniform {
+                size: [pw as f32, ph as f32],
+                is_srgb: if self.target_is_srgb { 1.0 } else { 0.0 },
+                _pad: 0.0,
+            },
+            _pad: [0u8; 256 - core::mem::size_of::<ViewportUniform>()],
+        };
+        queue.write_buffer(&self.viewport_buf, 0, pod_as_bytes(&[slot0]));
+        if !self.primitives.is_empty() {
+            queue.write_buffer(&self.instance_buf, 0, pod_as_bytes(&self.primitives));
+        }
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("velox_wgpu_dirty_scissor_encoder"),
+        });
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("velox_wgpu_dirty_scissor_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            if !self.primitives.is_empty() {
+                rpass.set_pipeline(&self.pipeline);
+                rpass.set_bind_group(0, &self.bind_group, &[0]);
+                for &d in dirty_regions {
+                    let pd = snap_clip_region_scaled(d.intersect(viewport), sf);
+                    let sx = (pd.x.max(0) as u32).min(pw);
+                    let sy = (pd.y.max(0) as u32).min(ph);
+                    let sw = (pd.w.max(0) as u32).min(pw.saturating_sub(sx));
+                    let sh = (pd.h.max(0) as u32).min(ph.saturating_sub(sy));
+                    if sw > 0 && sh > 0 {
+                        rpass.set_scissor_rect(sx, sy, sw, sh);
+                        rpass.draw(0..6, 0..(self.primitives.len() as u32));
+                    }
+                }
+            }
+        }
+        queue.submit([encoder.finish()]);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_to_view_multi_pass(
         &mut self,
@@ -1438,17 +1758,29 @@ impl WgpuRenderer {
                                     bd_raw
                                 };
 
-                                let snap_idx = fx.pool.acquire(device, parent_aw, parent_ah);
-                                fx.steps.push(GpuPassStep::CopyRect {
-                                    src_idx: parent_idx,
-                                    src_origin: (0, 0),
-                                    dst_idx: snap_idx,
-                                    dst_origin: (0, 0),
-                                    size: (parent_aw, parent_ah),
-                                });
+                                let dst_rect_bd = [
+                                    local_body.x as f32,
+                                    local_body.y as f32,
+                                    local_body.w as f32,
+                                    local_body.h as f32,
+                                ];
+                                let clip_rect_bd = [
+                                    parent_clip_phys.x as f32 - parent_ox,
+                                    parent_clip_phys.y as f32 - parent_oy,
+                                    parent_clip_phys.right() as f32 - parent_ox,
+                                    parent_clip_phys.bottom() as f32 - parent_oy,
+                                ];
+                                let (snap_idx, snap_ox, snap_oy, snap_tw, snap_th) = fx
+                                    .acquire_subrect_snapshot(
+                                        device,
+                                        parent_idx,
+                                        parent_aw,
+                                        parent_ah,
+                                        dst_rect_bd,
+                                        clip_rect_bd,
+                                    );
 
                                 let bd_tex_sz = (fx.pool.get(bd_blurred).width, fx.pool.get(bd_blurred).height);
-                                let snap_tex_sz = (fx.pool.get(snap_idx).width, fx.pool.get(snap_idx).height);
                                 let mut u = EffectUniform::default();
                                 u.tex_sizes = [
                                     parent_tex_sz.0 as f32,
@@ -1456,19 +1788,9 @@ impl WgpuRenderer {
                                     bd_tex_sz.0 as f32,
                                     bd_tex_sz.1 as f32,
                                 ];
-                                u.dst_rect = [
-                                    local_body.x as f32,
-                                    local_body.y as f32,
-                                    local_body.w as f32,
-                                    local_body.h as f32,
-                                ];
+                                u.dst_rect = dst_rect_bd;
                                 u.src_rect = [sx as f32, sy as f32, sw as f32, sh as f32];
-                                u.clip_rect = [
-                                    parent_clip_phys.x as f32 - parent_ox,
-                                    parent_clip_phys.y as f32 - parent_oy,
-                                    parent_clip_phys.right() as f32 - parent_ox,
-                                    parent_clip_phys.bottom() as f32 - parent_oy,
-                                ];
+                                u.clip_rect = clip_rect_bd;
                                 u.body_rect = u.dst_rect;
                                 u.radii = [
                                     (spec.clip_radii.tl as f32) * sf,
@@ -1487,7 +1809,7 @@ impl WgpuRenderer {
                                 u.flags[2] = (bd.noise_amount as f32) * (1.0 / 255.0) * 0.12;
                                 u.flags[3] = if is_srgb { 1.0 } else { 0.0 };
                                 u.tint = color_to_f32(bd.tint);
-                                u.extra = [0.0, 0.0, snap_tex_sz.0 as f32, snap_tex_sz.1 as f32];
+                                u.extra = [snap_ox, snap_oy, snap_tw, snap_th];
 
                                 let slot = fx.push_slot(u);
                                 let mask_path = spec.clip_path.map(|p| {
@@ -1504,6 +1826,7 @@ impl WgpuRenderer {
                                     dst_snap_idx: snap_idx,
                                     mask_path,
                                     effect_slot: slot,
+                                    use_hw_blend: false,
                                 });
                                 fx.pool.release(bd_blurred);
                                 fx.pool.release(snap_idx);
@@ -1648,6 +1971,7 @@ impl WgpuRenderer {
                                     dst_snap_idx: layer.tex_idx,
                                     mask_path: sh_mask,
                                     effect_slot: eslot,
+                                    use_hw_blend: false,
                                 });
 
                                 let ds_blur = (ds.blur as f32) * sf;
@@ -1668,18 +1992,29 @@ impl WgpuRenderer {
                                     sh_raw
                                 };
 
-                                let snap_idx = fx.pool.acquire(device, parent_aw, parent_ah);
-                                fx.steps.push(GpuPassStep::CopyRect {
-                                    src_idx: parent_idx,
-                                    src_origin: (0, 0),
-                                    dst_idx: snap_idx,
-                                    dst_origin: (0, 0),
-                                    size: (parent_aw, parent_ah),
-                                });
                                 let sh_tex_sz = (fx.pool.get(sh_final).width, fx.pool.get(sh_final).height);
-                                let snap_sz = (fx.pool.get(snap_idx).width, fx.pool.get(snap_idx).height);
                                 let ox = (ds.offset_x as f32) * sf;
                                 let oy = (ds.offset_y as f32) * sf;
+                                let sh_dst_rect = [
+                                    dst_rect[0] + ox,
+                                    dst_rect[1] + oy,
+                                    dst_rect[2],
+                                    dst_rect[3],
+                                ];
+                                let sh_hw_blend = spec.blend_mode.is_normal();
+                                let (sh_snap_opt, snap_ox, snap_oy, snap_tw, snap_th) = if sh_hw_blend {
+                                    (None, 0.0, 0.0, 1.0, 1.0)
+                                } else {
+                                    let (sidx, sx0, sy0, stw, sth) = fx.acquire_subrect_snapshot(
+                                        device,
+                                        parent_idx,
+                                        parent_aw,
+                                        parent_ah,
+                                        sh_dst_rect,
+                                        clip_f,
+                                    );
+                                    (Some(sidx), sx0, sy0, stw, sth)
+                                };
 
                                 let mut cu = EffectUniform::default();
                                 cu.tex_sizes = [
@@ -1688,38 +2023,41 @@ impl WgpuRenderer {
                                     sh_tex_sz.0 as f32,
                                     sh_tex_sz.1 as f32,
                                 ];
-                                cu.dst_rect = [
-                                    dst_rect[0] + ox,
-                                    dst_rect[1] + oy,
-                                    dst_rect[2],
-                                    dst_rect[3],
-                                ];
+                                cu.dst_rect = sh_dst_rect;
                                 cu.src_rect = local_buf;
                                 cu.clip_rect = clip_f;
                                 cu.body_rect = local_body;
                                 cu.params = [
                                     (spec.opacity as f32) * (1.0 / 255.0),
-                                    spec.blend_mode as u8 as f32,
+                                    if sh_hw_blend {
+                                        -1.0
+                                    } else {
+                                        spec.blend_mode as u8 as f32
+                                    },
                                     EFFECT_KIND_COMPOSITE,
                                     0.0,
                                 ];
                                 cu.set_color_matrix(None);
                                 cu.set_transform(spec.transform, sf);
+                                cu.tint = [snap_ox, snap_oy, 0.0, 0.0];
                                 cu.extra[0] += ox;
                                 cu.extra[1] += oy;
-                                cu.extra[2] = snap_sz.0 as f32;
-                                cu.extra[3] = snap_sz.1 as f32;
+                                cu.extra[2] = snap_tw;
+                                cu.extra[3] = snap_th;
                                 let cslot = fx.push_slot(cu);
                                 fx.steps.push(GpuPassStep::Effect {
                                     dst_idx: parent_idx,
                                     clear_dst: false,
                                     src_idx: sh_final,
-                                    dst_snap_idx: snap_idx,
+                                    dst_snap_idx: sh_snap_opt.unwrap_or(sh_final),
                                     mask_path: None,
                                     effect_slot: cslot,
+                                    use_hw_blend: sh_hw_blend,
                                 });
                                 fx.pool.release(sh_final);
-                                fx.pool.release(snap_idx);
+                                if let Some(sidx) = sh_snap_opt {
+                                    fx.pool.release(sidx);
+                                }
                             }
                         }
 
@@ -1742,17 +2080,22 @@ impl WgpuRenderer {
                             layer.tex_idx
                         };
 
-                        // 3. 合成回父层（ColorMatrix + SVG Path 遮罩 + Transform2D + Opacity + 27 种 BlendMode）
-                        let snap_idx = fx.pool.acquire(device, parent_aw, parent_ah);
-                        fx.steps.push(GpuPassStep::CopyRect {
-                            src_idx: parent_idx,
-                            src_origin: (0, 0),
-                            dst_idx: snap_idx,
-                            dst_origin: (0, 0),
-                            size: (parent_aw, parent_ah),
-                        });
+                        // 3. 合成回父层（SrcOver 走零拷贝硬件混合直出；其余 26 种混合模式走局部包围盒快照）
+                        let use_hw_blend = spec.blend_mode.is_normal();
+                        let (snap_opt, snap_ox, snap_oy, snap_tw, snap_th) = if use_hw_blend {
+                            (None, 0.0, 0.0, 1.0, 1.0)
+                        } else {
+                            let (sidx, sx0, sy0, stw, sth) = fx.acquire_subrect_snapshot(
+                                device,
+                                parent_idx,
+                                parent_aw,
+                                parent_ah,
+                                dst_rect,
+                                clip_f,
+                            );
+                            (Some(sidx), sx0, sy0, stw, sth)
+                        };
                         let src_tex_sz = (fx.pool.get(src_final).width, fx.pool.get(src_final).height);
-                        let snap_tex_sz = (fx.pool.get(snap_idx).width, fx.pool.get(snap_idx).height);
 
                         let mut cu = EffectUniform::default();
                         cu.tex_sizes = [
@@ -1773,7 +2116,11 @@ impl WgpuRenderer {
                         ];
                         cu.params = [
                             (spec.opacity as f32) * (1.0 / 255.0),
-                            spec.blend_mode as u8 as f32,
+                            if use_hw_blend {
+                                -1.0
+                            } else {
+                                spec.blend_mode as u8 as f32
+                            },
                             EFFECT_KIND_COMPOSITE,
                             0.0,
                         ];
@@ -1781,8 +2128,9 @@ impl WgpuRenderer {
                         cu.flags[1] = if spec.clip_path.is_some() { 1.0 } else { 0.0 };
                         cu.flags[3] = if is_srgb { 1.0 } else { 0.0 };
                         cu.set_transform(spec.transform, sf);
-                        cu.extra[2] = snap_tex_sz.0 as f32;
-                        cu.extra[3] = snap_tex_sz.1 as f32;
+                        cu.tint = [snap_ox, snap_oy, 0.0, 0.0];
+                        cu.extra[2] = snap_tw;
+                        cu.extra[3] = snap_th;
                         let cslot = fx.push_slot(cu);
 
                         let mask_path = spec.clip_path.map(|p| {
@@ -1796,12 +2144,15 @@ impl WgpuRenderer {
                             dst_idx: parent_idx,
                             clear_dst: false,
                             src_idx: src_final,
-                            dst_snap_idx: snap_idx,
+                            dst_snap_idx: snap_opt.unwrap_or(src_final),
                             mask_path,
                             effect_slot: cslot,
+                            use_hw_blend,
                         });
                         fx.pool.release(src_final);
-                        fx.pool.release(snap_idx);
+                        if let Some(sidx) = snap_opt {
+                            fx.pool.release(sidx);
+                        }
                     }
 
                     // 单图元非 `SrcOver` 混合：自动借用微型临时层执行精确 27 种 W3C 混合模式
@@ -1874,15 +2225,6 @@ impl WgpuRenderer {
                             top.batch_start = pend;
                         }
 
-                        let snap_idx = fx.pool.acquire(device, parent_aw, parent_ah);
-                        fx.steps.push(GpuPassStep::CopyRect {
-                            src_idx: parent_idx,
-                            src_origin: (0, 0),
-                            dst_idx: snap_idx,
-                            dst_origin: (0, 0),
-                            size: (parent_aw, parent_ah),
-                        });
-                        let snap_sz = (fx.pool.get(snap_idx).width, fx.pool.get(snap_idx).height);
                         let clip_phys = snap_clip_region_scaled(op.clip, sf);
                         let local_buf = [
                             buf_rect.x as f32 - parent_ox,
@@ -1890,6 +2232,21 @@ impl WgpuRenderer {
                             buf_rect.w as f32,
                             buf_rect.h as f32,
                         ];
+                        let clip_f = [
+                            clip_phys.x as f32 - parent_ox,
+                            clip_phys.y as f32 - parent_oy,
+                            clip_phys.right() as f32 - parent_ox,
+                            clip_phys.bottom() as f32 - parent_oy,
+                        ];
+                        let (snap_idx, snap_ox, snap_oy, snap_tw, snap_th) = fx
+                            .acquire_subrect_snapshot(
+                                device,
+                                parent_idx,
+                                parent_aw,
+                                parent_ah,
+                                local_buf,
+                                clip_f,
+                            );
                         let mut cu = EffectUniform::default();
                         cu.tex_sizes = [
                             parent_tex_sz.0 as f32,
@@ -1899,17 +2256,13 @@ impl WgpuRenderer {
                         ];
                         cu.dst_rect = local_buf;
                         cu.src_rect = local_buf;
-                        cu.clip_rect = [
-                            clip_phys.x as f32 - parent_ox,
-                            clip_phys.y as f32 - parent_oy,
-                            clip_phys.right() as f32 - parent_ox,
-                            clip_phys.bottom() as f32 - parent_oy,
-                        ];
+                        cu.clip_rect = clip_f;
                         cu.body_rect = local_buf;
                         cu.params = [1.0, sq.blend_mode as u8 as f32, EFFECT_KIND_COMPOSITE, 0.0];
                         cu.set_color_matrix(None);
+                        cu.tint = [snap_ox, snap_oy, 0.0, 0.0];
                         cu.inv_xform = [1.0, 0.0, 0.0, 1.0];
-                        cu.extra = [0.0, 0.0, snap_sz.0 as f32, snap_sz.1 as f32];
+                        cu.extra = [0.0, 0.0, snap_tw, snap_th];
                         let cslot = fx.push_slot(cu);
                         fx.steps.push(GpuPassStep::Effect {
                             dst_idx: parent_idx,
@@ -1918,6 +2271,7 @@ impl WgpuRenderer {
                             dst_snap_idx: snap_idx,
                             mask_path: None,
                             effect_slot: cslot,
+                            use_hw_blend: false,
                         });
                         fx.pool.release(tmp_tex);
                         fx.pool.release(snap_idx);
@@ -1940,17 +2294,6 @@ impl WgpuRenderer {
                             let parent_tex_sz =
                                 (fx.pool.get(parent_idx).width, fx.pool.get(parent_idx).height);
 
-                            let snap_idx = fx.pool.acquire(device, parent_aw, parent_ah);
-                            fx.steps.push(GpuPassStep::CopyRect {
-                                src_idx: parent_idx,
-                                src_origin: (0, 0),
-                                dst_idx: snap_idx,
-                                dst_origin: (0, 0),
-                                size: (parent_aw, parent_ah),
-                            });
-                            let snap_sz =
-                                (fx.pool.get(snap_idx).width, fx.pool.get(snap_idx).height);
-
                             let body_phys = snap_bounds_region_scaled(op.bounds, sf);
                             let clip_phys = snap_clip_region_scaled(raw_clip, sf);
                             let local_body = [
@@ -1959,6 +2302,27 @@ impl WgpuRenderer {
                                 body_phys.w as f32,
                                 body_phys.h as f32,
                             ];
+                            let clip_f = [
+                                clip_phys.x as f32 - parent_ox,
+                                clip_phys.y as f32 - parent_oy,
+                                clip_phys.right() as f32 - parent_ox,
+                                clip_phys.bottom() as f32 - parent_oy,
+                            ];
+
+                            let use_hw_blend = ext.blend_mode.is_normal();
+                            let (snap_opt, snap_ox, snap_oy, snap_tw, snap_th) = if use_hw_blend {
+                                (None, 0.0, 0.0, 1.0, 1.0)
+                            } else {
+                                let (sidx, sx0, sy0, stw, sth) = fx.acquire_subrect_snapshot(
+                                    device,
+                                    parent_idx,
+                                    parent_aw,
+                                    parent_ah,
+                                    local_body,
+                                    clip_f,
+                                );
+                                (Some(sidx), sx0, sy0, stw, sth)
+                            };
 
                             let mut eu = EffectUniform::default();
                             eu.tex_sizes = [
@@ -1969,12 +2333,7 @@ impl WgpuRenderer {
                             ];
                             eu.dst_rect = local_body;
                             eu.src_rect = ext.uv_rect;
-                            eu.clip_rect = [
-                                clip_phys.x as f32 - parent_ox,
-                                clip_phys.y as f32 - parent_oy,
-                                clip_phys.right() as f32 - parent_ox,
-                                clip_phys.bottom() as f32 - parent_oy,
-                            ];
+                            eu.clip_rect = clip_f;
                             eu.body_rect = local_body;
                             eu.radii = [
                                 (ext.radii.tl as f32) * sf,
@@ -1984,7 +2343,11 @@ impl WgpuRenderer {
                             ];
                             eu.params = [
                                 (ext.opacity as f32) * (1.0 / 255.0),
-                                ext.blend_mode as u8 as f32,
+                                if use_hw_blend {
+                                    -1.0
+                                } else {
+                                    ext.blend_mode as u8 as f32
+                                },
                                 EFFECT_KIND_EXTERNAL_TEX,
                                 0.0,
                             ];
@@ -1995,16 +2358,19 @@ impl WgpuRenderer {
                                 if is_srgb { 1.0 } else { 0.0 },
                             ];
                             eu.inv_xform = [1.0, 0.0, 0.0, 1.0];
-                            eu.extra = [0.0, 0.0, snap_sz.0 as f32, snap_sz.1 as f32];
+                            eu.extra = [snap_ox, snap_oy, snap_tw, snap_th];
                             let eslot = fx.push_slot(eu);
 
                             fx.steps.push(GpuPassStep::DrawExternal {
                                 dst_idx: parent_idx,
-                                dst_snap_idx: snap_idx,
+                                dst_snap_idx: snap_opt.unwrap_or(root_idx),
                                 tex_id: ext.id,
                                 effect_slot: eslot,
+                                use_hw_blend,
                             });
-                            fx.pool.release(snap_idx);
+                            if let Some(sidx) = snap_opt {
+                                fx.pool.release(sidx);
+                            }
                         } else if ext.fallback_bg.a() > 0 {
                             let fallback_sq = StyledQuad {
                                 paint: Paint::Solid(ext.fallback_bg),

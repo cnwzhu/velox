@@ -1,9 +1,8 @@
-//! `Switch & Slider` 故事页：3 尺寸直角高对比 Switch（含左右标签与自定义色）+ 步进/连续 Slider。
+//! `Switch & Slider` 故事页：完全基于 `velox-component` 的 3 尺寸平滑弹簧 Switch + 步进/连续 Slider + ProgressBar + ArcGauge。
 
 use super::{state_pill, story_header, story_section};
-use crate::style::{self, BasePalette};
 use crate::GalleryApp;
-use velox_kit::base::{ArcGauge, ProgressBar, Slider, Switch, SwitchLabelSide};
+use velox_kit::component::{ArcGauge, ProgressBar, Slider, Switch, SwitchLabelSide};
 use velox_kit::prelude::*;
 
 impl GalleryApp {
@@ -12,7 +11,6 @@ impl GalleryApp {
         cx: &'a Scope<Self>,
         theme: CoreTheme,
     ) -> Div<'a> {
-        let p = BasePalette::from_theme(theme);
         let on_sw0 = cx.listener(|this, v: bool, _acx| {
             this.switch_states[0] = v;
             this.event_count = this.event_count.saturating_add(1);
@@ -41,7 +39,7 @@ impl GalleryApp {
         let switch_section = story_section(
             cx,
             theme,
-            "Switch (3 Standard Sizes & Label Sides)",
+            "Switch (velox-component 3 Sizes & Spring Thumb Motion)",
             "Small 28x16 • Medium 36x20 • Large 44x24 • Left/Right labels • Custom accent",
         )
         .child(
@@ -53,33 +51,24 @@ impl GalleryApp {
                 .items_center()
                 .child(
                     cx,
-                    style::switch(
-                        Switch::new(1301, self.switch_states[0])
-                            .small()
-                            .label("Small (28x16)")
-                            .on_change(on_sw0),
-                        theme,
-                    ),
+                    Switch::new(1301, self.switch_states[0])
+                        .small()
+                        .label("Small (28x16)")
+                        .on_change(on_sw0),
                 )
                 .child(
                     cx,
-                    style::switch(
-                        Switch::new(1302, self.switch_states[1])
-                            .medium()
-                            .label("Medium (36x20)")
-                            .on_change(on_sw1),
-                        theme,
-                    ),
+                    Switch::new(1302, self.switch_states[1])
+                        .medium()
+                        .label("Medium (36x20)")
+                        .on_change(on_sw1),
                 )
                 .child(
                     cx,
-                    style::switch(
-                        Switch::new(1303, self.switch_states[2])
-                            .large()
-                            .label("Large (44x24)")
-                            .on_change(on_sw2),
-                        theme,
-                    ),
+                    Switch::new(1303, self.switch_states[2])
+                        .large()
+                        .label("Large (44x24)")
+                        .on_change(on_sw2),
                 ),
         )
         .child(
@@ -91,39 +80,30 @@ impl GalleryApp {
                 .items_center()
                 .child(
                     cx,
-                    style::switch(
-                        Switch::new(1304, self.switch_states[3])
-                            .label("Left Label")
-                            .label_side(SwitchLabelSide::Left)
-                            .color(theme.success)
-                            .on_change(on_sw3),
-                        theme,
-                    ),
+                    Switch::new(1304, self.switch_states[3])
+                        .label("Left Label")
+                        .label_side(SwitchLabelSide::Left)
+                        .color(theme.success)
+                        .on_change(on_sw3),
                 )
                 .child(
                     cx,
-                    style::switch(
-                        Switch::new(1305, true)
-                            .disabled(true)
-                            .label("Disabled On"),
-                        theme,
-                    ),
+                    Switch::new(1305, true)
+                        .disabled(true)
+                        .label("Disabled On"),
                 )
                 .child(
                     cx,
-                    style::switch(
-                        Switch::new(1306, false)
-                            .disabled(true)
-                            .label("Disabled Off"),
-                        theme,
-                    ),
+                    Switch::new(1306, false)
+                        .disabled(true)
+                        .label("Disabled Off"),
                 ),
         );
 
         let slider_section = story_section(
             cx,
             theme,
-            "Slider, ProgressBar & ArcGauge",
+            "Slider, ProgressBar & ArcGauge (velox-component)",
             "Click anywhere on track, drag thumb, or focus with Tab & press Arrows / Home / End",
         )
         .child(
@@ -154,7 +134,7 @@ impl GalleryApp {
                                             cx,
                                             text("Continuous (0..=100, step=1)")
                                                 .size(12)
-                                                .color(p.fg),
+                                                .color(theme.foreground),
                                         )
                                         .child(
                                             cx,
@@ -167,13 +147,10 @@ impl GalleryApp {
                                 )
                                 .child(
                                     cx,
-                                    style::slider(
-                                        Slider::new(1310, self.slider_continuous)
-                                            .range(0, 100)
-                                            .w(340)
-                                            .on_change(on_cont),
-                                        theme,
-                                    ),
+                                    Slider::new(1310, self.slider_continuous)
+                                        .range(0, 100)
+                                        .w(340)
+                                        .on_change(on_cont),
                                 ),
                         )
                         .child(
@@ -191,7 +168,7 @@ impl GalleryApp {
                                             cx,
                                             text("Stepped Discrete (0..=100, step=10)")
                                                 .size(12)
-                                                .color(p.fg),
+                                                .color(theme.foreground),
                                         )
                                         .child(
                                             cx,
@@ -204,15 +181,12 @@ impl GalleryApp {
                                 )
                                 .child(
                                     cx,
-                                    style::slider(
-                                        Slider::new(1311, self.slider_stepped)
-                                            .range(0, 100)
-                                            .step(10)
-                                            .accent(theme.success)
-                                            .w(340)
-                                            .on_change(on_stepped),
-                                        theme,
-                                    ),
+                                    Slider::new(1311, self.slider_stepped)
+                                        .range(0, 100)
+                                        .step(10)
+                                        .accent(theme.success)
+                                        .w(340)
+                                        .on_change(on_stepped),
                                 ),
                         )
                         .child(
@@ -222,19 +196,18 @@ impl GalleryApp {
                                 .gap(6)
                                 .child(
                                     cx,
-                                    text("Linked ProgressBar").size(12).color(p.muted_fg),
+                                    text("Linked ProgressBar")
+                                        .size(12)
+                                        .color(theme.muted_foreground),
                                 )
                                 .child(
                                     cx,
-                                    style::progress_bar(
-                                        ProgressBar::new(
-                                            1312,
-                                            340,
-                                            self.slider_continuous.clamp(0, 100) as u8,
-                                        )
-                                        .height(8),
-                                        theme,
-                                    ),
+                                    ProgressBar::new(
+                                        1312,
+                                        340,
+                                        self.slider_continuous.clamp(0, 100) as u8,
+                                    )
+                                    .height(8),
                                 ),
                         ),
                 )
@@ -246,26 +219,28 @@ impl GalleryApp {
                         .gap(8)
                         .child(
                             cx,
-                            style::arc_gauge(
-                                ArcGauge::new(
-                                    1313,
-                                    112,
-                                    self.slider_continuous.clamp(0, 100) as u8,
-                                )
-                                .thickness(10)
-                                .label(fmt!(cx, "{}%", self.slider_continuous)),
-                                theme,
-                            ),
+                            ArcGauge::new(
+                                1313,
+                                112,
+                                self.slider_continuous.clamp(0, 100) as u8,
+                            )
+                            .thickness(10)
+                            .label(fmt!(cx, "{}%", self.slider_continuous)),
                         )
-                        .child(cx, text("SDF ArcGauge").size(11).color(p.muted_fg)),
+                        .child(
+                            cx,
+                            text("SDF ArcGauge")
+                                .size(11)
+                                .color(theme.muted_foreground),
+                        ),
                 ),
         );
 
         let gpui_slot_section = story_section(
             cx,
             theme,
-            "gpui-base Unified Slot & StyledExt Syntax",
-            "Every component supports .w/.h/.rounded_*/.hover(|s| ...)/.transition_colors() and slot callbacks",
+            "Slot-Customized velox-component Controls",
+            "Themed components still expose full .track/.indicator/.thumb slot callbacks & StyledExt syntax",
         )
         .child(
             cx,
@@ -287,17 +262,17 @@ impl GalleryApp {
                                 .p_0_5()
                                 .transition_colors()
                                 .duration_150()
-                                .when(st.is_checked(), |s| s.bg(p.solid_bg))
+                                .when(st.is_checked(), |s| s.bg(theme.primary))
                                 .when(!st.is_checked(), |s| {
-                                    s.bg(p.surface).border_1().border_color(p.border)
+                                    s.bg(theme.secondary).border_1().border_color(theme.border)
                                 })
                         })
                         .thumb(cx, move |thumb, st| {
                             thumb
                                 .size(px(16.))
                                 .rounded_full()
-                                .when(st.is_checked(), |s| s.bg(p.solid_fg))
-                                .when(!st.is_checked(), |s| s.bg(p.fg))
+                                .when(st.is_checked(), |s| s.bg(theme.primary_foreground))
+                                .when(!st.is_checked(), |s| s.bg(theme.foreground))
                         }),
                 )
                 .child(
@@ -309,17 +284,17 @@ impl GalleryApp {
                         .track(cx, move |tr, _| {
                             tr.h(px(6.))
                                 .rounded_full()
-                                .bg(p.surface)
+                                .bg(theme.secondary)
                                 .border_1()
-                                .border_color(p.border)
+                                .border_color(theme.border)
                         })
-                        .indicator(cx, move |ind, _| ind.rounded_full().bg(p.solid_bg))
+                        .indicator(cx, move |ind, _| ind.rounded_full().bg(theme.primary))
                         .thumb(cx, move |th, _| {
                             th.size_4()
                                 .rounded_full()
-                                .bg(p.solid_bg)
+                                .bg(theme.primary)
                                 .border_2()
-                                .border_color(p.surface)
+                                .border_color(theme.card)
                                 .hover(|s| s.opacity_f(0.85))
                         }),
                 )
@@ -327,11 +302,11 @@ impl GalleryApp {
                     cx,
                     ProgressBar::new(1322, 160, self.slider_continuous.clamp(0, 100) as u8)
                         .height(8)
-                        .color(p.solid_bg)
-                        .track_color(p.surface)
+                        .color(theme.primary)
+                        .track_color(theme.secondary)
                         .rounded_full()
                         .border_1()
-                        .border_color(p.border)
+                        .border_color(theme.border)
                         .overflow_hidden(),
                 ),
         );
@@ -346,8 +321,8 @@ impl GalleryApp {
                     cx,
                     theme,
                     "Switch & Slider",
-                    "Sharp monochrome switches in 3 standard sizes and keyboard-accessible continuous/stepped sliders.",
-                    "velox_base::{Switch, Slider, ProgressBar, ArcGauge}",
+                    "Themed velox-component switches with spring thumb motion & keyboard-accessible sliders.",
+                    "velox_component::{Switch, Slider, ProgressBar, ArcGauge}",
                 ),
             )
             .child(cx, switch_section)

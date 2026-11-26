@@ -381,16 +381,23 @@ pub(crate) fn allocate_vk_shared_texture(
     };
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+    #[cfg(target_os = "android")]
+    let handle = ExportedHandle::AndroidHardwareBuffer {
+        ahb_ptr: fd as u64,
+    };
+    #[cfg(not(target_os = "android"))]
+    let handle = ExportedHandle::LinuxDmaBuf {
+        fd,
+        stride: layout.row_pitch as u32,
+        offset: layout.offset as u32,
+        drm_format,
+        modifier: 0, // DRM_FORMAT_MOD_LINEAR
+    };
+
     Some(ExportedTextureAlloc {
         texture,
         view,
-        handle: ExportedHandle::LinuxDmaBuf {
-            fd,
-            stride: layout.row_pitch as u32,
-            offset: layout.offset as u32,
-            drm_format,
-            modifier: 0, // DRM_FORMAT_MOD_LINEAR
-        },
+        handle,
         _guard: PlatformTextureGuard::VkDmaBuf(VkSharedTextureGuard { fd }),
     })
 }

@@ -30,6 +30,7 @@ pub struct Notification<'a> {
     pub rounded: u8,
     pub shadow: Option<(u8, i8, i8, Color)>,
     pub focus_ring: bool,
+    pub animated: bool,
     pub style: Style,
     pub style_ext: StyleExt,
     pub on_action: Option<&'a dyn Fn(&mut ActionScope)>,
@@ -63,6 +64,7 @@ impl<'a> Notification<'a> {
             rounded: 0,
             shadow: None,
             focus_ring: false,
+            animated: false,
             style: Style::DEFAULT,
             style_ext: StyleExt::DEFAULT,
             on_action: None,
@@ -74,6 +76,13 @@ impl<'a> Notification<'a> {
     #[inline(always)]
     pub const fn variant(mut self, variant: NotificationVariant) -> Self {
         self.variant = variant;
+        self
+    }
+
+    /// 启用或禁用滑入淡入入场动画。
+    #[inline(always)]
+    pub const fn animated(mut self, enabled: bool) -> Self {
+        self.animated = enabled;
         self
     }
 
@@ -232,6 +241,12 @@ impl<'a> Widget<'a> for Notification<'a> {
                 act_btn = act_btn.on_click_raw(cb);
             }
             card = card.child(cx, div().flex_row().justify_end().child(cx, act_btn));
+        }
+
+        if self.animated {
+            card = card
+                .enter_from(255, 0, -6, Duration::from_millis(210))
+                .ease(Easing::Spring);
         }
 
         card = self.style_ext.apply_to_div(card, self.style);

@@ -8,8 +8,8 @@ mod scope;
 mod theme;
 
 pub use events::{
-    ClickEvent, CursorShape, DragEvent, ImePreedit, InputEvent, KeyCode, KeyModifiers,
-    PointerButton, PointerKind, SafeAreaInsets, SwipeDir,
+    ClickEvent, CursorShape, DragEvent, DragPayload, EventPhase, ImePreedit, InputEvent, KeyCode,
+    KeyModifiers, PointerButton, PointerKind, SafeAreaInsets, SwipeDir,
 };
 pub use handle::{Handle, PodId};
 pub use pool::{PodPool, PodReadGuard, MAX_PODS, POD_SLOT_BYTES};

@@ -1,9 +1,8 @@
-//! `Settings & Icons` 故事页：`Settings` 分组面板（内置迷你 Switch）+ 全部 19 个内置 Lucide 矢量 `IconName` 展板。
+//! `Settings & Icons` 故事页：完全基于 `velox-component` 的 `Settings` 分组面板与全部 19 个内置 Lucide 矢量 `IconName` 展板。
 
 use super::{story_header, story_section};
-use crate::style::{self, BasePalette};
 use crate::GalleryApp;
-use velox_kit::base::{
+use velox_kit::component::{
     Icon, IconName, Settings, SettingsGroup, SettingsItem, SettingsValue,
 };
 use velox_kit::prelude::*;
@@ -28,6 +27,8 @@ const ALL_ICONS: &[(&str, IconName<'static>)] = &[
     ("Folder", IconName::Folder),
     ("Mic", IconName::Mic),
     ("Trash", IconName::Trash),
+    ("Eye", IconName::Eye),
+    ("EyeOff", IconName::EyeOff),
 ];
 
 impl GalleryApp {
@@ -36,7 +37,6 @@ impl GalleryApp {
         cx: &'a Scope<Self>,
         theme: CoreTheme,
     ) -> Div<'a> {
-        let p = BasePalette::from_theme(theme);
         let on_settings_inner = cx.listener(|this, (grp, item): (usize, usize), _acx| {
             match (grp, item) {
                 (0, 0) => {
@@ -114,7 +114,7 @@ impl GalleryApp {
             } else if matches!(icon_name, IconName::Check) {
                 theme.success
             } else {
-                p.fg
+                theme.foreground
             };
             icon_grid = icon_grid.child(
                 cx,
@@ -124,13 +124,14 @@ impl GalleryApp {
                     .h(48)
                     .p(4)
                     .gap(4)
-                    .bg(p.canvas)
-                    .hover_bg(p.hover)
-                    .border(1, p.border)
+                    .rounded(6)
+                    .bg(theme.background)
+                    .hover_bg(theme.list_hover)
+                    .border(1, theme.border)
                     .items_center()
                     .justify_center()
                     .child(cx, Icon::new(1900 + idx as u32, icon_name).px(15).color(col))
-                    .child(cx, text(name).size(10).color(p.muted_fg)),
+                    .child(cx, text(name).size(10).color(theme.muted_foreground)),
             );
         }
 
@@ -152,18 +153,15 @@ impl GalleryApp {
                     cx,
                     theme,
                     "Settings Panel & Vector Icons",
-                    "Grouped preference cards and crisp Lucide-style SVG vector icon catalog.",
-                    "velox_base::{Settings, Icon, IconName}",
+                    "Themed velox-component grouped preference cards and Lucide SVG vector icon catalog.",
+                    "velox_component::{Settings, Icon, IconName}",
                 ),
             )
             .child(
                 cx,
-                style::settings(
-                    Settings::new(1950, groups)
-                        .width(740)
-                        .on_item_click(on_settings_click),
-                    theme,
-                ),
+                Settings::new(1950, groups)
+                    .width(740)
+                    .on_item_click(on_settings_click),
             )
             .child(cx, icons_section)
     }

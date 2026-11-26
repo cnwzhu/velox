@@ -437,3 +437,90 @@ export async function mountVeloxCanvas(wasmUrl, canvas, createAppExport = "velox
   return { app, exports };
 }
 "#;
+
+/// WebAssembly 浏览器硬件渲染后端偏好（WebGPU 优先，自动回退 WebGL2 或 Canvas 2D 软光栅）。
+#[repr(u8)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum WebGpuBackendPreference {
+    #[default]
+    WebGpuFirst = 0,
+    WebGl2Only = 1,
+    Software2dFallback = 2,
+}
+
+/// 面向浏览器 WebGPU / WebGL2 硬件直出的 `<canvas>` 宿主控制器（与软件 [`WebCanvasApp`] 并行）。
+pub struct WebGpuCanvasHost {
+    pub engine: VeloxEngine,
+    logical_width: i16,
+    logical_height: i16,
+    device_pixel_ratio: f32,
+    preference: WebGpuBackendPreference,
+    gpu_active: bool,
+}
+
+impl WebGpuCanvasHost {
+    pub fn new(
+        logical_width: i16,
+        logical_height: i16,
+        device_pixel_ratio: f32,
+        preference: WebGpuBackendPreference,
+    ) -> Self {
+        let w = logical_width.max(1);
+        let h = logical_height.max(1);
+        let dpr = device_pixel_ratio.clamp(0.5, 4.0);
+        let mut engine = VeloxEngine::new(w, h);
+        engine.set_scale_factor(dpr);
+        Self {
+            engine,
+            logical_width: w,
+            logical_height: h,
+            device_pixel_ratio: dpr,
+            preference,
+            gpu_active: preference != WebGpuBackendPreference::Software2dFallback,
+        }
+    }
+
+    #[inline]
+    pub const fn physical_size(&self) -> (u32, u32) {
+        let pw = ((self.logical_width as f32) * self.device_pixel_ratio) as u32;
+        let ph = ((self.logical_height as f32) * self.device_pixel_ratio) as u32;
+        (if pw < 1 { 1 } else { pw }, if ph < 1 { 1 } else { ph })
+    }
+
+    #[inline]
+    pub const fn preference(&self) -> WebGpuBackendPreference {
+        self.preference
+    }
+
+    #[inline]
+    pub const fn is_gpu_active(&self) -> bool {
+        self.gpu_active
+    }
+
+    pub fn resize(&mut self, logical_width: i16, logical_height: i16, device_pixel_ratio: f32) {
+        self.logical_width = logical_width.max(1);
+        self.logical_height = logical_height.max(1);
+        self.device_pixel_ratio = device_pixel_ratio.clamp(0.5, 4.0);
+        self.engine.set_scale_factor(self.device_pixel_ratio);
+        self.engine.resize(self.logical_width, self.logical_height);
+    }
+
+    /// 步进一帧逻辑并返回是否存在脏区需要驱动 WebGPU/WebGL2 `WgpuRenderer::render_to_view`。
+    pub fn step_needs_present(&mut self, dt_ms: u16) -> bool {
+        !self.engine.step_frame_dt(dt_ms).is_empty()
+    }
+}
+
+/// WebGPU / WebGL2 硬件直出前端桥接脚本模板（探测 `navigator.gpu` 并在无 WebGPU 环境优雅降级）。
+pub const WEBGPU_HOST_JS_BRIDGE: &str = r#"// Velox WebGPU / WebGL2 Hardware Surface Bridge
+export async function mountVeloxWebGpu(canvas, wasmUrl) {
+  const hasWebGpu = typeof navigator !== "undefined" && "gpu" in navigator;
+  const dpr = Math.min(4, Math.max(1, window.devicePixelRatio || 1));
+  canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr));
+  canvas.height = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  const { instance } = await WebAssembly.instantiateStreaming(fetch(wasmUrl), {});
+  const exports = instance.exports;
+  const app = exports.velox_webgpu_app_new(canvas.clientWidth | 0, canvas.clientHeight | 0, dpr, hasWebGpu ? 0 : 1);
+  return { app, exports, backend: hasWebGpu ? "webgpu" : "webgl2" };
+}
+"#;

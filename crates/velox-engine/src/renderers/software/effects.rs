@@ -1208,6 +1208,21 @@ mod std_layers {
                 };
                 rasterize_styled_quad(sb, sub_clip, &sq, sf, origin_x, origin_y, stride, dst);
             }
+            DrawPayload::RichText(rt) => {
+                crate::renderers::software::text::rasterize_rich_text(
+                    rt, sb, sub_clip, sf, origin_x, origin_y, stride, dst,
+                );
+            }
+            DrawPayload::DecodedImage(img) => {
+                crate::renderers::software::text::rasterize_decoded_image(
+                    img, sb, sub_clip, sf, origin_x, origin_y, stride, dst,
+                );
+            }
+            DrawPayload::Vector(vec_spec) => {
+                crate::vector_canvas::rasterize_vector_spec(
+                    vec_spec, sb, sub_clip, sf, origin_x, origin_y, stride, dst,
+                );
+            }
         };
 
         if clip_r_16 > 0 {

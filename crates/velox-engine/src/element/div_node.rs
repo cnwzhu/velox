@@ -321,6 +321,8 @@ pub(super) static NO_FOCUS_BORDER_DIV_VISUAL: DivVisual<'static> = DivVisual {
 pub struct DivRareHandlers<'a> {
     pub on_long_press: Option<&'a dyn Fn(&mut ActionScope)>,
     pub on_drag: Option<&'a dyn Fn(&mut ActionScope)>,
+    pub on_hover: Option<&'a dyn Fn(bool, &mut ActionScope)>,
+    pub on_pointer_move: Option<&'a dyn Fn(&mut ActionScope)>,
     pub on_swipe: Option<&'a dyn Fn(crate::pod::SwipeDir, &mut ActionScope)>,
     pub on_key_input: Option<&'a dyn Fn(crate::pod::KeyCode, &mut ActionScope)>,
     pub on_key_nav: Option<&'a dyn Fn(crate::pod::KeyCode, &mut ActionScope)>,
@@ -367,6 +369,11 @@ impl<'a> DivNode<'a> {
     #[inline(always)]
     pub fn effects(&self) -> Option<&'a PaintEffects<'a>> {
         self.extended.effects()
+    }
+
+    #[inline(always)]
+    pub fn layout_ext(&self) -> Option<&'a crate::paint::LayoutExtras<'a>> {
+        self.extended.effects().and_then(|e| e.layout_ext)
     }
 
     #[inline(always)]
@@ -466,6 +473,18 @@ impl<'a> DivNode<'a> {
     #[inline(always)]
     pub fn on_drag(&self) -> Option<&'a dyn Fn(&mut ActionScope)> {
         self.interact.and_then(|i| i.rare).and_then(|r| r.on_drag)
+    }
+
+    #[inline(always)]
+    pub fn on_hover(&self) -> Option<&'a dyn Fn(bool, &mut ActionScope)> {
+        self.interact.and_then(|i| i.rare).and_then(|r| r.on_hover)
+    }
+
+    #[inline(always)]
+    pub fn on_pointer_move(&self) -> Option<&'a dyn Fn(&mut ActionScope)> {
+        self.interact
+            .and_then(|i| i.rare)
+            .and_then(|r| r.on_pointer_move)
     }
 
     #[inline(always)]

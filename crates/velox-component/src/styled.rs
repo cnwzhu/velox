@@ -63,29 +63,54 @@ pub fn apply_tw_button_size(style: &mut Style, size: ComponentSize) {
     }
 }
 
+/// 判断主题表面是否处于暗色模式（用于自动决定实心按钮悬停态的提亮/加深方向）。
+#[inline(always)]
+const fn theme_is_dark(theme: &Theme) -> bool {
+    let luma = (theme.background.r() as u16 * 77
+        + theme.background.g() as u16 * 150
+        + theme.background.b() as u16 * 29)
+        >> 8;
+    luma < 128
+}
+
+/// 根据明暗主题为实心语义按钮计算单调一致的 `(hover_bg, active_bg)`：
+/// 暗色主题下悬停微提亮、按压微压深；亮色主题下悬停微压深、按压进一步压深，避免反色闪白。
+#[inline(always)]
+const fn solid_hover_active(base: Color, dark: bool) -> (Color, Color) {
+    if dark {
+        (base.lerp(Color::WHITE, 24), base.lerp(Color::BLACK, 34))
+    } else {
+        (base.lerp(Color::BLACK, 20), base.lerp(Color::BLACK, 44))
+    }
+}
+
 /// 返回指定 [`ComponentVariant`] 在当前主题下的 `(bg, border_w, border_col, fg, hover_bg, active_bg, is_solid)`。
 #[inline]
 pub(crate) fn button_variant_palette(
     theme: &Theme,
     variant: ComponentVariant,
 ) -> (Color, u8, Color, Color, Color, Color, bool) {
+    let dark = theme_is_dark(theme);
     match variant {
-        ComponentVariant::Primary => (
-            theme.primary,
-            0,
-            Color::TRANSPARENT,
-            theme.primary_foreground,
-            theme.primary.lerp(Color::WHITE, 26),
-            theme.primary.lerp(Color::BLACK, 38),
-            true,
-        ),
+        ComponentVariant::Primary => {
+            let (hov, act) = solid_hover_active(theme.primary, dark);
+            (
+                theme.primary,
+                0,
+                Color::TRANSPARENT,
+                theme.primary_foreground,
+                hov,
+                act,
+                true,
+            )
+        }
         ComponentVariant::Secondary => (
             theme.secondary,
             1,
             theme.border,
             theme.secondary_foreground,
             theme.list_active,
-            theme.secondary.lerp(Color::BLACK, 24),
+            theme.list_active.lerp(if dark { Color::WHITE } else { Color::BLACK }, 16),
             false,
         ),
         ComponentVariant::Outline => (
@@ -97,42 +122,54 @@ pub(crate) fn button_variant_palette(
             theme.list_active,
             false,
         ),
-        ComponentVariant::Warning => (
-            theme.warning,
-            0,
-            Color::TRANSPARENT,
-            theme.warning_foreground,
-            theme.warning.lerp(Color::WHITE, 26),
-            theme.warning.lerp(Color::BLACK, 38),
-            true,
-        ),
-        ComponentVariant::Danger => (
-            theme.danger,
-            0,
-            Color::TRANSPARENT,
-            theme.danger_foreground,
-            theme.danger.lerp(Color::WHITE, 26),
-            theme.danger.lerp(Color::BLACK, 38),
-            true,
-        ),
-        ComponentVariant::Success => (
-            theme.success,
-            0,
-            Color::TRANSPARENT,
-            theme.success_foreground,
-            theme.success.lerp(Color::WHITE, 26),
-            theme.success.lerp(Color::BLACK, 38),
-            true,
-        ),
-        ComponentVariant::Info => (
-            theme.info,
-            0,
-            Color::TRANSPARENT,
-            theme.info_foreground,
-            theme.info.lerp(Color::WHITE, 26),
-            theme.info.lerp(Color::BLACK, 38),
-            true,
-        ),
+        ComponentVariant::Warning => {
+            let (hov, act) = solid_hover_active(theme.warning, dark);
+            (
+                theme.warning,
+                0,
+                Color::TRANSPARENT,
+                theme.warning_foreground,
+                hov,
+                act,
+                true,
+            )
+        }
+        ComponentVariant::Danger => {
+            let (hov, act) = solid_hover_active(theme.danger, dark);
+            (
+                theme.danger,
+                0,
+                Color::TRANSPARENT,
+                theme.danger_foreground,
+                hov,
+                act,
+                true,
+            )
+        }
+        ComponentVariant::Success => {
+            let (hov, act) = solid_hover_active(theme.success, dark);
+            (
+                theme.success,
+                0,
+                Color::TRANSPARENT,
+                theme.success_foreground,
+                hov,
+                act,
+                true,
+            )
+        }
+        ComponentVariant::Info => {
+            let (hov, act) = solid_hover_active(theme.info, dark);
+            (
+                theme.info,
+                0,
+                Color::TRANSPARENT,
+                theme.info_foreground,
+                hov,
+                act,
+                true,
+            )
+        }
         ComponentVariant::Ghost => (
             Color::TRANSPARENT,
             0,

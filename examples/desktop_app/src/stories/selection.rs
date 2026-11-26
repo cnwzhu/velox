@@ -1,9 +1,8 @@
-//! `Checkbox & Radio` 故事页：三态原生矢量 SVG 复选框 + 键盘方向键循环切换 RadioGroup（应用层极简直角样式）。
+//! `Checkbox & Radio` 故事页：完全基于 `velox-component` 的三态原生矢量 SVG 复选框 + 键盘方向键循环切换 `RadioGroup`。
 
 use super::{state_pill, story_header, story_section};
-use crate::style::{self, BasePalette};
 use crate::GalleryApp;
-use velox_kit::base::{Checkbox, Radio, RadioGroup};
+use velox_kit::component::{Checkbox, Radio, RadioGroup};
 use velox_kit::prelude::*;
 
 impl GalleryApp {
@@ -12,7 +11,6 @@ impl GalleryApp {
         cx: &'a Scope<Self>,
         theme: CoreTheme,
     ) -> Div<'a> {
-        let p = BasePalette::from_theme(theme);
         let on_parent_cb = cx.listener(|this, next: bool, _acx| {
             this.cb_items = [next, next, next];
             this.event_count = this.event_count.saturating_add(1);
@@ -45,7 +43,7 @@ impl GalleryApp {
         let cb_section = story_section(
             cx,
             theme,
-            "Tri-State Checkbox (Native Vector SVG Check & Dash)",
+            "Tri-State Checkbox (velox-component Native SVG Check & Dash)",
             "Click child items to see parent automatically switch between Unchecked / Indeterminate / Checked",
         )
         .child(
@@ -61,13 +59,10 @@ impl GalleryApp {
                         .gap(10)
                         .child(
                             cx,
-                            style::checkbox(
-                                Checkbox::new(1201, all_checked)
-                                    .indeterminate(is_indeterminate)
-                                    .label("Select All Render Features")
-                                    .on_change(on_parent_cb),
-                                theme,
-                            ),
+                            Checkbox::new(1201, all_checked)
+                                .indeterminate(is_indeterminate)
+                                .label("Select All Render Features")
+                                .on_change(on_parent_cb),
                         )
                         .child(
                             cx,
@@ -77,30 +72,21 @@ impl GalleryApp {
                                 .gap(8)
                                 .child(
                                     cx,
-                                    style::checkbox(
-                                        Checkbox::new(1202, self.cb_items[0])
-                                            .label("wgpu 2D SDF Hardware Acceleration")
-                                            .on_change(on_cb_0),
-                                        theme,
-                                    ),
+                                    Checkbox::new(1202, self.cb_items[0])
+                                        .label("wgpu 2D SDF Hardware Acceleration")
+                                        .on_change(on_cb_0),
                                 )
                                 .child(
                                     cx,
-                                    style::checkbox(
-                                        Checkbox::new(1203, self.cb_items[1])
-                                            .label("Native Vector SVG Path Engine")
-                                            .on_change(on_cb_1),
-                                        theme,
-                                    ),
+                                    Checkbox::new(1203, self.cb_items[1])
+                                        .label("Native Vector SVG Path Engine")
+                                        .on_change(on_cb_1),
                                 )
                                 .child(
                                     cx,
-                                    style::checkbox(
-                                        Checkbox::new(1204, self.cb_items[2])
-                                            .label("Fractional HiDPI Subpixel Crispness")
-                                            .on_change(on_cb_2),
-                                        theme,
-                                    ),
+                                    Checkbox::new(1204, self.cb_items[2])
+                                        .label("Fractional HiDPI Subpixel Crispness")
+                                        .on_change(on_cb_2),
                                 ),
                         ),
                 )
@@ -109,54 +95,44 @@ impl GalleryApp {
                     div()
                         .flex_col()
                         .gap(10)
-                        .child(cx, text("Sizes & Disabled States").size(12).color(p.muted_fg))
                         .child(
                             cx,
-                            style::checkbox(
-                                Checkbox::new(1205, true)
-                                    .small()
-                                    .label("Small (14px)")
-                                    .on_change(on_cb_0),
-                                theme,
-                            ),
+                            text("Sizes & Disabled States")
+                                .size(12)
+                                .color(theme.muted_foreground),
                         )
                         .child(
                             cx,
-                            style::checkbox(
-                                Checkbox::new(1206, true)
-                                    .medium()
-                                    .label("Medium (16px)")
-                                    .on_change(on_cb_1),
-                                theme,
-                            ),
+                            Checkbox::new(1205, true)
+                                .small()
+                                .label("Small (14px)")
+                                .on_change(on_cb_0),
                         )
                         .child(
                             cx,
-                            style::checkbox(
-                                Checkbox::new(1207, true)
-                                    .large()
-                                    .label("Large (20px)")
-                                    .on_change(on_cb_2),
-                                theme,
-                            ),
+                            Checkbox::new(1206, true)
+                                .medium()
+                                .label("Medium (16px)")
+                                .on_change(on_cb_1),
                         )
                         .child(
                             cx,
-                            style::checkbox(
-                                Checkbox::new(1208, true)
-                                    .disabled(true)
-                                    .label("Disabled Checked"),
-                                theme,
-                            ),
+                            Checkbox::new(1207, true)
+                                .large()
+                                .label("Large (20px)")
+                                .on_change(on_cb_2),
                         )
                         .child(
                             cx,
-                            style::checkbox(
-                                Checkbox::new(1209, false)
-                                    .disabled(true)
-                                    .label("Disabled Unchecked"),
-                                theme,
-                            ),
+                            Checkbox::new(1208, true)
+                                .disabled(true)
+                                .label("Disabled Checked"),
+                        )
+                        .child(
+                            cx,
+                            Checkbox::new(1209, false)
+                                .disabled(true)
+                                .label("Disabled Unchecked"),
                         ),
                 ),
         )
@@ -186,7 +162,7 @@ impl GalleryApp {
         let radio_section = story_section(
             cx,
             theme,
-            "Radio & RadioGroup (Arrow-Key Roving Selection)",
+            "Radio & RadioGroup (velox-component Arrow-Key Roving Selection)",
             "Focus any radio item with Tab, then press Arrow Left/Right/Up/Down or Home/End",
         )
         .child(
@@ -200,23 +176,25 @@ impl GalleryApp {
                     div()
                         .flex_col()
                         .gap(10)
-                        .child(cx, text("Vertical Group").size(12).color(p.muted_fg))
                         .child(
                             cx,
-                            style::radio_group(
-                                RadioGroup::new(
-                                    1220,
-                                    &[
-                                        "Auto (GPU wgpu + Software Fallback)",
-                                        "Force Built-in Software SDF",
-                                        "Headless Testing Surface",
-                                    ],
-                                    Some(self.radio_plan),
-                                )
-                                .vertical()
-                                .on_change(on_radio_plan),
-                                theme,
-                            ),
+                            text("Vertical Group")
+                                .size(12)
+                                .color(theme.muted_foreground),
+                        )
+                        .child(
+                            cx,
+                            RadioGroup::new(
+                                1220,
+                                &[
+                                    "Auto (GPU wgpu + Software Fallback)",
+                                    "Force Built-in Software SDF",
+                                    "Headless Testing Surface",
+                                ],
+                                Some(self.radio_plan),
+                            )
+                            .vertical()
+                            .on_change(on_radio_plan),
                         ),
                 )
                 .child(
@@ -226,40 +204,27 @@ impl GalleryApp {
                         .gap(12)
                         .child(
                             cx,
-                            text("Horizontal Group & Disabled").size(12).color(p.muted_fg),
+                            text("Horizontal Group & Disabled")
+                                .size(12)
+                                .color(theme.muted_foreground),
                         )
                         .child(
                             cx,
-                            style::radio_group(
-                                RadioGroup::new(
-                                    1221,
-                                    &["Compact", "Default", "Comfortable"],
-                                    Some(self.radio_density),
-                                )
-                                .horizontal()
-                                .on_change(on_radio_density),
-                                theme,
-                            ),
+                            RadioGroup::new(
+                                1221,
+                                &["Compact", "Default", "Comfortable"],
+                                Some(self.radio_density),
+                            )
+                            .horizontal()
+                            .on_change(on_radio_density),
                         )
                         .child(
                             cx,
                             div()
                                 .flex_row()
                                 .gap(16)
-                                .child(
-                                    cx,
-                                    style::radio(
-                                        Radio::new(1222, "Disabled On", true).disabled(true),
-                                        theme,
-                                    ),
-                                )
-                                .child(
-                                    cx,
-                                    style::radio(
-                                        Radio::new(1223, "Disabled Off", false).disabled(true),
-                                        theme,
-                                    ),
-                                ),
+                                .child(cx, Radio::new(1222, "Disabled On", true).disabled(true))
+                                .child(cx, Radio::new(1223, "Disabled Off", false).disabled(true)),
                         ),
                 ),
         );
@@ -274,8 +239,8 @@ impl GalleryApp {
                     cx,
                     theme,
                     "Checkbox & Radio",
-                    "Tri-state SVG checkmark/indeterminate dash, 1px monochrome borders & arrow-key roving selection.",
-                    "velox_base::{Checkbox, Radio, RadioGroup}",
+                    "Themed velox-component tri-state SVG checkboxes & arrow-key roving RadioGroup.",
+                    "velox_component::{Checkbox, Radio, RadioGroup}",
                 ),
             )
             .child(cx, cb_section)

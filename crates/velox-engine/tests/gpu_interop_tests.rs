@@ -251,7 +251,7 @@ fn test_stage_a_shared_device_external_texture_and_acrylic_hud() {
 #[test]
 fn test_stage_b_shared_exporter_triple_buffer_dx12_nt_handle_and_resize_gc() {
     use velox_engine::renderers::wgpu::{
-        ExportedHandle, ExternalSyncHandle, PreparedWgpuContext, WgpuSharedExportRenderer,
+        PreparedWgpuContext, WgpuSharedExportRenderer,
     };
 
     let Some(probe_ctx) = PreparedWgpuContext::from_host_adapter_id(None, None) else {

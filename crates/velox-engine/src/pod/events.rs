@@ -122,7 +122,7 @@ pub struct DragEvent {
 }
 
 /// 物理按键与旋转编码器导航键值（面向无触摸屏 MCU 与桌面键盘）。
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum KeyCode {
     /// 切换焦点至下一个可聚焦元素（`Tab` 或旋钮顺时针）。
     Tab,
@@ -159,7 +159,7 @@ pub enum KeyCode {
 }
 
 /// 键盘修饰键状态位掩码（紧凑 1 字节表示，支持 Shift / Ctrl / Alt / Super）。
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct KeyModifiers(pub u8);
 
 impl KeyModifiers {
@@ -476,5 +476,53 @@ pub enum InputEvent {
     SafeAreaChanged(SafeAreaInsets),
     /// 移动端屏幕软键盘弹出高度发生变更（`0` 表示软键盘收起）。
     KeyboardInsetChanged(i16),
+    /// 双指捏合/触控板缩放手势（`delta_scale_x1000` 为千分比增量，如 `+50` 表示放大 5%）。
+    Pinch {
+        x: i16,
+        y: i16,
+        delta_scale_x1000: i16,
+    },
+    /// 双指旋转手势（`delta_deg10` 单位 `0.1°` 顺时针增量）。
+    Rotate {
+        x: i16,
+        y: i16,
+        delta_deg10: i16,
+    },
+    /// 触控板高精度像素级双轴平滑滚动。
+    ScrollPixel {
+        x: i16,
+        y: i16,
+        dx: i16,
+        dy: i16,
+    },
+    /// 外部 OS 文件拖拽悬停在窗口上方。
+    FileHovered { x: i16, y: i16 },
+    /// 外部 OS 文件在窗口指定坐标处放下（路径列表通过引擎 `dropped_files()` 读取）。
+    FileDropped { x: i16, y: i16 },
+    /// 外部 OS 文件拖拽离开窗口取消。
+    FileHoverCancelled,
+    /// 操作系统深浅色主题热切换通知。
+    SystemThemeChanged { dark: bool },
+}
+
+/// 标准 W3C 事件传播阶段（捕获 -> 目标 -> 冒泡）。
+#[repr(u8)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum EventPhase {
+    Capture = 0,
+    #[default]
+    Target = 1,
+    Bubble = 2,
+}
+
+/// 跨控件应用内拖拽传输载荷（轻量 POD，无堆）。
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct DragPayload {
+    /// 载荷类别标签（如 `1 = Tab`, `2 = TreeNode`, `3 = File`）。
+    pub kind_tag: u32,
+    /// 业务自定义数据 ID。
+    pub payload_id: u64,
+    /// 发起拖拽的源控件 ID。
+    pub source_id: u32,
 }
 

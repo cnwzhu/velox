@@ -15,6 +15,9 @@ crate::define_themed_component! {
     disableable: false,
     init: |base| {
         base.focus_ring = true;
+        {
+            base.animated = true;
+        }
     },
     apply_tw: |base, theme| {
         fill_color(&mut base.bg, theme.card);
@@ -26,6 +29,7 @@ crate::define_themed_component! {
     },
     forward: [
         rounded(radius: u8),
+        animated(enabled: bool),
         on_jump_bottom(handler: &'a dyn Fn(&mut ActionScope)),
     ],
 }

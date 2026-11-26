@@ -15,6 +15,9 @@ crate::define_themed_component! {
     disableable: false,
     init: |base| {
         base.focus_ring = true;
+        {
+            base.animated = true;
+        }
     },
     apply_tw: |base, theme| {
         fill_color(&mut base.bg, theme.popover);
@@ -35,6 +38,7 @@ crate::define_themed_component! {
     },
     forward: [
         size(size: i16),
+        animated(enabled: bool),
         content(cx: &'a FrameScope, child: impl IntoElement<'a>),
         on_dismiss(handler: &'a dyn Fn(&mut ActionScope)),
     ],

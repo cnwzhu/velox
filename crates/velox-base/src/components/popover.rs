@@ -11,6 +11,7 @@ pub struct Popover<'a> {
     pub border_color: Color,
     pub rounded: u8,
     pub shadow: Option<(u8, i8, i8, Color)>,
+    pub animated: bool,
     pub style: Style,
     pub style_ext: StyleExt,
     pub trigger: Option<Element<'a>>,
@@ -31,6 +32,7 @@ impl<'a> Popover<'a> {
             border_color: Color::TRANSPARENT,
             rounded: 0,
             shadow: None,
+            animated: false,
             style: Style::DEFAULT,
             style_ext: StyleExt::DEFAULT,
             trigger: None,
@@ -58,6 +60,13 @@ impl<'a> Popover<'a> {
     #[inline(always)]
     pub fn on_close(mut self, handler: &'a dyn Fn(&mut ActionScope)) -> Self {
         self.on_close = Some(handler);
+        self
+    }
+
+    /// 启用或禁用弹出层入场微弹动画。
+    #[inline(always)]
+    pub const fn animated(mut self, enabled: bool) -> Self {
+        self.animated = enabled;
         self
     }
 
@@ -102,6 +111,11 @@ impl<'a> Widget<'a> for Popover<'a> {
                 }
                 if let Some((blur, ox, oy, col)) = self.shadow {
                     panel = panel.shadow(blur, ox, oy, col);
+                }
+                if self.animated {
+                    panel = panel
+                        .enter_from(255, 0, -8, Duration::from_millis(170))
+                        .ease(Easing::EaseOutBack);
                 }
                 panel = panel.child(cx, body);
                 if let Some(cb) = self.on_close {

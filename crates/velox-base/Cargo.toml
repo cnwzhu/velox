@@ -9,5 +9,9 @@ keywords.workspace = true
 categories.workspace = true
 description = "Headless component behaviors, state structures, navigation/virtual-list primitives, and minimal unstyled base widgets for Velox"
 
+[features]
+default = ["std"]
+std = ["velox-engine/std"]
+
 [dependencies]
-velox-engine = { version = "0.2.0", path = "../velox-engine", default-features = false }
+velox-engine = { version = "0.3.0", path = "../velox-engine", default-features = false }

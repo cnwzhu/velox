@@ -66,14 +66,49 @@ impl Color {
     }
 
     /// 定点数颜色线性插值（`t_256` 取值范围 `0..=256`）。
+    ///
+    /// 正确处理透明色与半透明色（预乘 Alpha 权重插值）：
+    /// 当任一端为完全透明（`a == 0`，如 `Color::TRANSPARENT`）时保留另一端的 RGB 色相、仅插值 Alpha，
+    /// 彻底消除 `Outline` / `Ghost` 等透明底按钮在亮色/暗色主题下悬停过渡时的黑灰闪烁。
     #[inline]
     pub const fn lerp(self, other: Self, t_256: u16) -> Self {
-        let t = if t_256 > 256 { 256 } else { t_256 as u32 };
+        if t_256 == 0 {
+            return self;
+        }
+        if t_256 >= 256 {
+            return other;
+        }
+        let t = t_256 as u32;
         let inv = 256 - t;
-        let a = ((self.a() as u32 * inv + other.a() as u32 * t) >> 8) as u8;
-        let r = ((self.r() as u32 * inv + other.r() as u32 * t) >> 8) as u8;
-        let g = ((self.g() as u32 * inv + other.g() as u32 * t) >> 8) as u8;
-        let b = ((self.b() as u32 * inv + other.b() as u32 * t) >> 8) as u8;
+        let sa = self.a() as u32;
+        let oa = other.a() as u32;
+        let a = ((sa * inv + oa * t + 128) >> 8) as u8;
+        if a == 0 {
+            return Self::TRANSPARENT;
+        }
+        if sa == 0 {
+            return Self::rgba(other.r(), other.g(), other.b(), a);
+        }
+        if oa == 0 {
+            return Self::rgba(self.r(), self.g(), self.b(), a);
+        }
+        if sa == 255 && oa == 255 {
+            let r = ((self.r() as u32 * inv + other.r() as u32 * t + 128) >> 8) as u8;
+            let g = ((self.g() as u32 * inv + other.g() as u32 * t + 128) >> 8) as u8;
+            let b = ((self.b() as u32 * inv + other.b() as u32 * t + 128) >> 8) as u8;
+            return Self::rgba(r, g, b, 255);
+        }
+        // 半透明预乘加权插值再还原直通 RGB，避免低 Alpha 端暗色拉黑
+        let w0 = sa * inv;
+        let w1 = oa * t;
+        let denom = w0 + w1;
+        if denom == 0 {
+            return Self::TRANSPARENT;
+        }
+        let half = denom >> 1;
+        let r = ((self.r() as u32 * w0 + other.r() as u32 * w1 + half) / denom) as u8;
+        let g = ((self.g() as u32 * w0 + other.g() as u32 * w1 + half) / denom) as u8;
+        let b = ((self.b() as u32 * w0 + other.b() as u32 * w1 + half) / denom) as u8;
         Self::rgba(r, g, b, a)
     }
 

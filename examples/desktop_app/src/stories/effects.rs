@@ -6,9 +6,8 @@
 //! 4. 图层滤镜（Blur / ColorMatrix / 任意子树 DropShadow）、2D 仿射变换与任意 SVG Path 矢量裁剪遮罩。
 
 use super::{state_pill, story_header, story_section};
-use crate::style::{self, BasePalette};
 use crate::GalleryApp;
-use velox_kit::base::{Button, Slider, Switch};
+use velox_kit::component::{Button, Slider, Switch};
 use velox_kit::prelude::*;
 
 /// 实验室中可交互切换的 8 种代表性混合模式（覆盖 Porter-Duff、Separable 与 HSL 组）。
@@ -50,18 +49,23 @@ impl GalleryApp {
         cx: &'a Scope<Self>,
         theme: CoreTheme,
     ) -> Div<'a> {
-        let p = BasePalette::from_theme(theme);
+        let is_dark = theme.background.r() < 128;
 
-        // 紧凑切换芯片按钮助手（选中态高亮实心，未选中态细线框）
+        // 紧凑切换芯片按钮助手（使用 velox-component::Button 主题变体）
         let mode_btn = |id: u32,
                         label: &'static str,
                         active: bool,
                         cb: &'a dyn Fn(ClickEvent, &mut ActionScope)| {
-            let b = Button::new(id, label).h(26).px(10).font_size(11).on_click(cb);
+            let b = Button::new(id, label)
+                .small()
+                .h(26)
+                .px(10)
+                .font_size(11)
+                .on_click(cb);
             if active {
-                style::btn_solid(b, theme)
+                b.primary()
             } else {
-                style::btn_outline(b, theme)
+                b.outline()
             }
         };
 
@@ -172,7 +176,7 @@ impl GalleryApp {
                 cx,
                 text("Multi-stop Linear & Asymmetric Corners")
                     .size(11)
-                    .color(p.muted_fg),
+                    .color(theme.muted_foreground),
             );
 
         let oklab_compare_card = div()
@@ -219,7 +223,7 @@ impl GalleryApp {
                 cx,
                 text("Perceptual OKLab vs Classic sRGB")
                     .size(11)
-                    .color(p.muted_fg),
+                    .color(theme.muted_foreground),
             );
 
         let radial_card = div()
@@ -257,7 +261,7 @@ impl GalleryApp {
                 cx,
                 text("Two-Circle Focal Radial Gradient")
                     .size(11)
-                    .color(p.muted_fg),
+                    .color(theme.muted_foreground),
             );
 
         let conic_card = div()
@@ -283,7 +287,7 @@ impl GalleryApp {
                 cx,
                 text("360° Conic Sweep + CornerRadii(4,22)")
                     .size(11)
-                    .color(p.muted_fg),
+                    .color(theme.muted_foreground),
             );
 
         let gradient_section = story_section(
@@ -306,7 +310,7 @@ impl GalleryApp {
                         .flex_row()
                         .gap(4)
                         .items_center()
-                        .child(cx, text("Space:").size(11).color(p.muted_fg))
+                        .child(cx, text("Space:").size(11).color(theme.muted_foreground))
                         .child(
                             cx,
                             mode_btn(
@@ -341,7 +345,7 @@ impl GalleryApp {
                         .flex_row()
                         .gap(4)
                         .items_center()
-                        .child(cx, text("Extend:").size(11).color(p.muted_fg))
+                        .child(cx, text("Extend:").size(11).color(theme.muted_foreground))
                         .child(
                             cx,
                             mode_btn(
@@ -376,17 +380,14 @@ impl GalleryApp {
                         .flex_row()
                         .gap(8)
                         .items_center()
-                        .child(cx, text("Angle:").size(11).color(p.muted_fg))
+                        .child(cx, text("Angle:").size(11).color(theme.muted_foreground))
                         .child(
                             cx,
-                            style::slider(
-                                Slider::new(2107, self.fx_grad_angle)
-                                    .range(0, 360)
-                                    .step(15)
-                                    .w(120)
-                                    .on_change(on_angle_change),
-                                theme,
-                            ),
+                            Slider::new(2107, self.fx_grad_angle)
+                                .range(0, 360)
+                                .step(15)
+                                .w(120)
+                                .on_change(on_angle_change),
                         )
                         .child(cx, state_pill(cx, theme, fmt!(cx, "{}°", self.fx_grad_angle))),
                 ),
@@ -414,13 +415,13 @@ impl GalleryApp {
         });
 
         let blur_u8 = self.fx_backdrop_blur.clamp(0, 20) as u8;
-        let glass_tint = if p.is_dark {
+        let glass_tint = if is_dark {
             Color::rgba(18, 22, 34, 72)
         } else {
             Color::rgba(255, 255, 255, 92)
         };
-        let glass_text_col = if p.is_dark { Color::WHITE } else { Color::rgb(15, 23, 42) };
-        let glass_sub_col = if p.is_dark {
+        let glass_text_col = if is_dark { Color::WHITE } else { Color::rgb(15, 23, 42) };
+        let glass_sub_col = if is_dark {
             Color::rgba(241, 245, 249, 210)
         } else {
             Color::rgba(30, 41, 59, 210)
@@ -495,7 +496,7 @@ impl GalleryApp {
             .overflow_hidden()
             .bg_linear_gradient(cx, 120.0, &BACKDROP_BG_STOPS)
             .bg_gradient_space(GradientSpace::Oklab)
-            .border(1, p.border_strong)
+            .border(1, theme.border)
             // 高对比彩色背景元素，便于肉眼直观验证毛玻璃折射模糊
             .child(
                 cx,
@@ -565,36 +566,30 @@ impl GalleryApp {
                             .w_full()
                             .justify_between()
                             .items_center()
-                            .child(cx, text("Backdrop Blur Radius").size(12).color(p.fg))
+                            .child(cx, text("Backdrop Blur Radius").size(12).color(theme.foreground))
                             .child(cx, state_pill(cx, theme, fmt!(cx, "{} px", blur_u8))),
                     )
                     .child(
                         cx,
-                        style::slider(
-                            Slider::new(2110, self.fx_backdrop_blur)
-                                .range(0, 20)
-                                .step(1)
-                                .w(220)
-                                .on_change(on_blur_change),
-                            theme,
-                        ),
+                        Slider::new(2110, self.fx_backdrop_blur)
+                            .range(0, 20)
+                            .step(1)
+                            .w(220)
+                            .on_change(on_blur_change),
                     ),
             )
             .child(
                 cx,
-                style::switch(
-                    Switch::new(2111, self.fx_acrylic_enabled)
-                        .medium()
-                        .label("Acrylic Vibrancy + Grain")
-                        .on_change(on_acrylic_toggle),
-                    theme,
-                ),
+                Switch::new(2111, self.fx_acrylic_enabled)
+                    .medium()
+                    .label("Acrylic Vibrancy + Grain")
+                    .on_change(on_acrylic_toggle),
             )
             .child(
                 cx,
                 text("Drag the slider to 0 px to compare sharp background vs frosted glass.")
                     .size(11)
-                    .color(p.muted_fg),
+                    .color(theme.muted_foreground),
             );
 
         let backdrop_section = story_section(
@@ -668,7 +663,7 @@ impl GalleryApp {
                     .w_full()
                     .justify_between()
                     .items_center()
-                    .child(cx, text("W3C & Porter-Duff Blend Stage").size(12).color(p.fg))
+                    .child(cx, text("W3C & Porter-Duff Blend Stage").size(12).color(theme.foreground))
                     .child(cx, state_pill(cx, theme, fmt!(cx, "BlendMode::{}", blend_name))),
             )
             .child(
@@ -680,7 +675,7 @@ impl GalleryApp {
                     .rounded(10)
                     .overflow_hidden()
                     .bg_linear_gradient(cx, 90.0, &BLEND_BG_STOPS)
-                    .border(1, p.border_strong)
+                    .border(1, theme.border)
                     .child(
                         cx,
                         div()
@@ -759,11 +754,11 @@ impl GalleryApp {
                         .h(104)
                         .rounded(10)
                         .bg(Color::rgb(248, 250, 252))
-                        .border(1, p.border_strong)
+                        .border(1, theme.border)
                         .child(cx, group),
                 )
-                .child(cx, text(title).size(11).color(p.fg))
-                .child(cx, text(note).size(10).color(p.muted_fg))
+                .child(cx, text(title).size(11).color(theme.foreground))
+                .child(cx, text(note).size(10).color(theme.muted_foreground))
         };
 
         let opacity_compare = div()
@@ -774,7 +769,7 @@ impl GalleryApp {
                 cx,
                 text("Group Opacity Isolation (.isolate().opacity(145))")
                     .size(12)
-                    .color(p.fg),
+                    .color(theme.foreground),
             )
             .child(
                 cx,
@@ -937,12 +932,12 @@ impl GalleryApp {
                     .w_full()
                     .h(120)
                     .rounded(10)
-                    .bg(if p.is_dark {
+                    .bg(if is_dark {
                         Color::rgb(28, 30, 38)
                     } else {
                         Color::rgb(241, 245, 249)
                     })
-                    .border(1, p.border_strong)
+                    .border(1, theme.border)
                     .child(cx, filtered_card),
             );
 
@@ -990,14 +985,11 @@ impl GalleryApp {
                     .child(cx, mode_btn(2144, FX_CLIP_SHAPES[3].0, active_clip == 3, on_clip_3))
                     .child(
                         cx,
-                        style::slider(
-                            Slider::new(2140, self.fx_rotation_deg)
-                                .range(-180, 180)
-                                .step(15)
-                                .w(108)
-                                .on_change(on_rot_change),
-                            theme,
-                        ),
+                        Slider::new(2140, self.fx_rotation_deg)
+                            .range(-180, 180)
+                            .step(15)
+                            .w(108)
+                            .on_change(on_rot_change),
                     )
                     .child(
                         cx,
@@ -1010,8 +1002,8 @@ impl GalleryApp {
                     .w_full()
                     .h(120)
                     .rounded(10)
-                    .bg(p.surface_subtle)
-                    .border(1, p.border_strong)
+                    .bg(theme.background)
+                    .border(1, theme.border)
                     .child(
                         cx,
                         div()
@@ -1020,13 +1012,13 @@ impl GalleryApp {
                             .h(90)
                             .flex_col()
                             .gap(4)
-                            .child(cx, text("Transform2D +").size(11).color(p.fg))
-                            .child(cx, text("SVG ClipPath").size(11).color(p.fg))
+                            .child(cx, text("Transform2D +").size(11).color(theme.foreground))
+                            .child(cx, text("SVG ClipPath").size(11).color(theme.foreground))
                             .child(
                                 cx,
                                 text(fmt!(cx, "Mask: {}", clip_name))
                                     .size(10)
-                                    .color(p.muted_fg),
+                                    .color(theme.muted_foreground),
                             ),
                     )
                     .child(cx, clipped_badge),

@@ -20,6 +20,7 @@ pub mod web;
 pub use clipboard::{clipboard_has_text, clipboard_read_into, clipboard_write_text};
 pub use clipboard::clipboard_read_text;
 
+pub mod a11y_bridge;
 pub mod android;
 pub mod embed_ffi;
 pub mod harmony;

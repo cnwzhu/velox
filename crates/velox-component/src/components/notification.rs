@@ -15,6 +15,9 @@ crate::define_themed_component! {
     disableable: false,
     init: |base| {
         base.focus_ring = true;
+        {
+            base.animated = true;
+        }
     },
     apply_tw: |base, theme| {
         let def_accent = match base.variant {
@@ -51,6 +54,7 @@ crate::define_themed_component! {
     },
     forward: [
         variant(variant: NotificationVariant),
+        animated(enabled: bool),
         action(label: &'a str, handler: &'a dyn Fn(&mut ActionScope)),
         on_dismiss(handler: &'a dyn Fn(&mut ActionScope)),
     ],

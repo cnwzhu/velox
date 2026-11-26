@@ -26,7 +26,9 @@ impl<'a> IntoElement<'a> for Div<'a> {
             || self.hover_style.is_some()
             || self.active_style.is_some()
             || self.focus_style.is_some();
-        let has_effects = !self.effects.is_empty() || self.external_texture.is_some();
+        let has_effects = !self.effects.is_empty()
+            || self.external_texture.is_some()
+            || !self.layout_ext.is_empty();
 
         let alloc_visual = |extended: DivExtPtr<'a>,
                             transition: Option<&'a TransitionSpec>|
@@ -91,6 +93,9 @@ impl<'a> IntoElement<'a> for Div<'a> {
                 if let Some(ext_spec) = self.external_texture {
                     self.effects.external_texture = Some(&*cx.arena().alloc_temp(ext_spec));
                 }
+                if !self.layout_ext.is_empty() {
+                    self.effects.layout_ext = Some(&*cx.arena().alloc_temp(self.layout_ext));
+                }
                 Some(&*cx.arena().alloc_temp(self.effects))
             } else {
                 None
@@ -121,6 +126,8 @@ impl<'a> IntoElement<'a> for Div<'a> {
                 Some(&*cx.arena().alloc(DivRareHandlers {
                     on_long_press: self.on_long_press,
                     on_drag: self.on_drag,
+                    on_hover: self.on_hover,
+                    on_pointer_move: self.on_pointer_move,
                     on_swipe: self.on_swipe,
                     on_key_input: self.on_key_input,
                     on_key_nav: self.on_key_nav,
@@ -231,6 +238,10 @@ pub struct Div<'a> {
     pub on_long_press: Option<&'a dyn Fn(&mut ActionScope)>,
     /// 拖拽事件响应闭包（分配于 `ScratchArena`）。
     pub on_drag: Option<&'a dyn Fn(&mut ActionScope)>,
+    /// 指针悬停进入/离开状态变更回调闭包（`true` 进入，`false` 离开；分配于 `ScratchArena`）。
+    pub on_hover: Option<&'a dyn Fn(bool, &mut ActionScope)>,
+    /// 指针在热区内移动时的连续追踪回调闭包（未按下悬停移动时触发，坐标由 `ActionScope::drag_event()` 读取）。
+    pub on_pointer_move: Option<&'a dyn Fn(&mut ActionScope)>,
     /// 四向快速滑动手势回调闭包（分配于 `ScratchArena`）。
     pub on_swipe: Option<&'a dyn Fn(crate::pod::SwipeDir, &mut ActionScope)>,
     /// 字符与文本输入事件响应闭包（分配于 `ScratchArena`，供聚焦态 `TextInput` 编辑使用）。
@@ -271,6 +282,8 @@ pub struct Div<'a> {
     pub effects: PaintEffects<'a>,
     /// 外部零拷贝 GPU 纹理描述（仅在绑定时按需在帧内分配，对常规节点零内存开销）。
     pub external_texture: Option<crate::paint::ExternalTextureSpec>,
+    /// 高级布局扩展（`aspect_ratio` / Grid `span` & `fr` / `sticky_top` / RTL 镜像 / 滚动链，未设时零分配）。
+    pub layout_ext: crate::paint::LayoutExtras<'a>,
 }
 
 /// 构造一个基础弹性盒容器（完全复刻 HTML/Tailwind 的 `div` 直觉）。
@@ -301,6 +314,8 @@ pub fn div<'a>() -> Div<'a> {
         on_click: None,
         on_long_press: None,
         on_drag: None,
+        on_hover: None,
+        on_pointer_move: None,
         on_swipe: None,
         on_key_input: None,
         on_key_nav: None,
@@ -321,6 +336,7 @@ pub fn div<'a>() -> Div<'a> {
         items_baseline: false,
         effects: PaintEffects::EMPTY,
         external_texture: None,
+        layout_ext: crate::paint::LayoutExtras::EMPTY,
     }
 }
 
@@ -355,6 +371,7 @@ impl<'a> Div<'a> {
             || self.items_baseline
             || !self.effects.is_empty()
             || self.external_texture.is_some()
+            || !self.layout_ext.is_empty()
     }
 
     #[inline(always)]
@@ -366,6 +383,8 @@ impl<'a> Div<'a> {
     fn has_rare_handlers(&self) -> bool {
         self.on_long_press.is_some()
             || self.on_drag.is_some()
+            || self.on_hover.is_some()
+            || self.on_pointer_move.is_some()
             || self.on_swipe.is_some()
             || self.on_key_input.is_some()
             || self.on_key_nav.is_some()
@@ -1099,6 +1118,46 @@ impl<'a> Div<'a> {
         self
     }
 
+    /// 绑定原始指针悬停进入/离开回调闭包（`true` 进入，`false` 离开）。
+    #[inline(always)]
+    pub fn on_hover_raw(mut self, handler: &'a dyn Fn(bool, &mut ActionScope)) -> Self {
+        self.on_hover = Some(handler);
+        self
+    }
+
+    /// 绑定与 `cx.listener(...)` 兼容的指针悬停进入/离开回调闭包（`bool` 为 `true` 表示进入、`false` 表示离开）。
+    #[inline(always)]
+    pub fn on_hover(
+        mut self,
+        _cx: &'a FrameScope,
+        handler: &'a dyn Fn(bool, &mut ActionScope),
+    ) -> Self {
+        self.on_hover = Some(handler);
+        self
+    }
+
+    /// 绑定原始指针热区内移动追踪回调闭包（未按下悬停移动时触发）。
+    #[inline(always)]
+    pub fn on_pointer_move_raw(mut self, handler: &'a dyn Fn(&mut ActionScope)) -> Self {
+        self.on_pointer_move = Some(handler);
+        self
+    }
+
+    /// 绑定与 `cx.listener(...)` 兼容的指针热区内移动追踪回调闭包（传入含局部坐标的 [`DragEvent`]，适用于图表实时悬停追踪）。
+    #[inline(always)]
+    pub fn on_pointer_move(
+        mut self,
+        cx: &'a FrameScope,
+        handler: &'a dyn Fn(DragEvent, &mut ActionScope),
+    ) -> Self {
+        let wrapped = cx.arena().alloc(move |acx: &mut ActionScope| {
+            let ev = acx.drag_event();
+            handler(ev, acx);
+        });
+        self.on_pointer_move = Some(wrapped);
+        self
+    }
+
     /// 绑定与 `cx.listener(...)` 兼容的四向快速滑动手势（`SwipeDir`）回调闭包。
     #[inline(always)]
     pub fn on_swipe(
@@ -1600,6 +1659,66 @@ impl<'a> Div<'a> {
             ext.premultiplied = premultiplied;
             ext.fallback_bg = fallback_bg;
         }
+        self
+    }
+
+    /// 设置容器纵横比约束 `width / height`（例如 `16.0 / 9.0` 对应 16:9 视频卡片，高度为 `Auto` 时自动由宽度推算）。
+    #[inline(always)]
+    pub fn aspect_ratio(mut self, ratio: f32) -> Self {
+        self.layout_ext.aspect_ratio = ratio.max(0.0);
+        self
+    }
+
+    /// 设置 CSS Grid 子项跨列数（如 `.grid_col_span(2)` 横跨两列）。
+    #[inline(always)]
+    pub fn grid_col_span(mut self, span: u8) -> Self {
+        self.layout_ext.grid_col_span = span.max(1);
+        self
+    }
+
+    /// 设置 CSS Grid 自定义列权重（例如 `.grid_template_fr(cx, &[1, 2, 1])` 对应 `1fr 2fr 1fr`，同步设定 `grid_cols`）。
+    #[inline]
+    pub fn grid_template_fr(mut self, cx: &'a FrameScope, weights: &[u16]) -> Self {
+        if !weights.is_empty() {
+            self.grid_cols = weights.len().min(u8::MAX as usize) as u8;
+            self.layout_ext.grid_template_fr = cx.arena().alloc_iter(weights.iter().copied());
+        }
+        self
+    }
+
+    /// 启用 `position: sticky` 吸顶定位（当所属滚动容器向下滚动时，将节点吸附固定在视口顶部偏移 `offset` 处）。
+    #[inline(always)]
+    pub fn sticky_top(mut self, offset: i16) -> Self {
+        self.layout_ext.sticky_top = Some(offset);
+        self
+    }
+
+    /// 显式开启或关闭 RTL（右至左）行布局镜像（`FlexDir::Row` 自动从右向左排布子节点）。
+    #[inline(always)]
+    pub fn rtl(mut self, rtl: bool) -> Self {
+        self.layout_ext.rtl = rtl;
+        self
+    }
+
+    /// 根据当前 [`FrameScope`] 的语言方向自动开启 RTL 行布局镜像。
+    #[inline(always)]
+    pub fn rtl_auto(mut self, cx: &FrameScope) -> Self {
+        self.layout_ext.rtl = cx.is_rtl();
+        self
+    }
+
+    /// 开启 `overflow: auto` 自动内容测算滚动模式（自动根据子元素总高度/总宽度计算 `max_scroll`，无需手传上限）。
+    #[inline(always)]
+    pub fn overflow_auto(mut self) -> Self {
+        self.scrollable_max = Some(i16::MAX);
+        self.clip_children = true;
+        self
+    }
+
+    /// 配置嵌套滚动链开关（内层滚动容器触顶/触底后是否继续向上冒泡给外层滚动容器，默认 `true`）。
+    #[inline(always)]
+    pub fn scroll_chaining(mut self, enable: bool) -> Self {
+        self.layout_ext.scroll_chaining = enable;
         self
     }
 }

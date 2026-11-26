@@ -921,6 +921,63 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppHandler {
                     }
                 }
             }
+            WindowEvent::ThemeChanged(theme) => {
+                let dark = matches!(theme, WinitTheme::Dark);
+                if self.core.dispatch_event(InputEvent::SystemThemeChanged { dark }) {
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::HoveredFile(_) => {
+                let (x, y) = self.cursor_pos;
+                if self.core.dispatch_event(InputEvent::FileHovered { x, y }) {
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::HoveredFileCancelled => {
+                if self.core.dispatch_event(InputEvent::FileHoverCancelled) {
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::DroppedFile(path) => {
+                let (x, y) = self.cursor_pos;
+                self.core.push_dropped_file(path, x, y);
+                let _ = self.core.dispatch_event(InputEvent::FileDropped { x, y });
+                if let Some(win) = &self.window {
+                    win.request_redraw();
+                }
+            }
+            WindowEvent::PinchGesture { delta, .. } => {
+                let (x, y) = self.cursor_pos;
+                let d = (delta * 1000.0).round().clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+                if self.core.dispatch_event(InputEvent::Pinch {
+                    x,
+                    y,
+                    delta_scale_x1000: d,
+                }) {
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::RotationGesture { delta, .. } => {
+                let (x, y) = self.cursor_pos;
+                let d = (delta * 10.0).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                if self.core.dispatch_event(InputEvent::Rotate {
+                    x,
+                    y,
+                    delta_deg10: d,
+                }) {
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
+                    }
+                }
+            }
             WindowEvent::RedrawRequested => {
                 if let Some(inner) = self.window.as_ref().map(|w| w.inner_size()) {
                     if inner.width == 0 || inner.height == 0 {
@@ -932,12 +989,20 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppHandler {
                 }
 
                 let now = Instant::now();
-                let dt_ms = now.duration_since(self.last_tick).as_millis().min(100) as u16;
+                let raw_dt = now.duration_since(self.last_tick).as_millis();
+                // 空闲休眠后唤醒首帧（>50ms）钳制为标称单帧步长，活跃帧钳制在 1..=33ms，
+                // 避免休眠醒来瞬间给 120ms 按钮悬停过渡灌入 100ms 巨额步长引发跳帧闪烁。
+                let nominal_dt: u16 = if self.driver.backend().is_gpu() { 8 } else { 16 };
+                let dt_ms: u16 = if raw_dt > 50 {
+                    nominal_dt
+                } else {
+                    (raw_dt as u16).clamp(1, 33)
+                };
                 self.last_tick = now;
 
                 let force = self.force_present_once;
                 self.force_present_once = false;
-                let _ = self.render_and_present_frame(dt_ms.max(1), false, force);
+                let _ = self.render_and_present_frame(dt_ms, false, force);
 
                 if !self.window_shown {
                     if let Some(win) = &self.window {

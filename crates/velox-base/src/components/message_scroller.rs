@@ -72,6 +72,7 @@ pub struct MessageScroller<'a> {
     pub rounded: u8,
     pub jump_rounded: u8,
     pub focus_ring: bool,
+    pub animated: bool,
     pub style: Style,
     pub style_ext: StyleExt,
     pub on_jump_bottom: Option<&'a dyn Fn(&mut ActionScope)>,
@@ -101,6 +102,7 @@ impl<'a> MessageScroller<'a> {
             rounded: 0,
             jump_rounded: 0,
             focus_ring: false,
+            animated: false,
             style: Style::DEFAULT,
             style_ext: StyleExt::DEFAULT,
             on_jump_bottom: None,
@@ -111,6 +113,13 @@ impl<'a> MessageScroller<'a> {
     #[inline(always)]
     pub const fn rounded(mut self, radius: u8) -> Self {
         self.rounded = radius;
+        self
+    }
+
+    /// 启用或禁用底部悬浮跳转胶囊的弹入动效。
+    #[inline(always)]
+    pub const fn animated(mut self, enabled: bool) -> Self {
+        self.animated = enabled;
         self
     }
 
@@ -185,9 +194,15 @@ impl<'a> Widget<'a> for MessageScroller<'a> {
                 .py(4)
                 .rounded(self.jump_rounded)
                 .bg(self.jump_bg)
+                .hover_bg(self.jump_bg.lerp(Color::WHITE, 22))
                 .items_center()
                 .justify_center()
                 .focusable();
+            if self.animated {
+                jump_btn = jump_btn
+                    .enter_from(0, 0, 10, Duration::from_millis(220))
+                    .ease(Easing::EaseOutBack);
+            }
             if !self.focus_ring {
                 jump_btn = jump_btn.no_focus_border();
             }

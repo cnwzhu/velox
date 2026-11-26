@@ -134,13 +134,16 @@ pub use velox_component::{
     Collapsible, ColorPicker, ColorSwatch, Combobox, Command, ContextMenu, DataTable, DatePicker,
     DescriptionList, Dialog, Diff, Dock, Dropdown, DropdownButton, Editor, Form, FormField,
     GridLayout, GroupBox, HoverCard, Icon, Image, Input, Kbd, Label, Link, List, MarkdownView,
-    Marker, Menu, Message, MessageScroller, Modal, NavBar, Notification, NumberInput, OtpInput,
-    Pagination, Popover, Progress, ProgressBar, Questionnaire, Radio, RadioGroup, Rating,
-    Resizable, ResizableSplit, Roller, Root, Scrollable, Scrollbar, Select, SelectableText,
-    Settings, Sheet, Sidebar, Skeleton, Slider, Speech, Spinner, StatusBar, Stepper, SurfaceCanvas, Svg, Switch,
-    TabBar, Table, Tabs, Tag, TailwindStyled, TextInput, TextView, Textarea, TimeField, Toast,
-    Toggle, ToggleGroup, Toolbar, Tooltip, Tree, UniformList, VirtualKeyboard, VirtualList,
+    Marker, Menu, Message, MessageScroller, Modal, MotionDivExt, MotionPreset, NavBar, Notification,
+    NumberInput, OtpInput, Pagination, Popover, Progress, ProgressBar, Questionnaire, Radio,
+    RadioGroup, Rating, Resizable, ResizableSplit, Roller, Root, Scrollable, Scrollbar, Select,
+    SelectableText, Settings, Sheet, Sidebar, Skeleton, Slider, Speech, Spinner, SpringCard,
+    SpringProgress, SpringReveal, StatusBar, Stepper, SurfaceCanvas, Svg, Switch, TabBar, Table,
+    Tabs, Tag, TailwindStyled, TextInput, TextView, Textarea, TimeField, Toast, Toggle,
+    ToggleGroup, Toolbar, Tooltip, Tree, UniformList, VirtualKeyboard, VirtualList,
 };
+#[cfg(all(feature = "component", feature = "std"))]
+pub use velox_component::SpringAnimator;
 
 #[cfg(all(feature = "base", not(feature = "component")))]
 pub use velox_base::{

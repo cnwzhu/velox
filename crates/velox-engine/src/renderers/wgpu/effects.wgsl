@@ -310,8 +310,7 @@ fn fs_effect(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     let inv_dst = vec2<f32>(1.0 / max(u.extra.z, 1.0), 1.0 / max(u.extra.w, 1.0));
-    let duv = p * inv_dst;
-    let dst_pm = textureSampleLevel(dst_tex, linear_sampler, duv, 0.0);
+    let hw_blend = u.params.y < -0.5;
 
     if (kind == 6u) {
         // 6 = 外部零拷贝 GPU 纹理采样（支持四角独立圆角 SDF 裁剪、UV 裁切、预乘/直通 Alpha 与 27 种混合）
@@ -319,7 +318,11 @@ fn fs_effect(in: VsOut) -> @location(0) vec4<f32> {
         let center_b = u.body_rect.xy + half_b;
         let cov = clamp(0.5 - sdf_rounded_box_4(p, center_b, half_b, u.radii), 0.0, 1.0);
         if (cov <= 0.0001) {
-            return dst_pm;
+            if (hw_blend) {
+                discard;
+            }
+            let duv = (p - u.extra.xy) * inv_dst;
+            return textureSampleLevel(dst_tex, linear_sampler, duv, 0.0);
         }
         let local_uv = clamp(
             (p - u.body_rect.xy) / max(u.body_rect.zw, vec2<f32>(1.0)),
@@ -346,14 +349,21 @@ fn fs_effect(in: VsOut) -> @location(0) vec4<f32> {
             src_pm = vec4<f32>(lin * sampled.a, sampled.a);
         }
         src_pm = src_pm * (cov * u.params.x);
+        if (hw_blend) {
+            return src_pm;
+        }
+        let duv = (p - u.extra.xy) * inv_dst;
+        let dst_pm = textureSampleLevel(dst_tex, linear_sampler, duv, 0.0);
         let blend_mode = u32(u.params.y + 0.5);
         return blend_premul(src_pm, dst_pm, blend_mode);
     }
 
     if (kind == 1u) {
-        // 1 = BackdropFilter 毛玻璃合成
+        // 1 = BackdropFilter 毛玻璃合成（使用局部快照偏移 u.extra.xy，零全屏拷贝）
         // `u.src_rect` 保存 `sample_rect` 在父画布中的物理坐标 `[sx, sy, sw, sh]`，
         // 经 Dual Kawase Blur 后的有效像素位于 `src_tex` 的 `[0..sw, 0..sh]` 区间。
+        let duv = (p - u.extra.xy) * inv_dst;
+        let dst_pm = textureSampleLevel(dst_tex, linear_sampler, duv, 0.0);
         let half_b = u.body_rect.zw * 0.5;
         let center_b = u.body_rect.xy + half_b;
         var cov = clamp(0.5 - sdf_rounded_box_4(p, center_b, half_b, u.radii), 0.0, 1.0);
@@ -412,6 +422,14 @@ fn fs_effect(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     src_pm = src_pm * u.params.x;
+    if (hw_blend) {
+        if (src_pm.a <= 0.00001) {
+            discard;
+        }
+        return src_pm;
+    }
+    let duv = (p - u.tint.xy) * inv_dst;
+    let dst_pm = textureSampleLevel(dst_tex, linear_sampler, duv, 0.0);
     let blend_mode = u32(u.params.y + 0.5);
     return blend_premul(src_pm, dst_pm, blend_mode);
 }

@@ -34,6 +34,7 @@ pub struct Collapsible<'a> {
     pub active_bg: Option<Color>,
     pub rounded: u8,
     pub focus_ring: bool,
+    pub animated: bool,
     pub content: Option<Element<'a>>,
     pub on_toggle: Option<&'a dyn Fn(bool, &mut ActionScope)>,
     trigger_renderer: Option<CollapsibleSlotRenderer<'a>>,
@@ -70,6 +71,7 @@ impl<'a> Collapsible<'a> {
             active_bg: None,
             rounded: 0,
             focus_ring: false,
+            animated: false,
             content: None,
             on_toggle: None,
             trigger_renderer: None,
@@ -97,6 +99,13 @@ impl<'a> Collapsible<'a> {
     #[inline(always)]
     pub fn content(mut self, cx: &'a FrameScope, child: impl IntoElement<'a>) -> Self {
         self.content = Some(child.into_element(cx));
+        self
+    }
+
+    /// 启用或禁用展开内容滑入与标题配色过渡动画。
+    #[inline(always)]
+    pub const fn animated(mut self, enabled: bool) -> Self {
+        self.animated = enabled;
         self
     }
 
@@ -195,6 +204,9 @@ impl<'a> Widget<'a> for Collapsible<'a> {
             if let Some(a) = self.active_bg {
                 header = header.active_bg(a);
             }
+            if self.animated {
+                header = header.animate_color(Duration::from_millis(140));
+            }
             header
                 .child(cx, text(self.title).size(13).color(text_color))
                 .child(
@@ -224,14 +236,18 @@ impl<'a> Widget<'a> for Collapsible<'a> {
                 if let Some(panel_fn) = self.panel_renderer {
                     wrap = wrap.child(cx, panel_fn(div().child(cx, body), state, cx));
                 } else {
-                    wrap = wrap.child(
-                        cx,
-                        div()
-                            .w(eff_w)
-                            .p(12)
-                            .bg(self.content_bg)
-                            .child(cx, body),
-                    );
+                    let mut body_div = div()
+                        .id(crate::scoped_child_id(self.id, 0x75C4_E819, 99))
+                        .w(eff_w)
+                        .p(12)
+                        .bg(self.content_bg)
+                        .child(cx, body);
+                    if self.animated {
+                        body_div = body_div
+                            .enter_from(255, 0, -6, Duration::from_millis(180))
+                            .ease(Easing::EaseOut);
+                    }
+                    wrap = wrap.child(cx, body_div);
                 }
             }
         }
@@ -295,6 +311,7 @@ pub struct Accordion<'a> {
     pub active_bg: Option<Color>,
     pub rounded: u8,
     pub focus_ring: bool,
+    pub animated: bool,
     pub on_toggle_item: Option<&'a dyn Fn(usize, bool, &mut ActionScope)>,
     item_renderer: Option<AccordionItemRenderer<'a>>,
 }
@@ -330,6 +347,7 @@ impl<'a> Accordion<'a> {
             active_bg: None,
             rounded: 0,
             focus_ring: false,
+            animated: false,
             on_toggle_item: None,
             item_renderer: None,
         }
@@ -339,6 +357,13 @@ impl<'a> Accordion<'a> {
     #[inline(always)]
     pub const fn width(mut self, width: i16) -> Self {
         self.width = width;
+        self
+    }
+
+    /// 启用或禁用手风琴条目展开过渡动画。
+    #[inline(always)]
+    pub const fn animated(mut self, enabled: bool) -> Self {
+        self.animated = enabled;
         self
     }
 
@@ -439,6 +464,7 @@ impl<'a> Widget<'a> for Accordion<'a> {
             col.active_bg = self.active_bg;
             col.rounded = self.rounded;
             col.focus_ring = self.focus_ring;
+            col.animated = self.animated;
             if let Some(cb) = on_toggle {
                 let item_cb = cx.arena().alloc(move |next: bool, scope: &mut ActionScope| {
                     cb(idx, next, scope);

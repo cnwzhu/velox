@@ -1636,6 +1636,45 @@ impl PartialEq for ExternalTextureSpec {
 impl Eq for ExternalTextureSpec {}
 
 /// 按需分配于 `ScratchArena` 的 `Div` 高级渲染特效包（多色标渐变、独立圆角、混合模式、滤镜、2D 变换、路径裁剪与外部零拷贝纹理）。
+/// 冷路径高级布局扩展（按需挂接于 [`PaintEffects::layout_ext`]，常规节点 0 字节占用）：
+/// 支持 `aspect-ratio` 纵横比、CSS Grid 跨列与 `fr` 列权重、`position: sticky` 吸顶、RTL 镜像与嵌套滚动链。
+#[derive(Copy, Clone, Debug)]
+pub struct LayoutExtras<'a> {
+    /// 纵横比约束 `width / height`（如 `16.0 / 9.0`，`<= 0.0` 表示关闭）。
+    pub aspect_ratio: f32,
+    /// CSS Grid 子项跨列数（默认 `1`）。
+    pub grid_col_span: u8,
+    /// CSS Grid 自定义列权重数组（如 `&[1, 2, 1]` 对应 `1fr 2fr 1fr`）。
+    pub grid_template_fr: &'a [u16],
+    /// `position: sticky` 相对最近滚动视口顶部的吸顶偏移（`None` 表示普通流式排布）。
+    pub sticky_top: Option<i16>,
+    /// RTL 布局镜像（`FlexDir::Row` 自动水平从右向左排布子元素）。
+    pub rtl: bool,
+    /// 嵌套滚动链：内层滚动触顶/触底时是否继续向上冒泡给外层滚动容器（默认 `true`）。
+    pub scroll_chaining: bool,
+}
+
+impl<'a> LayoutExtras<'a> {
+    pub const EMPTY: Self = Self {
+        aspect_ratio: 0.0,
+        grid_col_span: 1,
+        grid_template_fr: &[],
+        sticky_top: None,
+        rtl: false,
+        scroll_chaining: true,
+    };
+
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.aspect_ratio <= 0.0
+            && self.grid_col_span <= 1
+            && self.grid_template_fr.is_empty()
+            && self.sticky_top.is_none()
+            && !self.rtl
+            && self.scroll_chaining
+    }
+}
+
 #[derive(Copy, Clone, Debug, Default)]
 pub struct PaintEffects<'a> {
     pub bg_paint: Option<Paint<'a>>,
@@ -1647,6 +1686,7 @@ pub struct PaintEffects<'a> {
     pub transform: Option<Transform2D>,
     pub clip_path: Option<StrRef<'a>>,
     pub external_texture: Option<&'a ExternalTextureSpec>,
+    pub layout_ext: Option<&'a LayoutExtras<'a>>,
 }
 
 impl<'a> PaintEffects<'a> {
@@ -1660,6 +1700,7 @@ impl<'a> PaintEffects<'a> {
         transform: None,
         clip_path: None,
         external_texture: None,
+        layout_ext: None,
     };
 
     /// 判断是否未配置任何高级视觉特效。
@@ -1674,6 +1715,7 @@ impl<'a> PaintEffects<'a> {
             && self.transform.is_none()
             && self.clip_path.is_none()
             && self.external_texture.is_none()
+            && self.layout_ext.is_none()
     }
 
     /// 判断是否需要创建独立离屏合成图层（`PushLayer` / `PopLayer`）。

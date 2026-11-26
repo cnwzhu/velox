@@ -889,3 +889,126 @@ fn test_themed_widgets_zero_heap_signal_bind() {
     tab.dispose();
     sl.dispose();
 }
+
+#[test]
+fn test_motion_presets_and_spring_widgets() {
+    use velox_component::{
+        Accordion, AccordionItem, Button, Dialog, MotionPreset, Notification, Popover, Sheet,
+        SheetSide, SpringCard, SpringProgress, SpringReveal,
+    };
+
+    assert_eq!(MotionPreset::Snappy.easing(), Easing::Spring);
+    assert_eq!(MotionPreset::Bouncy.easing(), Easing::EaseOutBack);
+    assert_eq!(MotionPreset::Instant.duration_ms(), 0);
+
+    static ITEMS: [AccordionItem; 2] = [
+        AccordionItem::new("Physics", "Second-order spring harmonic oscillator."),
+        AccordionItem::new("Zero-Heap", "Frame transient layout with zero heap churn."),
+    ];
+
+    struct MotionSuiteView {
+        pct: f32,
+        reveal: f32,
+    }
+    impl View for MotionSuiteView {
+        fn render<'a>(&mut self, cx: &'a mut Scope<Self>) -> Element<'a> {
+            div()
+                .flex_col()
+                .size_full()
+                .p(8)
+                .gap(8)
+                .child(cx, Button::new(10, "Animated Btn"))
+                .child(
+                    cx,
+                    SpringProgress::new(11, self.pct)
+                        .size(220, 10)
+                        .label("Download")
+                        .preset(MotionPreset::Bouncy),
+                )
+                .child(
+                    cx,
+                    SpringCard::new(12)
+                        .preset(MotionPreset::Snappy)
+                        .child(cx, text("Spring Card").size(12)),
+                )
+                .child(
+                    cx,
+                    SpringReveal::new(13, 40, self.reveal)
+                        .child(cx, text("Revealed Content").size(11)),
+                )
+                .child(cx, Accordion::new(14, &ITEMS, 1).width(240))
+                .child(
+                    cx,
+                    Popover::new(15, true)
+                        .trigger(cx, text("Trigger").size(11))
+                        .content(cx, text("Popover Body").size(11)),
+                )
+                .child(cx, Notification::new(16, "Done", "Synced smoothly."))
+                .child(cx, Sheet::new(17, "Drawer", SheetSide::Right, true).size(180))
+                .child(cx, Dialog::new(18, "Confirm", true).width(240))
+                .into_element(cx)
+        }
+    }
+
+    let mut engine = VeloxEngine::new(400, 320);
+    let _root = engine.mount_root(MotionSuiteView {
+        pct: 68.0,
+        reveal: 0.75,
+    });
+    let damage = engine.step_frame_dt(16);
+    assert!(!damage.is_empty());
+    assert!(!engine.cached_draw_ops().is_empty());
+}
+
+#[test]
+fn test_std_spring_animator_interrupt_velocity_and_default_component_motion() {
+    use velox_component::{
+        Accordion, AlertDialog, Button, Collapsible, Dialog, MotionPreset, Notification, Popover,
+        Sheet, SheetSide, SpringAnimator,
+    };
+
+    // 1. std 下主题组件默认自动开启动画，且支持显式关闭
+    assert!(Button::new(1, "Go").inner.animated);
+    assert!(!Button::new(1, "Go").animated(false).inner.animated);
+    assert!(Dialog::new(2, "D", true).inner.animated);
+    assert!(AlertDialog::new(3, "A", "Desc").inner.animated);
+    assert!(Sheet::new(4, "S", SheetSide::Right, true).inner.animated);
+    assert!(Notification::new(5, "N", "Msg").inner.animated);
+    assert!(Popover::new(6, true).inner.animated);
+    assert!(Accordion::new(7, &[], 0).inner.animated);
+    assert!(Collapsible::new(8, "C", true).inner.animated);
+
+    // 2. SpringAnimator 多通道物理弹簧：打断目标保留速度、脉冲激励、全部收敛后回归静止
+    let mut anim = SpringAnimator::with_preset(MotionPreset::Bouncy);
+    let k_x = SpringAnimator::key(100, 0);
+    let k_scale = SpringAnimator::key(100, 1);
+
+    anim.animate_to(k_x, 0.0, 100.0);
+    anim.animate_to(k_scale, 0.8, 1.0);
+    assert!(anim.is_active());
+    assert_eq!(anim.active_count(), 2);
+
+    // 步进 8 帧后获得正向动量
+    for _ in 0..8 {
+        assert!(anim.step_all(16));
+    }
+    let vel_before_interrupt = anim.velocity_or(k_x, 0.0);
+    assert!(vel_before_interrupt > 50.0, "spring should build velocity");
+
+    // 半途反向打断到 25.0：瞬时速度连续保留不归零
+    anim.animate_to(k_x, 0.0, 25.0);
+    assert_eq!(anim.velocity_or(k_x, 0.0), vel_before_interrupt);
+
+    // 注入速度冲量并收敛到静止（0% CPU）
+    anim.impulse(k_scale, 1.0, 12.0);
+    let mut settled = false;
+    for _ in 0..240 {
+        if !anim.step_all(16) {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled, "SpringAnimator must settle cleanly to idle");
+    assert!(!anim.is_active());
+    assert!((anim.value_or(k_x, 0.0) - 25.0).abs() < 0.2);
+}

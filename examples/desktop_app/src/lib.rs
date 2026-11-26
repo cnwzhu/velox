@@ -11,7 +11,6 @@ pub mod async_demo;
 pub mod i18n;
 pub mod reactive;
 mod stories;
-mod style;
 
 pub use async_demo::{
     run_async_platform_demo, run_tokio_http_demo, AsyncDemoReport, AsyncTaskStatus, AsyncTaskView,
@@ -20,13 +19,14 @@ pub use async_demo::{
 pub use velox_kit::prelude::block_on;
 pub use velox_kit::TokioScheduler;
 use i18n::{next_demo_locale, DESKTOP_CATALOG};
+pub use stories::chat::{ChatDemoState, ChatEntry, ChatStreamPhase};
 pub use reactive::{GallerySignals, OverviewPlaygroundView, StatusBarView};
-use style::BasePalette;
-use velox_kit::base::{
-    AlertDialog, Button, CalendarState, ContextMenu, DateSelection, Dialog, Edit, EditableText,
-    IconName, MenuItem, Metrics, Modal, Notification, NotificationVariant, RustSyntaxHighlighter,
-    Sheet, SheetSide, Sidebar, SidebarItem, SidebarSection, SimpleDate, SortDirection,
-    StatusBarItem, Svg, SyntaxEditor, SyntaxTheme, TreeState,
+use velox_kit::component::{
+    AlertDialog, Button, CalendarState, ColorPickerState, ContextMenu, DateSelection, Dialog, Edit,
+    EditableText, IconName, MenuItem, Metrics, Modal, MotionPreset, Notification,
+    NotificationVariant, OtpState, RustSyntaxHighlighter, Sheet, SheetSide, Sidebar, SidebarItem,
+    SidebarSection, SimpleDate, SortDirection, SpringAnimator, StatusBarItem, Svg, SyntaxEditor,
+    SyntaxTheme, TreeState,
 };
 use velox_kit::prelude::*;
 
@@ -64,7 +64,7 @@ impl View for GalleryCounter {
     }
 }";
 
-/// Gallery 侧边栏组件故事页枚举（12 个交互式故事页）。
+/// Gallery 侧边栏组件故事页枚举（15 个交互式故事页）。
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum GalleryStory {
     Overview,
@@ -79,6 +79,9 @@ pub enum GalleryStory {
     Data,
     SettingsIcons,
     Effects,
+    Motion,
+    EngineLab,
+    Chat,
 }
 
 /// 兼容旧命名的类型别名。
@@ -101,6 +104,9 @@ impl GalleryStory {
             Self::Data => 10,
             Self::SettingsIcons => 11,
             Self::Effects => 12,
+            Self::Motion => 13,
+            Self::EngineLab => 14,
+            Self::Chat => 15,
         }
     }
 
@@ -119,7 +125,10 @@ impl GalleryStory {
             9 => Self::Feedback,
             10 => Self::Data,
             11 => Self::SettingsIcons,
-            _ => Self::Effects,
+            12 => Self::Effects,
+            13 => Self::Motion,
+            14 => Self::EngineLab,
+            _ => Self::Chat,
         }
     }
 
@@ -174,6 +183,22 @@ impl GalleryStory {
             || name.eq_ignore_ascii_case("fx")
         {
             Some(Self::Effects)
+        } else if name.eq_ignore_ascii_case("motion")
+            || name.eq_ignore_ascii_case("spring")
+            || name.eq_ignore_ascii_case("physics")
+            || name.eq_ignore_ascii_case("animation")
+        {
+            Some(Self::Motion)
+        } else if name.eq_ignore_ascii_case("engine")
+            || name.eq_ignore_ascii_case("lab")
+            || name.eq_ignore_ascii_case("engine-lab")
+        {
+            Some(Self::EngineLab)
+        } else if name.eq_ignore_ascii_case("chat")
+            || name.eq_ignore_ascii_case("ai")
+            || name.eq_ignore_ascii_case("ai-chat")
+        {
+            Some(Self::Chat)
         } else {
             None
         }
@@ -195,6 +220,9 @@ impl GalleryStory {
             Self::Data => "story.data",
             Self::SettingsIcons => "story.icons",
             Self::Effects => "story.effects",
+            Self::Motion => "story.motion",
+            Self::EngineLab => "story.engine",
+            Self::Chat => "story.chat",
         }
     }
 }
@@ -252,6 +280,7 @@ pub struct GalleryApp {
     pub active_input_field: u8,
     pub text_input_name: EditableText<64>,
     pub text_input_pass: EditableText<64>,
+    pub password_visible: bool,
     pub number_val: i64,
     pub select_open: bool,
     pub select_idx: Option<usize>,
@@ -291,6 +320,8 @@ pub struct GalleryApp {
     pub table_sort_dir: SortDirection,
     pub list_selected: usize,
     pub tree_state: TreeState<16>,
+    pub chart_dataset_b: bool,
+    pub chart_anim_epoch: u32,
     pub vsync_enabled: bool,
     pub hidpi_enabled: bool,
     pub damage_overlay_hint: bool,
@@ -305,6 +336,28 @@ pub struct GalleryApp {
     pub fx_filter_preset: usize,
     pub fx_rotation_deg: i32,
     pub fx_clip_shape: usize,
+
+    // Motion & Physics Lab (std SpringAnimator + Carousel + Roller)
+    pub spring_anim: SpringAnimator,
+    pub motion_last_ms: u32,
+    pub motion_target_pct: f32,
+    pub motion_reveal_open: bool,
+    pub motion_carousel_idx: usize,
+    pub motion_roller_idx: usize,
+    pub motion_accordion_mask: u32,
+    pub motion_tab_idx: usize,
+
+    // Engine Lab & Extended Component States
+    pub lab_object_fit_idx: usize,
+    pub lab_rtl_enabled: bool,
+    pub lab_radar_angle: i32,
+    pub inspector_enabled: bool,
+    pub feedback_rating: u8,
+    pub input_otp: OtpState<6>,
+    pub input_color_picker: ColorPickerState,
+
+    // AI Chat (gpui-kit animated chat story)
+    pub chat: stories::chat::ChatDemoState,
 }
 
 /// 兼容旧示例主视图命名的类型别名。
@@ -325,6 +378,14 @@ impl GalleryApp {
         tree_state.select(3);
 
         let signals = GallerySignals::new(ThemeMode::Dark, Locale::EN_US, GalleryStory::Overview);
+        let mut spring_anim = SpringAnimator::with_preset(MotionPreset::Snappy);
+        spring_anim.jump_to(stories::motion::MOTION_CH_TARGET, 64.0);
+        spring_anim.jump_to(stories::motion::MOTION_CH_PROGRESS, 64.0);
+        spring_anim.jump_to(stories::motion::MOTION_CH_REVEAL, 1.0);
+        let mut input_otp = OtpState::<6>::new();
+        for ch in "4829".chars() {
+            input_otp.push_char(ch);
+        }
 
         Self {
             active_story: GalleryStory::Overview,
@@ -353,6 +414,7 @@ impl GalleryApp {
             active_input_field: 0,
             text_input_name: EditableText::from_str("velox-base"),
             text_input_pass: EditableText::from_str("s3cr3t"),
+            password_visible: false,
             number_val: 144,
             select_open: false,
             select_idx: Some(0),
@@ -390,6 +452,8 @@ impl GalleryApp {
             table_sort_dir: SortDirection::Asc,
             list_selected: 0,
             tree_state,
+            chart_dataset_b: false,
+            chart_anim_epoch: 0,
             vsync_enabled: true,
             hidpi_enabled: true,
             damage_overlay_hint: true,
@@ -402,6 +466,22 @@ impl GalleryApp {
             fx_filter_preset: 0,
             fx_rotation_deg: 18,
             fx_clip_shape: 0,
+            spring_anim,
+            motion_last_ms: 0,
+            motion_target_pct: 64.0,
+            motion_reveal_open: true,
+            motion_carousel_idx: 0,
+            motion_roller_idx: 0,
+            motion_accordion_mask: 0b01,
+            motion_tab_idx: 1,
+            lab_object_fit_idx: 1,
+            lab_rtl_enabled: false,
+            lab_radar_angle: 35,
+            inspector_enabled: false,
+            feedback_rating: 4,
+            input_otp,
+            input_color_picker: ColorPickerState::from_color(Color::rgb(59, 130, 246)),
+            chat: stories::chat::ChatDemoState::new(),
         }
     }
 
@@ -488,6 +568,14 @@ impl View for GalleryApp {
                 .event_count
                 .update(|n| *n = n.saturating_add(1));
         });
+        let on_toggle_hud = cx.listener(|this, _: ClickEvent, _acx| {
+            this.inspector_enabled = !this.inspector_enabled;
+            this.event_count = this.event_count.saturating_add(1);
+            this.last_synced_root_events = this.event_count;
+            this.signals
+                .event_count
+                .update(|n| *n = n.saturating_add(1));
+        });
 
         // 浮层关闭回调
         let raw_close_about = cx.action(|this, _acx| {
@@ -560,7 +648,20 @@ impl View for GalleryApp {
         };
         let active_story_label = cx.t(self.active_story.i18n_key());
 
-        let p = BasePalette::from_theme(theme);
+        let hud_btn = if self.inspector_enabled {
+            Button::new(106, cx.t("toolbar.hud"))
+                .info()
+                .small()
+                .w(54)
+                .on_click(on_toggle_hud)
+        } else {
+            Button::new(106, cx.t("toolbar.hud"))
+                .outline()
+                .small()
+                .w(54)
+                .on_click(on_toggle_hud)
+        };
+
         let toolbar = div()
             .id(100)
             .flex_row()
@@ -569,8 +670,8 @@ impl View for GalleryApp {
             .px(16)
             .items_center()
             .justify_between()
-            .bg(p.surface)
-            .border(1, p.border)
+            .bg(theme.card)
+            .border(1, theme.border)
             .child(
                 cx,
                 div()
@@ -578,21 +679,23 @@ impl View for GalleryApp {
                     .gap(10)
                     .items_center()
                     .child(cx, Svg::new(105, VELOX_LOGO_SVG).square(24))
-                    .child(cx, text(cx.t("app.title")).size(15).color(p.fg))
+                    .child(cx, text(cx.t("app.title")).size(15).color(theme.foreground))
                     .child(
                         cx,
                         div()
                             .px(8)
                             .py(2)
-                            .bg(p.surface_subtle)
-                            .border(1, p.border)
+                            .rounded(6)
+                            .bg(theme.secondary)
+                            .border(1, theme.border)
                             .child(
                                 cx,
                                 text(active_story_label)
                                     .size(11)
-                                    .color(p.muted_fg),
+                                    .color(theme.muted_foreground),
                             ),
-                    ),
+                    )
+                    .child(cx, hud_btn),
             )
             .child(
                 cx,
@@ -602,47 +705,39 @@ impl View for GalleryApp {
                     .items_center()
                     .child(
                         cx,
-                        style::btn_toolbar(
-                            Button::new(104, self.locale.native_short_name())
-                                .w(64)
-                                .on_click(on_cycle_locale),
-                            false,
-                            theme,
-                        ),
+                        Button::new(104, self.locale.native_short_name())
+                            .outline()
+                            .small()
+                            .w(64)
+                            .on_click(on_cycle_locale),
                     )
                     .child(
                         cx,
-                        style::btn_toolbar(
-                            Button::new(101, cx.t("toolbar.toast"))
-                                .w(84)
-                                .on_click(on_trigger_toast),
-                            true,
-                            theme,
-                        ),
+                        Button::new(101, cx.t("toolbar.toast"))
+                            .primary()
+                            .small()
+                            .w(84)
+                            .on_click(on_trigger_toast),
                     )
                     .child(
                         cx,
-                        style::btn_toolbar(
-                            Button::new(102, theme_btn_label)
-                                .w(96)
-                                .on_click(on_toggle_theme),
-                            false,
-                            theme,
-                        ),
+                        Button::new(102, theme_btn_label)
+                            .outline()
+                            .small()
+                            .w(96)
+                            .on_click(on_toggle_theme),
                     )
                     .child(
                         cx,
-                        style::btn_toolbar(
-                            Button::new(103, cx.t("toolbar.about"))
-                                .w(68)
-                                .on_click(on_open_about),
-                            false,
-                            theme,
-                        ),
+                        Button::new(103, cx.t("toolbar.about"))
+                            .outline()
+                            .small()
+                            .w(68)
+                            .on_click(on_open_about),
                     ),
             );
 
-        // 2. 左侧分组可折叠导航栏（11 个 Story 分 4 大组）
+        // 2. 左侧分组可折叠导航栏（14 个 Story 分 4 大组，直接使用 velox-component::Sidebar）
         let sec_actions = cx.arena().alloc_iter([
             SidebarItem::new(GalleryStory::Overview.id(), cx.t("story.overview").as_str(), "*")
                 .icon_name(IconName::Info),
@@ -678,6 +773,15 @@ impl View for GalleryApp {
             SidebarItem::new(GalleryStory::Effects.id(), cx.t("story.effects").as_str(), "F")
                 .icon_name(IconName::Star)
                 .badge("FX"),
+            SidebarItem::new(GalleryStory::Motion.id(), cx.t("story.motion").as_str(), "M")
+                .icon_name(IconName::Star)
+                .badge("SPR"),
+            SidebarItem::new(GalleryStory::EngineLab.id(), cx.t("story.engine").as_str(), "E")
+                .icon_name(IconName::Settings)
+                .badge("PRO"),
+            SidebarItem::new(GalleryStory::Chat.id(), cx.t("story.chat").as_str(), "C")
+                .icon_name(IconName::Info)
+                .badge("AI"),
         ]);
 
         let sidebar_sections = cx.arena().alloc_iter([
@@ -688,15 +792,12 @@ impl View for GalleryApp {
         ]);
 
         let sidebar_w = if self.sidebar_collapsed { 52 } else { 220 };
-        let sidebar = style::sidebar(
-            Sidebar::new(200, cx.t("sidebar.title").as_str(), sidebar_sections)
-                .size(220, 0)
-                .collapsed(self.sidebar_collapsed)
-                .active(Some(self.active_story.id()))
-                .on_select(on_select_story)
-                .on_toggle_collapse(raw_toggle_sidebar),
-            theme,
-        );
+        let sidebar = Sidebar::new(200, cx.t("sidebar.title").as_str(), sidebar_sections)
+            .size(220, 0)
+            .collapsed(self.sidebar_collapsed)
+            .active(Some(self.active_story.id()))
+            .on_select(on_select_story)
+            .on_toggle_collapse(raw_toggle_sidebar);
 
         let sidebar_panel = div()
             .id(250)
@@ -704,7 +805,7 @@ impl View for GalleryApp {
             .h_full()
             .bg(theme.sidebar)
             .border(1, theme.border)
-            .scrollable(240)
+            .scrollable(280)
             .overflow_hidden()
             .child(cx, sidebar);
 
@@ -722,12 +823,18 @@ impl View for GalleryApp {
             GalleryStory::Data => self.render_story_data(cx, theme),
             GalleryStory::SettingsIcons => self.render_story_settings_icons(cx, theme),
             GalleryStory::Effects => self.render_story_effects(cx, theme),
+            GalleryStory::Motion => self.render_story_motion(cx, theme),
+            GalleryStory::EngineLab => self.render_story_engine_lab(cx, theme),
+            GalleryStory::Chat => self.render_story_chat(cx, theme),
         };
 
-        let content_scroll_max = if self.active_story == GalleryStory::Effects {
-            760
-        } else {
-            420
+        let content_scroll_max = match self.active_story {
+            GalleryStory::Effects | GalleryStory::Data | GalleryStory::Inputs => 760,
+            GalleryStory::Motion
+            | GalleryStory::EngineLab
+            | GalleryStory::Feedback
+            | GalleryStory::Chat => 620,
+            _ => 420,
         };
 
         let body_row = div()
@@ -781,13 +888,13 @@ impl View for GalleryApp {
                 .w_full()
                 .h(26)
                 .px(12)
-                .bg(p.surface)
-                .border(1, p.border)
+                .bg(theme.card)
+                .border(1, theme.border)
                 .items_center()
                 .justify_between()
-                .child(cx, text(left_item.label).size(11).color(p.muted_fg))
-                .child(cx, text(center_item.label).size(11).color(p.fg))
-                .child(cx, text(right_item.label).size(11).color(p.muted_fg))
+                .child(cx, text(left_item.label).size(11).color(theme.muted_foreground))
+                .child(cx, text(center_item.label).size(11).color(theme.foreground))
+                .child(cx, text(right_item.label).size(11).color(theme.muted_foreground))
                 .into_element(cx)
         };
 
@@ -795,12 +902,12 @@ impl View for GalleryApp {
             .id(1)
             .size_full()
             .flex_col()
-            .bg(p.canvas)
+            .bg(theme.background)
             .child(cx, toolbar)
             .child(cx, body_row)
             .child(cx, status_bar_elem);
 
-        // 5. 顶层浮动通知层
+        // 5. 顶层浮动通知层（直接使用 velox-component::Notification，自带 std 物理弹簧滑入动画）
         if self.notification_open {
             root = root.child(
                 cx,
@@ -814,21 +921,18 @@ impl View for GalleryApp {
                     .pr(16)
                     .child(
                         cx,
-                        style::notification(
-                            Notification::new(
-                                800,
-                                cx.t("notif.title").as_str(),
-                                cx.t("notif.body").as_str(),
-                            )
-                            .variant(NotificationVariant::Success)
-                            .on_dismiss(raw_dismiss_notif),
-                            theme,
-                        ),
+                        Notification::new(
+                            800,
+                            cx.t("notif.title").as_str(),
+                            cx.t("notif.body").as_str(),
+                        )
+                        .variant(NotificationVariant::Success)
+                        .on_dismiss(raw_dismiss_notif),
                     ),
             );
         }
 
-        // 6. Overlays Story 交互式演示浮层（Standard Dialog / AlertDialog / Modal / Sheet）
+        // 6. Overlays Story 交互式演示浮层（直接使用 velox-component::{Dialog, AlertDialog, Modal, Sheet}，自带 std 弹簧/回弹入场动画）
         if self.demo_dialog_open {
             root = root.child(
                 cx,
@@ -844,30 +948,24 @@ impl View for GalleryApp {
                     .bg(Color::rgba(0, 0, 0, 145))
                     .child(
                         cx,
-                        style::dialog(
-                            Dialog::new(911, "Edit Component Tokens", true)
-                                .width(400)
-                                .description("Headless Velox Dialog styled with 0px radius, vector SVG close button & Escape dismiss.")
-                                .content(
-                                    cx,
-                                    text("Background hits are strictly occluded while this dialog is open.")
-                                        .size(12)
-                                        .color(p.muted_fg),
-                                )
-                                .on_close(raw_close_demo_dialog)
-                                .footer(
-                                    cx,
-                                    style::btn_solid(
-                                        Button::new(912, "Done")
-                                            .font_size(12)
-                                            .w(80)
-                                            .h(28)
-                                            .on_click(on_close_demo_dialog_btn),
-                                        theme,
-                                    ),
-                                ),
-                            theme,
-                        ),
+                        Dialog::new(911, "Edit Component Tokens", true)
+                            .width(400)
+                            .description("Themed velox-component Dialog with EaseOutBack spring entry, SVG close & Escape dismiss.")
+                            .content(
+                                cx,
+                                text("Background hits are strictly occluded while this dialog is open.")
+                                    .size(12)
+                                    .color(theme.muted_foreground),
+                            )
+                            .on_close(raw_close_demo_dialog)
+                            .footer(
+                                cx,
+                                Button::new(912, "Done")
+                                    .primary()
+                                    .small()
+                                    .w(80)
+                                    .on_click(on_close_demo_dialog_btn),
+                            ),
                     ),
             );
         }
@@ -887,17 +985,14 @@ impl View for GalleryApp {
                     .bg(Color::rgba(0, 0, 0, 145))
                     .child(
                         cx,
-                        style::alert_dialog(
-                            AlertDialog::new(
-                                921,
-                                "Delete Workspace Cache?",
-                                "This action uses explicit destructive styling and can be cancelled with Escape.",
-                            )
-                            .destructive(true)
-                            .on_confirm(raw_confirm_alert)
-                            .on_cancel(raw_cancel_alert),
-                            theme,
-                        ),
+                        AlertDialog::new(
+                            921,
+                            "Delete Workspace Cache?",
+                            "This action uses velox-component destructive styling & spring enter animation.",
+                        )
+                        .destructive(true)
+                        .on_confirm(raw_confirm_alert)
+                        .on_cancel(raw_cancel_alert),
                     ),
             );
         }
@@ -905,37 +1000,31 @@ impl View for GalleryApp {
         if self.demo_modal_open {
             root = root.child(
                 cx,
-                style::modal(
-                    Modal::new(930, "Centered Sharp Modal")
-                        .size(360, 170)
-                        .on_close(raw_close_modal)
-                        .content(
-                            cx,
-                            div()
-                                .flex_col()
-                                .gap(12)
-                                .child(
+                Modal::new(930, "Centered Themed Modal")
+                    .size(360, 170)
+                    .on_close(raw_close_modal)
+                    .content(
+                        cx,
+                        div()
+                            .flex_col()
+                            .gap(12)
+                            .child(
+                                cx,
+                                text("Click the dark backdrop, click X, or press Escape to close.")
+                                    .size(12)
+                                    .color(theme.muted_foreground),
+                            )
+                            .child(
+                                cx,
+                                div().flex_row().justify_end().child(
                                     cx,
-                                    text("Click the dark backdrop, click X, or press Escape to close.")
-                                        .size(12)
-                                        .color(p.muted_fg),
-                                )
-                                .child(
-                                    cx,
-                                    div().flex_row().justify_end().child(
-                                        cx,
-                                        style::btn_solid(
-                                            Button::new(931, "Dismiss")
-                                                .font_size(12)
-                                                .h(28)
-                                                .on_click(on_close_modal_btn),
-                                            theme,
-                                        ),
-                                    ),
+                                    Button::new(931, "Dismiss")
+                                        .primary()
+                                        .small()
+                                        .on_click(on_close_modal_btn),
                                 ),
-                        ),
-                    theme,
-                ),
+                            ),
+                    ),
             );
         }
 
@@ -955,30 +1044,27 @@ impl View for GalleryApp {
                     .bg(Color::rgba(0, 0, 0, 130))
                     .child(
                         cx,
-                        style::sheet(
-                            Sheet::new(941, "Inspector Drawer", SheetSide::Right, true)
-                                .size(300)
-                                .on_dismiss(raw_close_sheet)
-                                .content(
-                                    cx,
-                                    div()
-                                        .flex_col()
-                                        .gap(8)
-                                        .child(
-                                            cx,
-                                            text("Slide-in Sheet with SVG Close icon and Escape dismissal.")
-                                                .size(12)
-                                                .color(p.muted_fg),
-                                        )
-                                        .child(
-                                            cx,
-                                            text("Style: App-owned 0px sharp monochrome surface")
-                                                .size(11)
-                                                .color(p.fg),
-                                        ),
-                                ),
-                            theme,
-                        ),
+                        Sheet::new(941, "Inspector Drawer", SheetSide::Right, true)
+                            .size(300)
+                            .on_dismiss(raw_close_sheet)
+                            .content(
+                                cx,
+                                div()
+                                    .flex_col()
+                                    .gap(8)
+                                    .child(
+                                        cx,
+                                        text("Directional Spring slide-in Sheet from velox-component.")
+                                            .size(12)
+                                            .color(theme.muted_foreground),
+                                    )
+                                    .child(
+                                        cx,
+                                        text("Supports Left / Right / Top / Bottom edges & Escape dismiss")
+                                            .size(11)
+                                            .color(theme.foreground),
+                                    ),
+                            ),
                     ),
             );
         }
@@ -999,30 +1085,56 @@ impl View for GalleryApp {
                     .bg(Color::rgba(0, 0, 0, 145))
                     .child(
                         cx,
-                        style::dialog(
-                            Dialog::new(700, cx.t("about.title").as_str(), true)
-                                .width(400)
-                                .description(cx.t("about.desc").as_str())
-                                .content(
-                                    cx,
-                                    text(cx.t("about.body"))
-                                        .size(12)
-                                        .color(p.muted_fg),
-                                )
-                                .on_close(raw_close_about)
-                                .footer(
-                                    cx,
-                                    style::btn_solid(
-                                        Button::new(705, cx.t("about.close"))
-                                            .font_size(12)
-                                            .w(84)
-                                            .h(30)
-                                            .on_click(on_close_about_btn),
-                                        theme,
-                                    ),
-                                ),
-                            theme,
-                        ),
+                        Dialog::new(700, cx.t("about.title").as_str(), true)
+                            .width(400)
+                            .description(cx.t("about.desc").as_str())
+                            .content(
+                                cx,
+                                text(cx.t("about.body"))
+                                    .size(12)
+                                    .color(theme.muted_foreground),
+                            )
+                            .on_close(raw_close_about)
+                            .footer(
+                                cx,
+                                Button::new(705, cx.t("about.close"))
+                                    .primary()
+                                    .small()
+                                    .w(84)
+                                    .on_click(on_close_about_btn),
+                            ),
+                    ),
+            );
+        }
+
+        // 7.5 内置 DevTools Inspector HUD 实时浮层条
+        if self.inspector_enabled {
+            root = root.child(
+                cx,
+                div()
+                    .id(860)
+                    .pos(236, 52)
+                    .overlay()
+                    .px(10)
+                    .py(5)
+                    .rounded(6)
+                    .bg(Color::rgba(15, 23, 42, 235))
+                    .border(1, theme.primary)
+                    .flex_row()
+                    .gap(12)
+                    .items_center()
+                    .child(
+                        cx,
+                        text(fmt!(
+                            cx,
+                            "DEVTOOLS HUD  |  Story: {:?}  |  Springs: {} active  |  Events: {}  |  Preset: {}",
+                            self.active_story,
+                            self.spring_anim.active_count(),
+                            self.event_count,
+                            self.spring_anim.preset().label()
+                        ))
+                        .size(11)
+                        .color(Color::rgb(125, 211, 252)),
                     ),
             );
         }
@@ -1124,13 +1236,10 @@ impl View for GalleryApp {
             let my = wy.clamp(6, DEFAULT_DESKTOP_HEIGHT - 165);
             root = root.child(
                 cx,
-                style::context_menu(
-                    ContextMenu::new(980, mx, my, true, ctx_items)
-                        .width(178)
-                        .on_select(on_ctx_select)
-                        .on_dismiss(on_ctx_dismiss),
-                    theme,
-                ),
+                ContextMenu::new(980, mx, my, true, ctx_items)
+                    .width(178)
+                    .on_select(on_ctx_select)
+                    .on_dismiss(on_ctx_dismiss),
             );
         }
 

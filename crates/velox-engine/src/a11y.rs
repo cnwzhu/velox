@@ -330,6 +330,56 @@ pub fn collect_a11y_nodes<'a, const CAP: usize>(
                     scroll_info: None,
                 });
             }
+            DrawPayload::RichText(rt) => {
+                if let Some(first_span) = rt.spans.first() {
+                    let parent = find_best_parent_id(out.as_slice(), op.bounds, u32::MAX, true);
+                    let ordinal = out
+                        .as_slice()
+                        .iter()
+                        .filter(|n| n.role == A11yRole::Text && n.parent_id == Some(parent))
+                        .count() as u32;
+                    let id = op.id.unwrap_or_else(|| {
+                        crate::pod::derive_scoped_id(parent, 0xA117_7E88, ordinal)
+                    });
+                    let _ = out.push(A11yNode {
+                        id,
+                        parent_id: Some(parent),
+                        role: A11yRole::Text,
+                        bounds: op.bounds,
+                        label: Some(first_span.text),
+                        value_text: None,
+                        focusable: false,
+                        focused: false,
+                        disabled: false,
+                        checked: None,
+                        scroll_info: None,
+                    });
+                }
+            }
+            DrawPayload::DecodedImage(_) | DrawPayload::Vector(_) => {
+                let parent = find_best_parent_id(out.as_slice(), op.bounds, u32::MAX, true);
+                let ordinal = out
+                    .as_slice()
+                    .iter()
+                    .filter(|n| n.role == A11yRole::Image && n.parent_id == Some(parent))
+                    .count() as u32;
+                let id = op
+                    .id
+                    .unwrap_or_else(|| crate::pod::derive_scoped_id(parent, 0xA117_16AA, ordinal));
+                let _ = out.push(A11yNode {
+                    id,
+                    parent_id: Some(parent),
+                    role: A11yRole::Image,
+                    bounds: op.bounds,
+                    label: None,
+                    value_text: None,
+                    focusable: false,
+                    focused: false,
+                    disabled: false,
+                    checked: None,
+                    scroll_info: None,
+                });
+            }
             DrawPayload::Quad { .. }
             | DrawPayload::StyledQuad(_)
             | DrawPayload::PushLayer(_)

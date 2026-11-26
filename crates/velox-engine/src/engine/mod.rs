@@ -73,6 +73,9 @@ impl Default for GestureConfig {
     }
 }
 
+/// 引擎内置作用域快捷键表容量。
+pub const ENGINE_KEYMAP_CAP: usize = 64;
+
 /// Velox 核心渲染与事件调度引擎。
 pub struct VeloxEngine {
     pool: PodPool,
@@ -119,6 +122,14 @@ pub struct VeloxEngine {
     drag_fired_on_down: bool,
     long_press_fired: bool,
     long_press_handled: bool,
+    pointer_capture_id: Option<u32>,
+    active_drag_payload: Option<crate::pod::DragPayload>,
+    system_theme_dark: bool,
+    last_pinch_delta_x1000: i16,
+    last_rotate_deg10: i16,
+    file_drop_hover: Option<(i16, i16)>,
+    dropped_files: std::vec::Vec<std::path::PathBuf>,
+    keymap: crate::keymap::Keymap<ENGINE_KEYMAP_CAP>,
 }
 
 impl VeloxEngine {
@@ -170,7 +181,113 @@ impl VeloxEngine {
             drag_fired_on_down: false,
             long_press_fired: false,
             long_press_handled: false,
+            pointer_capture_id: None,
+            active_drag_payload: None,
+            system_theme_dark: true,
+            last_pinch_delta_x1000: 0,
+            last_rotate_deg10: 0,
+            file_drop_hover: None,
+            dropped_files: std::vec::Vec::new(),
+            keymap: crate::keymap::Keymap::new(),
         }
+    }
+
+    /// 显式设置指针捕获目标元素 ID（拖拽或滑块期间锁定后续指针事件不脱靶）。
+    #[inline(always)]
+    pub fn set_pointer_capture(&mut self, hit_id: u32) {
+        self.pointer_capture_id = Some(hit_id);
+    }
+
+    /// 释放当前指针捕获。
+    #[inline(always)]
+    pub fn release_pointer_capture(&mut self) {
+        self.pointer_capture_id = None;
+    }
+
+    /// 获取当前正在捕获指针的元素 ID。
+    #[inline(always)]
+    pub const fn pointer_capture_id(&self) -> Option<u32> {
+        self.pointer_capture_id
+    }
+
+    /// 开始一次应用内跨控件拖拽并附加自定义载荷 [`DragPayload`](crate::pod::DragPayload)。
+    #[inline(always)]
+    pub fn begin_drag_payload(&mut self, payload: crate::pod::DragPayload) {
+        self.active_drag_payload = Some(payload);
+        self.interaction_dirty = true;
+    }
+
+    /// 查询当前活跃的应用内拖拽载荷。
+    #[inline(always)]
+    pub const fn active_drag_payload(&self) -> Option<crate::pod::DragPayload> {
+        self.active_drag_payload
+    }
+
+    /// 消费并结束当前应用内拖拽载荷。
+    #[inline(always)]
+    pub fn take_drag_payload(&mut self) -> Option<crate::pod::DragPayload> {
+        self.interaction_dirty = true;
+        self.active_drag_payload.take()
+    }
+
+    /// 查询当前宿主操作系统是否处于暗黑模式（随 `InputEvent::SystemThemeChanged` 自动热更新）。
+    #[inline(always)]
+    pub const fn system_theme_is_dark(&self) -> bool {
+        self.system_theme_dark
+    }
+
+    /// 获取最近一次双指缩放千分比增量（如 `+50` 表示放大 5%）。
+    #[inline(always)]
+    pub const fn last_pinch_delta_x1000(&self) -> i16 {
+        self.last_pinch_delta_x1000
+    }
+
+    /// 获取最近一次双指旋转增量（单位 `0.1°`）。
+    #[inline(always)]
+    pub const fn last_rotate_deg10(&self) -> i16 {
+        self.last_rotate_deg10
+    }
+
+    /// 查询当前外部 OS 文件拖拽悬停坐标（未悬停返回 `None`）。
+    #[inline(always)]
+    pub const fn file_drop_hover_pos(&self) -> Option<(i16, i16)> {
+        self.file_drop_hover
+    }
+
+    /// 记录外部 OS 拖入的文件路径并派发 `FileDropped` 事件。
+    pub fn push_dropped_file(&mut self, path: std::path::PathBuf, x: i16, y: i16) {
+        self.dropped_files.push(path);
+        self.file_drop_hover = None;
+        self.interaction_dirty = true;
+        let _ = (x, y);
+    }
+
+    /// 读取并清空所有已拖入窗口的外部 OS 文件路径。
+    pub fn take_dropped_files(&mut self) -> std::vec::Vec<std::path::PathBuf> {
+        core::mem::take(&mut self.dropped_files)
+    }
+
+    /// 只读访问引擎作用域快捷键路由表 [`Keymap`](crate::keymap::Keymap)。
+    #[inline(always)]
+    pub fn keymap(&self) -> &crate::keymap::Keymap<ENGINE_KEYMAP_CAP> {
+        &self.keymap
+    }
+
+    /// 可变访问引擎作用域快捷键路由表（用于注册单键或弦键命令绑定）。
+    #[inline(always)]
+    pub fn keymap_mut(&mut self) -> &mut crate::keymap::Keymap<ENGINE_KEYMAP_CAP> {
+        &mut self.keymap
+    }
+
+    /// 结合当前引擎修饰键状态与焦点作用域链解析快捷键命令（支持两段弦键与超时复位）。
+    pub fn resolve_key_action(
+        &mut self,
+        context_chain: &[&str],
+        key: crate::pod::KeyCode,
+    ) -> crate::keymap::KeymapMatch {
+        let stroke = crate::keymap::KeyStroke::new(key, self.modifiers);
+        let now_ms = self.frame_scope.now_ms();
+        self.keymap.resolve(context_chain, stroke, now_ms)
     }
 
     /// 在未初始化静态槽位中原地构造 [`VeloxEngine`]，彻底消除 MCU 上先在栈上构造再拷贝的峰值栈开销。
@@ -414,6 +531,13 @@ impl VeloxEngine {
             self.invalidate_layout_cache();
             self.pool.mark_all_dirty();
         }
+    }
+
+    /// 强制标记整帧为脏并在下一帧完整重绘视口（适用于离屏截图导出或外部显存重建）。
+    pub fn force_full_repaint(&mut self) {
+        self.first_frame = true;
+        self.invalidate_layout_cache();
+        self.pool.mark_all_dirty();
     }
 
     /// 返回当前引擎生效的全局主题配色（[`CoreTheme`]）。

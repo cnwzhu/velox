@@ -150,6 +150,7 @@ pub struct AlertDialog<'a> {
     pub btn_rounded: u8,
     pub shadow: Option<(u8, i8, i8, Color)>,
     pub focus_ring: bool,
+    pub animated: bool,
     pub style: Style,
     pub style_ext: StyleExt,
     pub on_confirm: Option<&'a dyn Fn(&mut ActionScope)>,
@@ -186,6 +187,7 @@ impl<'a> AlertDialog<'a> {
             btn_rounded: 0,
             shadow: None,
             focus_ring: false,
+            animated: false,
             style: Style::DEFAULT,
             style_ext: StyleExt::DEFAULT,
             on_confirm: None,
@@ -198,6 +200,13 @@ impl<'a> AlertDialog<'a> {
     #[inline(always)]
     pub const fn destructive(mut self, destructive: bool) -> Self {
         self.destructive = destructive;
+        self
+    }
+
+    /// 启用或禁用弹窗入场弹性过渡动画。
+    #[inline(always)]
+    pub const fn animated(mut self, enabled: bool) -> Self {
+        self.animated = enabled;
         self
     }
 
@@ -360,6 +369,11 @@ impl<'a> Widget<'a> for AlertDialog<'a> {
             );
         if let Some(cb) = self.on_cancel {
             panel = panel.on_navigate_back(cb);
+        }
+        if self.animated {
+            panel = panel
+                .enter_from(255, 0, 14, Duration::from_millis(210))
+                .ease(Easing::EaseOutBack);
         }
         panel = self.style_ext.apply_to_div(panel, self.style);
         if let Some(renderer) = self.backdrop_renderer {

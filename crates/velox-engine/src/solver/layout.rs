@@ -332,6 +332,23 @@ fn pass1_horizontal_measure_inner(
             node.min_size = img.width;
             node.pref_size = img.width;
         }
+        Element::RichText(rt) => {
+            let (tw, _th) = crate::text_rich::measure_rich_text_box(rt, 0);
+            node.min_size = if rt.nowrap {
+                tw
+            } else {
+                (rt.default_font_size.max(8) as i16).min(tw)
+            };
+            node.pref_size = tw;
+        }
+        Element::DecodedImage(img) => {
+            node.min_size = img.width;
+            node.pref_size = img.width;
+        }
+        Element::Vector(vec_spec) => {
+            node.min_size = vec_spec.width;
+            node.pref_size = vec_spec.width;
+        }
         Element::SubView { .. } => {
             node.min_size = 0;
             node.pref_size = 0;
@@ -420,12 +437,49 @@ pub(super) fn pass2_horizontal_assign_with_pool(
 
     match div.style.flex_dir() {
         _ if div.grid_cols > 0 => {
-            // 二维网格布局（Grid）：按 `grid_cols` 等分水平单元格宽度
-            let cols = (div.grid_cols as i16).max(1);
+            // 二维网格布局（Grid）：支持等分列、自定义 `fr` 权重列（`grid_template_fr`）与子项跨列（`grid_col_span`）
+            let cols = (div.grid_cols as usize).max(1);
             let gap = div.style.gap as i16;
-            let total_gap = gap.saturating_mul(cols - 1);
-            let cell_w = (inner_w.saturating_sub(total_gap).max(0)) / cols;
-            let mut flow_idx: i16 = 0;
+            let total_gap = gap.saturating_mul((cols as i16) - 1);
+            let avail_tracks = inner_w.saturating_sub(total_gap).max(0);
+            let fr_weights: &[u16] = div
+                .layout_ext()
+                .map(|l| l.grid_template_fr)
+                .unwrap_or(&[]);
+
+            // 预计算每列的 (offset_x, width)（支持最多 16 列 `fr` 权重零堆排布）
+            let mut col_x = [0i16; 16];
+            let mut col_w = [0i16; 16];
+            let track_n = cols.min(16);
+            if !fr_weights.is_empty() {
+                let mut sum_fr: i32 = 0;
+                for i in 0..track_n {
+                    sum_fr += (*fr_weights.get(i).unwrap_or(&1)).max(1) as i32;
+                }
+                let sum_fr = sum_fr.max(1);
+                let mut cx = inner_x;
+                let mut used = 0i16;
+                for i in 0..track_n {
+                    let w = if i + 1 == track_n {
+                        avail_tracks.saturating_sub(used).max(0)
+                    } else {
+                        let fr = (*fr_weights.get(i).unwrap_or(&1)).max(1) as i32;
+                        ((avail_tracks as i32 * fr) / sum_fr) as i16
+                    };
+                    col_x[i] = cx;
+                    col_w[i] = w;
+                    cx = cx.saturating_add(w).saturating_add(gap);
+                    used = used.saturating_add(w);
+                }
+            } else {
+                let cell_w = avail_tracks / (cols as i16);
+                for i in 0..track_n {
+                    col_x[i] = inner_x.saturating_add((i as i16).saturating_mul(cell_w.saturating_add(gap)));
+                    col_w[i] = cell_w;
+                }
+            }
+
+            let mut cur_col = 0usize;
             for child in node.children.iter_mut() {
                 if let Some((ox, _oy)) = child_pos(child.element) {
                     child.x = inner_x.saturating_add(ox);
@@ -438,15 +492,45 @@ pub(super) fn pass2_horizontal_assign_with_pool(
                     child.w = clamp_w(child.element, raw);
                     continue;
                 }
-                let col = flow_idx % cols;
+                let span = match child.element {
+                    Element::Div(cd) => cd
+                        .layout_ext()
+                        .map(|l| l.grid_col_span as usize)
+                        .unwrap_or(1)
+                        .clamp(1, cols),
+                    _ => 1,
+                };
+                if cur_col + span > cols {
+                    cur_col = 0;
+                }
+                let start_col = cur_col;
+                let end_col = (start_col + span).min(cols);
+                let (cx, span_w) = if end_col <= track_n {
+                    let sx = col_x[start_col];
+                    let mut sw = 0i16;
+                    for c in start_col..end_col {
+                        sw = sw.saturating_add(col_w[c]);
+                        if c > start_col {
+                            sw = sw.saturating_add(gap);
+                        }
+                    }
+                    (sx, sw)
+                } else {
+                    let cell_w = avail_tracks / (cols as i16);
+                    let sx = inner_x
+                        .saturating_add((start_col as i16).saturating_mul(cell_w.saturating_add(gap)));
+                    let sw = cell_w
+                        .saturating_mul((end_col - start_col) as i16)
+                        .saturating_add(gap.saturating_mul((end_col - start_col - 1) as i16));
+                    (sx, sw)
+                };
                 let m = child_margin(child.element);
-                let cx = inner_x.saturating_add(col.saturating_mul(cell_w.saturating_add(gap)));
                 child.x = cx.saturating_add(m.left);
                 child.w = clamp_w(
                     child.element,
-                    cell_w.saturating_sub(m.left).saturating_sub(m.right).max(0),
+                    span_w.saturating_sub(m.left).saturating_sub(m.right).max(0),
                 );
-                flow_idx += 1;
+                cur_col = end_col % cols;
             }
         }
         FlexDir::Row if div.style.flex_wrap() => {
@@ -667,6 +751,16 @@ pub(super) fn pass2_horizontal_assign_with_pool(
                     cur_x = cur_x.saturating_add(extra_gap);
                 }
                 flow_idx += 1;
+            }
+            // RTL 布局镜像：当父容器启用 `.rtl(true)` 时，将 Row 内流式子节点按内容区水平镜像排布
+            if div.layout_ext().is_some_and(|l| l.rtl) {
+                let right_edge = inner_x.saturating_add(inner_w);
+                for child in node.children.iter_mut() {
+                    if child_pos(child.element).is_none() {
+                        let rel_l = child.x.saturating_sub(inner_x);
+                        child.x = right_edge.saturating_sub(rel_l).saturating_sub(child.w);
+                    }
+                }
             }
         }
         FlexDir::Col => {
@@ -896,10 +990,21 @@ fn pass3_vertical_measure_inner(
 
             let (raw_min, raw_pref) = match div.style.height {
                 Length::Px(px) => (px, px),
-                Length::Full | Length::Auto | Length::Pct(_) => (
-                    content_min.saturating_add(pad_y),
-                    content_pref.saturating_add(pad_y),
-                ),
+                Length::Full | Length::Auto | Length::Pct(_) => {
+                    if let Some(ar) = div
+                        .layout_ext()
+                        .map(|l| l.aspect_ratio)
+                        .filter(|&r| r > 0.01)
+                    {
+                        let h_ar = ((node.w.max(0) as f32 / ar) + 0.5) as i16;
+                        (h_ar, h_ar)
+                    } else {
+                        (
+                            content_min.saturating_add(pad_y),
+                            content_pref.saturating_add(pad_y),
+                        )
+                    }
+                }
             };
             node.min_size = clamp_h(node.element, raw_min);
             node.pref_size = clamp_h(node.element, raw_pref);
@@ -928,6 +1033,20 @@ fn pass3_vertical_measure_inner(
         Element::Img(img) => {
             node.min_size = img.height;
             node.pref_size = img.height;
+        }
+        Element::RichText(rt) => {
+            let avail_w = node.w.max(rt.default_font_size.max(8) as i16);
+            let (_tw, th) = crate::text_rich::measure_rich_text_box(rt, avail_w);
+            node.min_size = th;
+            node.pref_size = th;
+        }
+        Element::DecodedImage(img) => {
+            node.min_size = img.height;
+            node.pref_size = img.height;
+        }
+        Element::Vector(vec_spec) => {
+            node.min_size = vec_spec.height;
+            node.pref_size = vec_spec.height;
         }
         Element::SubView { .. } => {
             node.min_size = 0;

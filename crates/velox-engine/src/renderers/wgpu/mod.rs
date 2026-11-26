@@ -515,7 +515,10 @@ impl WgpuScene {
                         }
                     }
                     DrawPayload::PushLayer(_) | DrawPayload::PopLayer => {}
-                    DrawPayload::ExternalTexture(_) => {
+                    DrawPayload::ExternalTexture(_)
+                    | DrawPayload::RichText(_)
+                    | DrawPayload::DecodedImage(_)
+                    | DrawPayload::Vector(_) => {
                         self.sprite_count += 1;
                     }
                 }

@@ -2,6 +2,7 @@
 
 use crate::styled::{fill_color, fill_rounded};
 use velox_base::components::bubble::BubbleReaction;
+use velox_engine::prelude::*;
 
 pub use velox_base::components::message::MessageRole;
 
@@ -13,6 +14,12 @@ crate::define_themed_component! {
     variants: false,
     sizable: false,
     disableable: false,
+    init: |base| {
+        base.corner_tail = true;
+        {
+            base.animated = true;
+        }
+    },
     apply_tw: |base, theme| {
         let (def_b_bg, def_b_border, def_b_fg, def_a_bg, def_a_fg) = match base.role {
             MessageRole::User => (
@@ -42,16 +49,27 @@ crate::define_themed_component! {
         fill_color(&mut base.bubble_bg, def_b_bg);
         fill_color(&mut base.bubble_border_color, def_b_border);
         fill_color(&mut base.bubble_text_color, def_b_fg);
+        fill_color(&mut base.reaction_bg, theme.card);
+        fill_color(&mut base.reaction_active_bg, theme.secondary);
+        fill_color(&mut base.reaction_border_color, theme.border);
+        fill_color(&mut base.reaction_active_border_color, theme.primary);
+        fill_color(&mut base.reaction_text_color, theme.muted_foreground);
+        fill_color(&mut base.reaction_active_text_color, theme.primary);
         fill_color(&mut base.avatar_bg, def_a_bg);
         fill_color(&mut base.avatar_fg, def_a_fg);
         fill_rounded(&mut base.avatar_rounded, 14);
-        fill_rounded(&mut base.rounded, 10);
+        fill_rounded(&mut base.rounded, 12);
     },
     forward: [
         avatar(initials: &'a str),
+        role_badge(badge: &'a str),
         timestamp(timestamp: &'a str),
         attachments(attachments: &'a [velox_base::Attachment<'a>]),
         reactions(reactions: &'a [BubbleReaction<'a>]),
         width(width: i16),
+        animated(enabled: bool),
+        typing(typing: bool),
+        streaming(streaming: bool),
+        on_reaction_click(handler: &'a dyn Fn(usize, &mut ActionScope)),
     ],
 }

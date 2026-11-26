@@ -15,11 +15,16 @@ pub struct Button<'a> {
 }
 
 impl<'a> Button<'a> {
-    /// 构造一个主题化按钮组件（默认 `Primary` + `Medium`）。
+    /// 构造一个主题化按钮组件（默认 `Primary` + `Medium`；`std` 下自动启用平滑悬停/按压配色过渡）。
     #[inline(always)]
     pub fn new(id: u32, label: impl Into<StrRef<'a>>) -> Self {
+        #[allow(unused_mut)]
+        let mut inner = velox_base::components::button::Button::new(id, label);
+        {
+            inner.animated = true;
+        }
         Self {
-            inner: velox_base::components::button::Button::new(id, label),
+            inner,
             variant: ComponentVariant::Primary,
             size: ComponentSize::Medium,
             unstyled: false,
@@ -102,6 +107,12 @@ impl<'a> Button<'a> {
     #[inline(always)]
     pub fn auto_repeat(mut self, enabled: bool) -> Self {
         self.inner = self.inner.auto_repeat(enabled);
+        self
+    }
+
+    #[inline(always)]
+    pub fn animated(mut self, enabled: bool) -> Self {
+        self.inner = self.inner.animated(enabled);
         self
     }
 

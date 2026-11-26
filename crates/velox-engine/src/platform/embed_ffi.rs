@@ -681,3 +681,74 @@ void    velox_embed_destroy(VeloxEmbedSession* session);
 }
 #endif
 "#;
+
+/// Qt6 `QQuickRhiItem` 零拷贝集成模板（支持 Windows DX12 NT `HANDLE` 与 Linux Vulkan `dma_buf` fd）。
+pub const QT6_QQUICK_RHI_ITEM_CPP: &str = r#"// Velox -> Qt6 QQuickRhiItem Zero-Copy Bridge Template
+#include "velox_embed.h"
+#include <QQuickRhiItem>
+#include <rhi/qrhi.h>
+
+class VeloxRhiRenderer : public QQuickRhiItemRenderer {
+    VeloxEmbedSession* m_session = nullptr;
+    uint32_t m_gen = 0;
+public:
+    explicit VeloxRhiRenderer(VeloxEmbedSession* s) : m_session(s) {}
+    void render(QRhiCommandBuffer* cb) override {
+        velox_embed_step_frame(m_session, 16);
+        VeloxSharedFrameDesc frame{};
+        if (!velox_embed_acquire_shared_frame(m_session, &frame)) return;
+        // 1. 若 frame.generation_id != m_gen，通过 ID3D12Device::OpenSharedHandle / vkImportMemoryFdKHR 导入 frame.raw_handle
+        // 2. 在 GPU 队列等待 (frame.sync_handle, frame.fence_value) 后直接采样合成预乘 Alpha 纹理
+        m_gen = frame.generation_id;
+        velox_embed_release_shared_frame(m_session, frame.generation_id, frame.slot_index);
+    }
+};
+"#;
+
+/// WPF `D3DImage` 零拷贝集成模板（通过 DX12->D3D11On12 共享 NT `HANDLE` 直呈）。
+pub const WPF_D3DIMAGE_HOST_CS: &str = r#"// Velox -> WPF D3DImage Zero-Copy Bridge Template (C#)
+using System;
+using System.Runtime.InteropServices;
+
+public static class VeloxEmbedNative {
+    [DllImport("velox_app")] public static extern byte velox_embed_step_frame(IntPtr session, ushort dtMs);
+    [DllImport("velox_app")] public static extern byte velox_embed_acquire_shared_frame(IntPtr session, out VeloxSharedFrameDesc desc);
+    [DllImport("velox_app")] public static extern void velox_embed_release_shared_frame(IntPtr session, uint genId, byte slotIdx);
+    // 打开 desc.raw_handle (DX12 NT HANDLE) 经 ID3D11Device1::OpenSharedResource1 绑定至 D3DImage.SetBackBuffer
+}
+"#;
+
+/// WinUI 3 `SurfaceImageSource` / DirectComposition 零拷贝集成模板（C++/WinRT）。
+pub const WINUI3_SURFACE_HOST_CPP: &str = r#"// Velox -> WinUI 3 / DirectComposition Zero-Copy Bridge Template
+#include "velox_embed.h"
+// 1. 查询宿主 IDXGIDevice -> IDXGIAdapter -> DXGI_ADAPTER_DESC::AdapterLuid 填入 VeloxHostAdapterConfig
+// 2. 调用 velox_embed_acquire_shared_frame 获取 Win32 DX12 NT HANDLE 与 ID3D12Fence NT HANDLE
+// 3. 在 ID3D12Device::OpenSharedHandle 打开后，经 ID3D12CommandQueue::Wait 与 SwapChainPanel 零拷贝合成
+"#;
+
+/// GTK4 `GdkDmabufTextureBuilder` 零拷贝集成模板（Linux Wayland / Vulkan `dma_buf` fd 直通）。
+pub const GTK4_DMABUF_WIDGET_C: &str = r#"// Velox -> GTK4 GdkDmabufTextureBuilder Zero-Copy Bridge Template (C)
+#include "velox_embed.h"
+#include <gtk/gtk.h>
+
+static GdkTexture* velox_gtk4_acquire_texture(VeloxEmbedSession* session) {
+    velox_embed_step_frame(session, 16);
+    VeloxSharedFrameDesc f = {0};
+    if (!velox_embed_acquire_shared_frame(session, &f)) return NULL;
+    if (f.handle_kind == VELOX_HANDLE_LINUX_DMABUF_FD) {
+        GdkDmabufTextureBuilder* b = gdk_dmabuf_texture_builder_new();
+        gdk_dmabuf_texture_builder_set_width(b, f.width);
+        gdk_dmabuf_texture_builder_set_height(b, f.height);
+        gdk_dmabuf_texture_builder_set_fourcc(b, f.drm_format);
+        gdk_dmabuf_texture_builder_set_modifier(b, f.drm_modifier);
+        gdk_dmabuf_texture_builder_set_n_planes(b, 1);
+        gdk_dmabuf_texture_builder_set_fd(b, 0, (int)f.raw_handle);
+        gdk_dmabuf_texture_builder_set_stride(b, 0, f.stride);
+        gdk_dmabuf_texture_builder_set_offset(b, 0, f.offset);
+        GdkTexture* tex = gdk_dmabuf_texture_builder_build(b, NULL, NULL, NULL);
+        g_object_unref(b);
+        return tex;
+    }
+    return NULL;
+}
+"#;

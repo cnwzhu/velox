@@ -9,7 +9,7 @@
 use desktop_app::{
     create_desktop_app, GalleryStory, DEFAULT_DESKTOP_HEIGHT, DEFAULT_DESKTOP_WIDTH,
 };
-use velox_kit::base::SortDirection;
+use velox_kit::component::SortDirection;
 use velox_kit::platform::wayland::WaylandPlatform;
 use velox_kit::platform::winit::WinitPlatform;
 use velox_kit::platform::{Platform, PlatformControlFlow, PlatformSurface};
@@ -344,7 +344,7 @@ fn test_gallery_i18n_live_locale_switch() {
     let dmg_zh = engine.step_frame();
     assert!(!dmg_zh.is_empty());
     let has_zh_title = engine.cached_draw_ops().iter().any(|op| {
-        matches!(op.payload, DrawPayload::TextRun { text, .. } if text.as_str() == "Velox Base 组件画廊总览")
+        matches!(op.payload, DrawPayload::TextRun { text, .. } if text.as_str() == "Velox Component 组件画廊总览")
     });
     assert!(has_zh_title, "expected Chinese gallery overview title");
 
@@ -353,7 +353,7 @@ fn test_gallery_i18n_live_locale_switch() {
     assert_eq!(engine.view(root).unwrap().locale, Locale::JA_JP);
     let _ = engine.step_frame();
     let has_ja_title = engine.cached_draw_ops().iter().any(|op| {
-        matches!(op.payload, DrawPayload::TextRun { text, .. } if text.as_str() == "Velox Base コンポーネントギャラリー")
+        matches!(op.payload, DrawPayload::TextRun { text, .. } if text.as_str() == "Velox Component コンポーネントギャラリー")
     });
     assert!(has_ja_title, "expected Japanese gallery overview title");
 
@@ -443,7 +443,7 @@ fn test_gallery_code_editor_cosmic_text_zero_jitter_and_wrap() {
         "GalleryCounter"
     );
     let _ = engine.step_frame();
-    let sel_bg = CoreTheme::dark().primary.scale_alpha(78);
+    let sel_bg = CoreTheme::dark().primary.scale_alpha(102);
     let sel_quads: Vec<Region> = engine
         .cached_draw_ops()
         .iter()
@@ -906,6 +906,7 @@ fn test_software_vs_gpu_first_paint_pixel_parity() {
 
         let mut diff_gt_4 = 0usize;
         let mut max_diff = 0u8;
+        let mut first_diff = None;
         for idx in 0..(pw * ph) {
             let sc = sw_buf[idx].to_color();
             let o = idx * 4;
@@ -919,11 +920,19 @@ fn test_software_vs_gpu_first_paint_pixel_parity() {
             }
             if d > 4 {
                 diff_gt_4 += 1;
+                if first_diff.is_none() {
+                    first_diff = Some((
+                        idx % pw,
+                        idx / pw,
+                        (sc.r(), sc.g(), sc.b()),
+                        (gpu_rgba[o], gpu_rgba[o + 1], gpu_rgba[o + 2]),
+                    ));
+                }
             }
         }
         assert_eq!(
             diff_gt_4, 0,
-            "[{label} @ sf={sf:.2}] software first-paint and GPU must match pixel-for-pixel (diff_gt_4={diff_gt_4}, max_diff={max_diff})"
+            "[{label} @ sf={sf:.2}] software first-paint and GPU must match pixel-for-pixel (diff_gt_4={diff_gt_4}, max_diff={max_diff}, first={first_diff:?})"
         );
     };
 
@@ -1364,4 +1373,476 @@ fn test_gallery_effects_story_interactions_and_dual_backend_render() {
             "Effects story GPU vs Software mean per-channel diff too large: {mean_channel_diff:.2}"
         );
     }
+}
+
+#[test]
+fn test_gallery_motion_physics_and_engine_lab_stories() {
+    use velox_kit::core::display::Xrgb8888;
+    use velox_kit::core::renderers::wgpu::WgpuOffscreenRenderer;
+
+    let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT);
+    let _ = engine.step_frame_dt(16);
+
+    // 1. 切换至 Motion & Physics 故事页并验证物理弹簧打断、冲量与自动 0% CPU 收敛
+    engine.view_mut(root).unwrap().active_story = GalleryStory::Motion;
+    let _ = engine.step_frame_dt(16);
+    assert!(
+        engine
+            .cached_draw_ops()
+            .iter()
+            .any(|op| matches!(op.payload, DrawPayload::Vector(_))),
+        "Motion story must render VectorCanvas oscilloscope curve"
+    );
+
+    // 点击 100% 目标按钮 (id=2413) 启动物理弹簧，随后点击 Impulse +420 (id=2415)
+    let (t100_x, t100_y) = hit_center(&engine, 2413);
+    assert!(engine.dispatch_click(t100_x, t100_y));
+    assert!(engine.view(root).unwrap().spring_anim.is_active());
+    for _ in 0..5 {
+        let _ = engine.step_frame_dt(16);
+    }
+    // 中途反向点击 10% (id=2410) 验证打断
+    let (t10_x, t10_y) = hit_center(&engine, 2410);
+    assert!(engine.dispatch_click(t10_x, t10_y));
+    let (imp_x, imp_y) = hit_center(&engine, 2415);
+    assert!(engine.dispatch_click(imp_x, imp_y));
+
+    let mut settled = false;
+    for _ in 0..240 {
+        let _ = engine.step_frame_dt(16);
+        if !engine.view(root).unwrap().spring_anim.is_active() {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled, "Motion story SpringAnimator must settle cleanly to idle");
+
+    // 2. 切换至 Engine Lab 故事页并验证 RichText / DecodedImage / VectorCanvas / ObjectFit / HUD
+    engine.view_mut(root).unwrap().active_story = GalleryStory::EngineLab;
+    let _ = engine.step_frame_dt(16);
+    assert!(
+        engine
+            .cached_draw_ops()
+            .iter()
+            .any(|op| matches!(op.payload, DrawPayload::RichText(_))),
+        "Engine Lab story must render RichText"
+    );
+    assert!(
+        engine
+            .cached_draw_ops()
+            .iter()
+            .any(|op| matches!(op.payload, DrawPayload::DecodedImage(_))),
+        "Engine Lab story must render DecodedImage"
+    );
+    assert!(
+        engine
+            .cached_draw_ops()
+            .iter()
+            .any(|op| matches!(op.payload, DrawPayload::Vector(_))),
+        "Engine Lab story must render VectorCanvas radar"
+    );
+
+    // 点击 ObjectFit::Cover (id=2512) 与 Sweep +30° (id=2520) 以及顶栏 HUD 开关 (id=106)
+    let (fit_x, fit_y) = hit_center(&engine, 2512);
+    assert!(engine.dispatch_click(fit_x, fit_y));
+    assert_eq!(engine.view(root).unwrap().lab_object_fit_idx, 2);
+
+    let (rad_x, rad_y) = hit_center(&engine, 2520);
+    // 验证 "Native 2D VectorCanvas" 卡片 (id=2519) 内的 "Sweep +30°" 按钮 (id=2520) 严丝合缝在卡片内零溢出
+    let card_bounds = engine
+        .cached_draw_ops()
+        .iter()
+        .rev()
+        .find(|op| op.id == Some(2519))
+        .expect("expected VectorCanvas card id=2519")
+        .bounds;
+    let btn_bounds = engine
+        .cached_draw_ops()
+        .iter()
+        .rev()
+        .find(|op| op.id == Some(2520))
+        .expect("expected Sweep button id=2520")
+        .bounds;
+    assert!(
+        btn_bounds.x >= card_bounds.x
+            && btn_bounds.right() <= card_bounds.right() - 8
+            && btn_bounds.y >= card_bounds.y
+            && btn_bounds.bottom() <= card_bounds.bottom(),
+        "Sweep button ({btn_bounds:?}) must stay strictly inside VectorCanvas card ({card_bounds:?})"
+    );
+
+    let prev_angle = engine.view(root).unwrap().lab_radar_angle;
+    assert!(engine.dispatch_click(rad_x, rad_y));
+    assert_eq!(
+        engine.view(root).unwrap().lab_radar_angle,
+        (prev_angle + 30) % 360
+    );
+
+    let (hud_x, hud_y) = hit_center(&engine, 106);
+    assert!(engine.dispatch_click(hud_x, hud_y));
+    assert!(engine.view(root).unwrap().inspector_enabled);
+    let _ = engine.step_frame_dt(16);
+    assert!(
+        engine.cached_draw_ops().iter().any(|op| op.id == Some(860)),
+        "DevTools HUD overlay must appear when toggled"
+    );
+
+    // 双后端渲染（软件 + GPU）冒烟校验
+    let vp = engine.viewport_region();
+    let mut sw_buf = vec![Xrgb8888(0xFF00_0000); (vp.w as usize) * (vp.h as usize)];
+    engine.rasterize_region(vp, &mut sw_buf);
+    let mut off = WgpuOffscreenRenderer::new(vp.w as usize, vp.h as usize);
+    if off.ensure_gpu() {
+        assert!(off.render_draw_ops_scaled(engine.cached_draw_ops(), vp, 1.0));
+    }
+}
+
+#[test]
+fn test_all_buttons_hover_zero_flicker_in_dark_and_light_themes() {
+    let buttons: [(u32, &str); 8] = [
+        (1101, "Primary"),
+        (1102, "Secondary"),
+        (1103, "Outline"),
+        (1104, "Ghost"),
+        (1107, "Success"),
+        (1108, "Warning"),
+        (1109, "Danger"),
+        (1110, "Info"),
+    ];
+    for mode in [ThemeMode::Dark, ThemeMode::Light] {
+        let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT);
+        {
+            let app = engine.view_mut(root).unwrap();
+            app.theme_mode = mode;
+            app.signals.theme_mode.set_if_changed(mode);
+            app.active_story = GalleryStory::Buttons;
+            app.button_loading = false; // 停止加载旋转图标，保证背景帧静态纯净
+        }
+        let _ = engine.step_frame_dt(16);
+        // 等待主题切换过渡完全静止
+        for _ in 0..20 {
+            let _ = engine.step_frame_dt(16);
+        }
+
+        let find_btn_bg = |eng: &VeloxEngine, id: u32| -> Color {
+            eng.cached_draw_ops()
+                .iter()
+                .find_map(|op| match op.payload {
+                    DrawPayload::Quad { bg, .. } if op.id == Some(id) => Some(bg),
+                    _ => None,
+                })
+                .unwrap_or(Color::TRANSPARENT)
+        };
+
+        for (btn_id, label) in buttons {
+            // 先将指针移到安全空白处并静止
+            engine.dispatch_pointer_move(2, 2);
+            for _ in 0..16 {
+                let _ = engine.step_frame_dt(16);
+            }
+            let start_bg = find_btn_bg(&engine, btn_id);
+            let (bx, by) = text_center(&engine, label);
+
+            // 移入按钮并逐帧采样 12 帧（192ms > 120ms 过渡时长）
+            engine.dispatch_pointer_move(bx, by);
+            let mut samples: Vec<Color> = Vec::new();
+            for _ in 0..12 {
+                let _ = engine.step_frame_dt(16);
+                samples.push(find_btn_bg(&engine, btn_id));
+            }
+            let end_bg = *samples.last().unwrap();
+            assert_ne!(
+                start_bg, end_bg,
+                "button {btn_id} in {mode:?} must visibly change color on hover"
+            );
+
+            // 验证透明底按钮（Outline/Ghost）绝不向纯黑 (0,0,0) 坍塌产生黑灰闪烁
+            if start_bg.a() == 0 && end_bg.a() > 0 {
+                for (frame, &c) in samples.iter().enumerate() {
+                    if c.a() > 0 {
+                        assert_eq!(
+                            (c.r(), c.g(), c.b()),
+                            (end_bg.r(), end_bg.g(), end_bg.b()),
+                            "transparent button {btn_id} in {mode:?} frame {frame} RGB collapsed (flicker!): got {c:?}, expected RGB of {end_bg:?}"
+                        );
+                    }
+                }
+            }
+
+            // 验证所有按钮（含实心与透明）的 Alpha 与 RGB 均严格单调无反向跳变闪烁
+            let mut prev = start_bg;
+            for (frame, &cur) in samples.iter().enumerate() {
+                let check_mono = |a: u8, b: u8, s: u8, e: u8, ch: &str| {
+                    if s <= e {
+                        assert!(
+                            b >= a && b <= e,
+                            "button {btn_id} {mode:?} frame {frame} {ch} non-monotonic up: prev={a}, cur={b}, range={s}..={e}"
+                        );
+                    } else {
+                        assert!(
+                            b <= a && b >= e,
+                            "button {btn_id} {mode:?} frame {frame} {ch} non-monotonic down: prev={a}, cur={b}, range={e}..={s}"
+                        );
+                    }
+                };
+                check_mono(prev.a(), cur.a(), start_bg.a(), end_bg.a(), "A");
+                if start_bg.a() == 255 && end_bg.a() == 255 {
+                    check_mono(prev.r(), cur.r(), start_bg.r(), end_bg.r(), "R");
+                    check_mono(prev.g(), cur.g(), start_bg.g(), end_bg.g(), "G");
+                    check_mono(prev.b(), cur.b(), start_bg.b(), end_bg.b(), "B");
+                }
+                prev = cur;
+            }
+        }
+    }
+}
+
+#[test]
+fn test_gallery_ai_chat_story_thinking_streaming_and_idle_settlement() {
+    assert_eq!(GalleryStory::parse_cli("chat"), Some(GalleryStory::Chat));
+
+    let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, 860);
+    engine.view_mut(root).unwrap().active_story = GalleryStory::Chat;
+    let _ = engine.step_frame_dt(16);
+    let initial_msgs = engine.view(root).unwrap().chat.messages.len();
+    assert_eq!(initial_msgs, 3);
+
+    // 1. 点击快捷 Prompt "Spring Motion?" (id=6011)
+    let (px, py) = hit_center(&engine, 6011);
+    assert!(engine.dispatch_click(px, py));
+    let _ = engine.step_frame_dt(16);
+    assert_eq!(engine.view(root).unwrap().chat.messages.len(), 4);
+    assert!(
+        matches!(
+            engine.view(root).unwrap().chat.phase,
+            desktop_app::ChatStreamPhase::Thinking { .. }
+        ),
+        "sending prompt must enter Thinking wave indicator phase"
+    );
+    assert!(engine.needs_redraw(), "Thinking wave dots must request frames");
+
+    // 2. 推进 >900ms 自动转入逐字 Streaming 态
+    let mut saw_streaming = false;
+    let mut finished = false;
+    for _ in 0..400 {
+        let _ = engine.step_frame_dt(16);
+        match &engine.view(root).unwrap().chat.phase {
+            desktop_app::ChatStreamPhase::Streaming { revealed_chars, .. } => {
+                if *revealed_chars > 5 {
+                    saw_streaming = true;
+                }
+            }
+            desktop_app::ChatStreamPhase::Idle => {
+                if saw_streaming {
+                    finished = true;
+                    break;
+                }
+            }
+            desktop_app::ChatStreamPhase::Thinking { .. } => {}
+        }
+    }
+    assert!(saw_streaming, "AI chat must enter live token Streaming phase");
+    assert!(finished, "AI chat streaming must finish cleanly back to Idle");
+    assert_eq!(engine.view(root).unwrap().chat.messages.len(), 5);
+
+    // 等待气泡入场弹簧动画结束，回归 0% CPU 休眠
+    for _ in 0..40 {
+        let _ = engine.step_frame_dt(16);
+    }
+    assert!(
+        !engine.needs_redraw(),
+        "completed AI Chat story must return to 0% CPU Wait"
+    );
+
+    // 3. 测试模拟向上滚动弹出 "Jump to latest" 悬浮按钮并一键回底
+    let (sx, sy) = hit_center(&engine, 6002);
+    assert!(engine.dispatch_click(sx, sy));
+    // 推进 4 帧等待 EaseOutBack 弹入动画淡入可见
+    for _ in 0..4 {
+        let _ = engine.step_frame_dt(16);
+    }
+    assert!(!engine.view(root).unwrap().chat.scroller.follow_tail);
+    let (jx, jy) = hit_center(&engine, 6096);
+    assert!(engine.dispatch_click(jx, jy));
+    let _ = engine.step_frame_dt(16);
+    assert!(engine.view(root).unwrap().chat.scroller.follow_tail);
+}
+
+#[test]
+fn test_chart_gpui_kit_entrance_morph_animations_and_idle_settle() {
+    // 使用较高视口确保 Data 页下半区动画图表按钮完全可见
+    let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, 1100);
+    engine.view_mut(root).unwrap().active_story = GalleryStory::Data;
+    let _ = engine.step_frame_dt(16);
+
+    // 1. 首次挂载应自动启动 gpui-kit 入场展开动画并请求下一帧
+    assert!(
+        engine.needs_redraw(),
+        "Chart entrance animation should request frames while revealing"
+    );
+
+    // 推进 640ms (> 520ms) 后自动收敛至 0% CPU 休眠
+    let mut settled = false;
+    for _ in 0..60 {
+        let _ = engine.step_frame_dt(16);
+        if !engine.needs_redraw() {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled, "Chart entrance animation must settle to 0% CPU idle");
+
+    // 2. 点击 "Dataset A (Morph)" (id=1828) 触发数据平滑变形 Morphing 动画
+    let (dx, dy) = hit_center(&engine, 1828);
+    assert!(engine.dispatch_click(dx, dy));
+    assert!(engine.view(root).unwrap().chart_dataset_b);
+    let _ = engine.step_frame_dt(16);
+    assert!(
+        engine.needs_redraw(),
+        "Chart dataset change must trigger smooth Morphing animation"
+    );
+    let mut morph_settled = false;
+    for _ in 0..60 {
+        let _ = engine.step_frame_dt(16);
+        if !engine.needs_redraw() {
+            morph_settled = true;
+            break;
+        }
+    }
+    assert!(morph_settled, "Chart morphing animation must settle to idle");
+
+    // 3. 点击 "Replay Entrance" (id=1829) 触发重播入场动画并再次收敛
+    let (rx, ry) = hit_center(&engine, 1829);
+    assert!(engine.dispatch_click(rx, ry));
+    assert_eq!(engine.view(root).unwrap().chart_anim_epoch, 1);
+    let _ = engine.step_frame_dt(16);
+    assert!(engine.needs_redraw(), "Chart replay must restart entrance reveal");
+    let mut replay_settled = false;
+    for _ in 0..60 {
+        let _ = engine.step_frame_dt(16);
+        if !engine.needs_redraw() {
+            replay_settled = true;
+            break;
+        }
+    }
+    assert!(replay_settled, "Chart replay animation must settle cleanly to idle");
+
+    // 4. 验证纯鼠标悬停交互动画：划过 Area Chart 实时平滑追踪十字准星与跟随式 FPS Tooltip
+    let (ax, ay) = hit_center(&engine, 1830);
+    assert!(engine.dispatch_pointer_move(ax - 30, ay));
+    let _ = engine.step_frame_dt(16);
+    assert!(
+        engine.needs_redraw(),
+        "hovering Area Chart must animate crosshair tracking & floating tooltip"
+    );
+    let has_fps_tooltip = engine.cached_draw_ops().iter().any(|op| {
+        matches!(op.payload, DrawPayload::TextRun { text, .. } if text.as_str().contains("FPS"))
+    });
+    assert!(has_fps_tooltip, "hovering Area Chart must render floating FPS tooltip");
+
+    // 滑到同一张图表右侧触发焦点切换平滑滑行，随后移出图表自动清除悬停态
+    assert!(engine.dispatch_pointer_move(ax + 30, ay));
+    let _ = engine.step_frame_dt(16);
+    assert!(engine.needs_redraw(), "sliding hover across Chart slots must animate crosshair slide");
+    assert!(engine.dispatch_pointer_move(2, 2));
+    let _ = engine.step_frame_dt(16);
+    let has_fps_after_leave = engine.cached_draw_ops().iter().any(|op| {
+        matches!(op.payload, DrawPayload::TextRun { text, .. } if text.as_str().contains("FPS"))
+    });
+    assert!(!has_fps_after_leave, "leaving Chart must clear unpinned hover tooltip");
+
+    // 5. 验证 Pie Chart 纯悬停触发扇区径向弹出与百分比 Tooltip，以及点击锁定
+    let (px, py) = hit_center(&engine, 1834);
+    assert!(engine.dispatch_pointer_move(px + 20, py));
+    let _ = engine.step_frame_dt(16);
+    assert!(engine.needs_redraw(), "hovering Pie Chart must animate slice explosion");
+    let has_pie_tooltip = engine.cached_draw_ops().iter().any(|op| {
+        matches!(op.payload, DrawPayload::TextRun { text, .. } if text.as_str().contains('%'))
+    });
+    assert!(has_pie_tooltip, "hovering Pie Chart must explode slice & show percentage tooltip");
+
+    // 点击锁定后即使移走鼠标仍保留锁定扇区与百分比 Tooltip
+    assert!(engine.dispatch_click(px + 20, py));
+    let _ = engine.step_frame_dt(16);
+    let _ = engine.dispatch_pointer_move(2, 2);
+    let _ = engine.step_frame_dt(16);
+    let has_pinned_pie_tooltip = engine.cached_draw_ops().iter().any(|op| {
+        matches!(op.payload, DrawPayload::TextRun { text, .. } if text.as_str().contains('%'))
+    });
+    assert!(has_pinned_pie_tooltip, "clicking Pie Chart must pin active slice tooltip");
+
+    let mut focus_settled = false;
+    for _ in 0..40 {
+        let _ = engine.step_frame_dt(16);
+        if !engine.needs_redraw() {
+            focus_settled = true;
+            break;
+        }
+    }
+    assert!(focus_settled, "Chart interactive focus animations must settle cleanly to 0% CPU idle");
+}
+
+#[test]
+fn test_otp_no_outer_border_and_password_eye_toggle() {
+    let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, 1100);
+    engine.view_mut(root).unwrap().active_story = GalleryStory::Inputs;
+    let _ = engine.step_frame_dt(16);
+
+    // 1. 验证 Password Masked 默认显示密文（不泄露 "s3cr3t"），点击右侧小眼睛按钮后实时切换明文
+    let shows_secret_initially = engine.cached_draw_ops().iter().any(|op| {
+        matches!(op.payload, DrawPayload::TextRun { text, .. } if text.as_str().contains("s3cr3t"))
+    });
+    assert!(
+        !shows_secret_initially,
+        "password field must be masked initially before clicking eye icon"
+    );
+
+    // 通过真实几何边界定位 Password 输入框（id=1402）右侧内嵌小眼睛按钮中心点
+    let pass_bounds = engine
+        .cached_draw_ops()
+        .iter()
+        .find(|op| op.id == Some(1402))
+        .expect("expected draw op for password TextInput (id=1402)")
+        .bounds;
+    let ex = pass_bounds.right() - 18;
+    let ey = pass_bounds.y + pass_bounds.h / 2;
+    assert!(engine.dispatch_click(ex, ey), "clicking password eye toggle must succeed");
+    assert!(
+        engine.view(root).unwrap().password_visible,
+        "clicking eye icon must reveal password"
+    );
+    let _ = engine.step_frame_dt(16);
+    let shows_secret_after_eye = engine.cached_draw_ops().iter().any(|op| {
+        matches!(op.payload, DrawPayload::TextRun { text, .. } if text.as_str().contains("s3cr3t"))
+    });
+    assert!(
+        shows_secret_after_eye,
+        "revealed password field must render plaintext 's3cr3t'"
+    );
+
+    // 再次点击小眼睛切换回掩码隐藏
+    assert!(engine.dispatch_click(ex, ey));
+    assert!(!engine.view(root).unwrap().password_visible);
+    let _ = engine.step_frame_dt(16);
+    let shows_secret_rehidden = engine.cached_draw_ops().iter().any(|op| {
+        matches!(op.payload, DrawPayload::TextRun { text, .. } if text.as_str().contains("s3cr3t"))
+    });
+    assert!(!shows_secret_rehidden, "second eye click must re-mask password");
+
+    // 2. 验证 OTP 外层容器（id=1450）即使聚焦也绝不绘制外围矩形边框（焦点仅作用于当前活跃单格）
+    let (lbl_x, lbl_y) = text_center(&engine, "OTP Verification Code");
+    assert!(engine.dispatch_click(lbl_x, lbl_y + 28));
+    assert_eq!(engine.view(root).unwrap().active_input_field, 2);
+    let _ = engine.step_frame_dt(16);
+    let otp_outer_has_border = engine.cached_draw_ops().iter().any(|op| {
+        op.id == Some(1450)
+            && matches!(
+                op.payload,
+                DrawPayload::Quad { border_width, .. } if border_width > 0
+            )
+    });
+    assert!(
+        !otp_outer_has_border,
+        "OtpInput outer container (id=1450) must never render an outer border or focus rectangle"
+    );
 }

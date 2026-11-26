@@ -86,6 +86,12 @@ pub enum Element<'a> {
     Text(Text<'a>),
     /// 位图/图标掩码或过程化贴图节点（对应 `DrawPayload::Sprite`）。
     Img(Img<'a>),
+    /// 行内多字重/多色/BiDi/彩色 Emoji 富文本段落（8B Arena 引用，0 字节膨胀 `Element`）。
+    RichText(&'a crate::text_rich::RichTextSpec<'a>),
+    /// 支持 `ObjectFit` / `NineSlice` / LRU 缓存的解码图像元素（8B Arena 引用）。
+    DecodedImage(&'a crate::image_pipeline::DecodedImageSpec),
+    /// 原生抗锯齿 2D 矢量画布（`Polyline` / `Polygon` / `Circle` / `Sector`，8B Arena 引用）。
+    Vector(&'a crate::vector_canvas::VectorDrawSpec<'a>),
     /// 视图边界：引用另一个常驻 `Handle<T>`（`PodId` + `generation`），作为局部重绘与独立布局的隔离点。
     SubView {
         id: PodId,

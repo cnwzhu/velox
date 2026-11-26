@@ -70,6 +70,52 @@ impl VeloxEngine {
                 self.set_keyboard_inset(height);
                 true
             }
+            InputEvent::Pinch {
+                delta_scale_x1000, ..
+            } => {
+                self.last_pinch_delta_x1000 = delta_scale_x1000;
+                self.interaction_dirty = true;
+                true
+            }
+            InputEvent::Rotate { delta_deg10, .. } => {
+                self.last_rotate_deg10 = delta_deg10;
+                self.interaction_dirty = true;
+                true
+            }
+            InputEvent::ScrollPixel { x, y, dx, dy } => {
+                let mut handled = false;
+                if dy != 0 {
+                    handled |= self.dispatch_scroll_axis_at(x, y, dy, false);
+                }
+                if dx != 0 {
+                    handled |= self.dispatch_scroll_axis_at(x, y, dx, true);
+                }
+                handled
+            }
+            InputEvent::FileHovered { x, y } => {
+                self.file_drop_hover = Some((x, y));
+                self.interaction_dirty = true;
+                true
+            }
+            InputEvent::FileDropped { .. } => {
+                self.file_drop_hover = None;
+                self.interaction_dirty = true;
+                true
+            }
+            InputEvent::FileHoverCancelled => {
+                self.file_drop_hover = None;
+                self.interaction_dirty = true;
+                true
+            }
+            InputEvent::SystemThemeChanged { dark } => {
+                if self.system_theme_dark != dark {
+                    self.system_theme_dark = dark;
+                    self.interaction_dirty = true;
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 

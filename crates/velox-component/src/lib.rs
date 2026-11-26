@@ -7,6 +7,7 @@
 
 pub mod components;
 pub mod macros;
+pub mod motion;
 pub mod styled;
 pub mod theme;
 
@@ -40,6 +41,8 @@ pub use components::{
     ToggleItemState, Toolbar, ToolbarGroup, Tooltip, Tree, TreeItemState, TreeNode, TreeState,
     UniformList, VirtualKeyboard, VirtualList,
 };
+pub use motion::{MotionDivExt, MotionPreset, SpringCard, SpringProgress, SpringReveal};
+pub use motion::SpringAnimator;
 pub use styled::TailwindStyled;
 pub use theme::Theme;
 pub use velox_base::{
@@ -88,6 +91,8 @@ pub mod prelude {
         ToggleGroup, ToggleItemState, Toolbar, ToolbarGroup, Tooltip, Tree, TreeItemState,
         TreeNode, TreeState, UniformList, VirtualKeyboard, VirtualList,
     };
+    pub use crate::motion::{MotionDivExt, MotionPreset, SpringCard, SpringProgress, SpringReveal};
+    pub use crate::motion::SpringAnimator;
     pub use crate::styled::TailwindStyled;
     pub use crate::theme::Theme;
     pub use velox_base::{

@@ -26,6 +26,8 @@ pub enum IconName<'a> {
     Folder,
     Mic,
     Trash,
+    Eye,
+    EyeOff,
     Custom(&'a str),
 }
 
@@ -53,6 +55,8 @@ impl<'a> IconName<'a> {
             Self::Folder => "📁",
             Self::Mic => "🎤",
             Self::Trash => "🗑",
+            Self::Eye => "👁",
+            Self::EyeOff => "🙈",
             Self::Custom(s) => s,
         }
     }
@@ -98,6 +102,12 @@ impl<'a> IconName<'a> {
             ),
             Self::Trash => Some(
                 "M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6",
+            ),
+            Self::Eye => Some(
+                "M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7ZM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
+            ),
+            Self::EyeOff => Some(
+                "M9.88 9.88a3 3 0 1 0 4.24 4.24M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61M2 2l20 20",
             ),
             Self::Custom(_) => None,
         }

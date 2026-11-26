@@ -393,7 +393,11 @@ impl<'a> Widget<'a> for Switch<'a> {
             }
 
             if self.animated {
-                thumb = thumb.animate_bounds(Duration::from_millis(180));
+                {
+                    thumb = thumb
+                        .animate_bounds(Duration::from_millis(220))
+                        .ease(Easing::Spring);
+                }
             }
             thumb.into_element(cx)
         };

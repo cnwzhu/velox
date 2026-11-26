@@ -15,6 +15,10 @@ crate::define_themed_component! {
     disableable: false,
     init: |base| {
         base.focus_ring = true;
+        base.corner_tail = true;
+        {
+            base.animated = true;
+        }
     },
     apply_tw: |base, theme| {
         let (def_bg, def_border, def_fg) = match base.align {
@@ -30,12 +34,15 @@ crate::define_themed_component! {
         fill_color(&mut base.reaction_active_border_color, theme.primary);
         fill_color(&mut base.reaction_text_color, theme.muted_foreground);
         fill_color(&mut base.reaction_active_text_color, theme.primary);
-        fill_rounded(&mut base.rounded, 10);
+        fill_rounded(&mut base.rounded, 12);
     },
     forward: [
         align(align: BubbleAlign),
         reactions(reactions: &'a [BubbleReaction<'a>]),
         max_width(max_width: i16),
+        animated(enabled: bool),
+        typing(typing: bool),
+        streaming(streaming: bool),
         on_reaction_click(handler: &'a dyn Fn(usize, &mut ActionScope)),
     ],
 }

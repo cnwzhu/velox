@@ -1,18 +1,17 @@
-//! `Inputs & Select` 故事页：`TextInput`（普通/一键清空/密码/禁用，支持光标闪烁、鼠标任意拖选与右键复制粘贴）、
-//! `NumberInput`、`Select` 与 `Dropdown`（应用层极简直角样式）。
+//! `Inputs & Select` 故事页：完全基于 `velox-component` 的 `TextInput`、`NumberInput`、`Select`、`Dropdown`、
+//! `OtpInput`、`ColorPicker` 与 `Calendar` 插槽定制示例。
 
 use super::{state_pill, story_header, story_section};
-use crate::style::{self, BasePalette};
 use crate::{ContextMenuTarget, GalleryApp};
-use velox_kit::base::{
-    Calendar, CalendarItemKind, DateSelection, Dropdown, NumberInput, Select, SelectOption,
-    SimpleDate, TextInput,
+use velox_kit::component::{
+    Calendar, CalendarItemKind, ColorPicker, DateSelection, Dropdown, NumberInput, OtpInput,
+    Select, SelectOption, SimpleDate, TextInput,
 };
 use velox_kit::prelude::*;
 
 const SELECT_FRAMEWORKS: &[SelectOption<'static>] = &[
-    SelectOption::new("Velox Core (Pure Rust SDF)", "velox"),
-    SelectOption::new("Velox Base (70+ Primitives)", "velox-base"),
+    SelectOption::new("Velox Engine (2D SDF GPU)", "velox"),
+    SelectOption::new("Velox Component (75+ Widgets)", "velox-component"),
     SelectOption::new("Legacy Immediate Mode (Disabled)", "legacy").disabled(true),
     SelectOption::new("WASM Canvas2D Runtime", "wasm"),
 ];
@@ -29,7 +28,6 @@ impl GalleryApp {
         cx: &'a Scope<Self>,
         theme: CoreTheme,
     ) -> Div<'a> {
-        let p = BasePalette::from_theme(theme);
         let on_focus_name = cx.action(|this, acx| {
             this.active_input_field = 0;
             this.input_ctx_menu = None;
@@ -69,10 +67,11 @@ impl GalleryApp {
             this.event_count = this.event_count.saturating_add(1);
         });
         let on_key_pass = cx.listener(|this, key: KeyCode, acx| {
+            let is_masked = !this.password_visible;
             let _ = this.text_input_pass.handle_key_with_mods(
                 key,
                 acx.modifiers(),
-                true,
+                is_masked,
                 acx.now_ms(),
             );
             this.event_count = this.event_count.saturating_add(1);
@@ -81,10 +80,17 @@ impl GalleryApp {
             |this, (x, is_drag, now_ms, shift): (i16, bool, u32, bool), _acx| {
                 this.active_input_field = 1;
                 this.input_ctx_menu = None;
+                let is_masked = !this.password_visible;
                 this.text_input_pass
-                    .handle_pointer_action(x, is_drag, now_ms, shift, true, 13);
+                    .handle_pointer_action(x, is_drag, now_ms, shift, is_masked, 13);
             },
         );
+        let on_toggle_pass_mask = cx.action(|this, acx| {
+            this.password_visible = !this.password_visible;
+            this.active_input_field = 1;
+            this.text_input_pass.reset_blink(acx.now_ms());
+            this.event_count = this.event_count.saturating_add(1);
+        });
         let on_sec_pass = cx.listener(|this, (wx, wy): (i16, i16), acx| {
             this.active_input_field = 1;
             this.text_input_pass.reset_blink(acx.now_ms());
@@ -144,27 +150,24 @@ impl GalleryApp {
                                 cx,
                                 text("Clearable Input")
                                     .size(12)
-                                    .color(p.muted_fg)
+                                    .color(theme.muted_foreground)
                                     .nowrap(),
                             ),
                         )
                         .child(
                             cx,
-                            style::text_input(
-                                TextInput::new(1401, name_str, self.active_input_field == 0)
-                                    .size(220, 32)
-                                    .placeholder("Type project name...")
-                                    .cursor(self.text_input_name.cursor())
-                                    .selection(self.text_input_name.selected_range())
-                                    .blink_epoch(self.text_input_name.blink_epoch_ms())
-                                    .clearable(true)
-                                    .on_focus(on_focus_name)
-                                    .on_clear(on_clear_name)
-                                    .on_key_input(on_key_name)
-                                    .on_pointer_action(on_ptr_name)
-                                    .on_secondary_click(on_sec_name),
-                                theme,
-                            ),
+                            TextInput::new(1401, name_str, self.active_input_field == 0)
+                                .size(220, 32)
+                                .placeholder("Type project name...")
+                                .cursor(self.text_input_name.cursor())
+                                .selection(self.text_input_name.selected_range())
+                                .blink_epoch(self.text_input_name.blink_epoch_ms())
+                                .clearable(true)
+                                .on_focus(on_focus_name)
+                                .on_clear(on_clear_name)
+                                .on_key_input(on_key_name)
+                                .on_pointer_action(on_ptr_name)
+                                .on_secondary_click(on_sec_name),
                         ),
                 )
                 .child(
@@ -178,26 +181,25 @@ impl GalleryApp {
                                 cx,
                                 text("Password Masked")
                                     .size(12)
-                                    .color(p.muted_fg)
+                                    .color(theme.muted_foreground)
                                     .nowrap(),
                             ),
                         )
                         .child(
                             cx,
-                            style::text_input(
-                                TextInput::new(1402, pass_str, self.active_input_field == 1)
-                                    .size(180, 32)
-                                    .masked(true)
-                                    .cursor(self.text_input_pass.cursor())
-                                    .selection(self.text_input_pass.selected_range())
-                                    .blink_epoch(self.text_input_pass.blink_epoch_ms())
-                                    .placeholder("Secret token...")
-                                    .on_focus(on_focus_pass)
-                                    .on_key_input(on_key_pass)
-                                    .on_pointer_action(on_ptr_pass)
-                                    .on_secondary_click(on_sec_pass),
-                                theme,
-                            ),
+                            TextInput::new(1402, pass_str, self.active_input_field == 1)
+                                .size(200, 32)
+                                .masked(!self.password_visible)
+                                .password_toggle(true)
+                                .cursor(self.text_input_pass.cursor())
+                                .selection(self.text_input_pass.selected_range())
+                                .blink_epoch(self.text_input_pass.blink_epoch_ms())
+                                .placeholder("Secret token...")
+                                .on_focus(on_focus_pass)
+                                .on_toggle_mask(on_toggle_pass_mask)
+                                .on_key_input(on_key_pass)
+                                .on_pointer_action(on_ptr_pass)
+                                .on_secondary_click(on_sec_pass),
                         ),
                 )
                 .child(
@@ -211,21 +213,18 @@ impl GalleryApp {
                                 cx,
                                 text("NumberInput (Up/Down)")
                                     .size(12)
-                                    .color(p.muted_fg)
+                                    .color(theme.muted_foreground)
                                     .nowrap(),
                             ),
                         )
                         .child(
                             cx,
-                            style::number_input(
-                                NumberInput::new(1403, self.number_val)
-                                    .range(0, 240)
-                                    .step(12)
-                                    .suffix(" px")
-                                    .width(152)
-                                    .on_change(on_num_change),
-                                theme,
-                            ),
+                            NumberInput::new(1403, self.number_val)
+                                .range(0, 240)
+                                .step(12)
+                                .suffix(" px")
+                                .width(152)
+                                .on_change(on_num_change),
                         ),
                 )
                 .child(
@@ -237,17 +236,14 @@ impl GalleryApp {
                             cx,
                             div().h(16).flex_row().items_center().child(
                                 cx,
-                                text("Disabled").size(12).color(p.muted_fg).nowrap(),
+                                text("Disabled").size(12).color(theme.muted_foreground).nowrap(),
                             ),
                         )
                         .child(
                             cx,
-                            style::text_input(
-                                TextInput::new(1404, "Read-only field", false)
-                                    .size(168, 32)
-                                    .disabled(true),
-                                theme,
-                            ),
+                            TextInput::new(1404, "Read-only field", false)
+                                .size(168, 32)
+                                .disabled(true),
                         ),
                 ),
         );
@@ -261,7 +257,7 @@ impl GalleryApp {
         let select_section = story_section(
             cx,
             theme,
-            "Select & Dropdown (SVG Chevrons, Checkmark & Esc / Arrow Keys)",
+            "Select & Dropdown (velox-component SVG Chevrons & Esc / Arrow Keys)",
             "Open popup, press Up/Down to skip disabled items, press Escape to dismiss",
         )
         .child(
@@ -281,20 +277,17 @@ impl GalleryApp {
                                 cx,
                                 text("Select with Disabled Item")
                                     .size(12)
-                                    .color(p.muted_fg)
+                                    .color(theme.muted_foreground)
                                     .nowrap(),
                             ),
                         )
                         .child(
                             cx,
-                            style::select(
-                                Select::new(1410, SELECT_FRAMEWORKS, self.select_idx, self.select_open)
-                                    .width(260)
-                                    .placeholder("Choose target engine...")
-                                    .on_toggle(on_toggle_select)
-                                    .on_select(on_select_opt),
-                                theme,
-                            ),
+                            Select::new(1410, SELECT_FRAMEWORKS, self.select_idx, self.select_open)
+                                .width(260)
+                                .placeholder("Choose target engine...")
+                                .on_toggle(on_toggle_select)
+                                .on_select(on_select_opt),
                         ),
                 )
                 .child(
@@ -306,23 +299,23 @@ impl GalleryApp {
                             cx,
                             div().h(16).flex_row().items_center().child(
                                 cx,
-                                text("Dropdown Menu").size(12).color(p.muted_fg).nowrap(),
+                                text("Dropdown Menu")
+                                    .size(12)
+                                    .color(theme.muted_foreground)
+                                    .nowrap(),
                             ),
                         )
                         .child(
                             cx,
-                            style::dropdown(
-                                Dropdown::new(
-                                    1411,
-                                    DROPDOWN_BACKENDS,
-                                    self.dropdown_idx,
-                                    self.dropdown_open,
-                                )
-                                .size(220, 32)
-                                .on_toggle(on_toggle_dd)
-                                .on_select(on_select_dd),
-                                theme,
-                            ),
+                            Dropdown::new(
+                                1411,
+                                DROPDOWN_BACKENDS,
+                                self.dropdown_idx,
+                                self.dropdown_open,
+                            )
+                            .size(220, 32)
+                            .on_toggle(on_toggle_dd)
+                            .on_select(on_select_dd),
                         ),
                 ),
         )
@@ -376,17 +369,18 @@ impl GalleryApp {
             this.event_count = this.event_count.saturating_add(1);
         });
 
-        let cal_hover = p.hover;
-        let cal_border = p.border_strong;
-        let cal_muted = p.muted_fg;
-        let cal_active_bg = p.solid_bg;
-        let cal_active_fg = p.solid_fg;
-        let cal_fg = p.fg;
+        let cal_hover = theme.list_hover;
+        let cal_border = theme.border;
+        let cal_muted = theme.muted_foreground;
+        let cal_active_bg = theme.primary;
+        let cal_active_fg = theme.primary_foreground;
+        let cal_fg = theme.foreground;
 
         let gpui_style_calendar = Calendar::from_state(1420, &self.calendar_state)
             .w(px(250.))
             .p_3()
-            .bg(p.canvas)
+            .bg(theme.background)
+            .rounded(8)
             .border_1()
             .border_color(cal_border)
             .overflow_hidden()
@@ -525,14 +519,97 @@ impl GalleryApp {
                             cx,
                             text("Uses .w(px(250.)).p_3().border_1().border_color(...)")
                                 .size(11)
-                                .color(p.muted_fg),
+                                .color(theme.muted_foreground),
                         )
                         .child(
                             cx,
                             text("+ .item(cx, |item, state| ... .when(...).hover(|s| ...))")
                                 .size(11)
-                                .color(p.muted_fg),
+                                .color(theme.muted_foreground),
                         ),
+                ),
+        );
+
+        let on_otp_focus = cx.action(|this, _acx| {
+            this.active_input_field = 2;
+            this.input_ctx_menu = None;
+        });
+        let on_otp_key = cx.listener(|this, key: KeyCode, _acx| {
+            this.active_input_field = 2;
+            let _ = this.input_otp.handle_key(key);
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_toggle_color = cx.action(|this, _acx| {
+            this.input_color_picker.open = !this.input_color_picker.open;
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_pick_color = cx.listener(|this, col: Color, _acx| {
+            this.input_color_picker.r = col.r();
+            this.input_color_picker.g = col.g();
+            this.input_color_picker.b = col.b();
+            this.input_color_picker.open = false;
+            this.event_count = this.event_count.saturating_add(1);
+        });
+
+        let extended_inputs_section = story_section(
+            cx,
+            theme,
+            "OtpInput & ColorPicker (velox-component)",
+            "6-digit grouped OTP verification input & themed ColorPicker swatch popover",
+        )
+        .child(
+            cx,
+            div()
+                .flex_row()
+                .flex_wrap()
+                .gap(24)
+                .items_center()
+                .child(
+                    cx,
+                    div()
+                        .flex_col()
+                        .gap(6)
+                        .child(cx, text("OTP Verification Code").size(11).color(theme.muted_foreground))
+                        .child(
+                            cx,
+                            OtpInput::new(
+                                1450,
+                                cx.arena().alloc_str(self.input_otp.as_str()).as_str(),
+                                6,
+                            )
+                            .focused(self.active_input_field == 2)
+                            .groups(3)
+                            .on_focus(on_otp_focus)
+                            .on_key_input(on_otp_key),
+                        ),
+                )
+                .child(
+                    cx,
+                    div()
+                        .flex_col()
+                        .gap(6)
+                        .child(cx, text("Accent Color Picker").size(11).color(theme.muted_foreground))
+                        .child(
+                            cx,
+                            ColorPicker::new(1451, self.input_color_picker)
+                                .on_toggle_open(on_toggle_color)
+                                .on_select_color(on_pick_color),
+                        ),
+                )
+                .child(
+                    cx,
+                    state_pill(
+                        cx,
+                        theme,
+                        fmt!(
+                            cx,
+                            "OTP: {} | Color: #{:02X}{:02X}{:02X}",
+                            self.input_otp.as_str(),
+                            self.input_color_picker.r,
+                            self.input_color_picker.g,
+                            self.input_color_picker.b
+                        ),
+                    ),
                 ),
         );
 
@@ -545,13 +622,14 @@ impl GalleryApp {
                 story_header(
                     cx,
                     theme,
-                    "Inputs & Select",
-                    "Editable text fields, stepper inputs, popups, and gpui-base slot-customized Calendar.",
-                    "velox_base::{TextInput, NumberInput, Select, Dropdown, Calendar}",
+                    "Inputs, Select, OTP, ColorPicker & Calendar",
+                    "Editable text fields, stepper inputs, popups, OTP, ColorPicker & slot-customized Calendar.",
+                    "velox_component::{TextInput, Select, OtpInput, ColorPicker, Calendar}",
                 ),
             )
             .child(cx, text_section)
             .child(cx, select_section)
+            .child(cx, extended_inputs_section)
             .child(cx, calendar_section)
     }
 }

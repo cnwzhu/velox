@@ -262,6 +262,77 @@ impl VeloxEngine {
             if hover_changed {
                 self.interaction_dirty = true;
             }
+
+            // 派发 `on_hover`（先离开后进入）与 `on_pointer_move`（用于图表等悬停交互追踪，零堆分配）
+            let mods = self.modifiers;
+            let mut fired_any = false;
+            for hit in hits.iter().rev() {
+                let eff = hit.bounds.intersect(hit.clip);
+                let was_in = prev_pos.is_some_and(|(ox, oy)| eff.contains(ox, oy));
+                let is_in = eff.contains(px, py);
+                if was_in && !is_in {
+                    if let Some(on_hover) = hit.on_hover() {
+                        let ev = DragEvent {
+                            x: px,
+                            y: py,
+                            local_x: (px - hit.bounds.x).clamp(0, hit.bounds.w),
+                            local_y: (py - hit.bounds.y).clamp(0, hit.bounds.h),
+                            width: hit.bounds.w.max(1),
+                            height: hit.bounds.h.max(1),
+                            delta_x: dx,
+                            delta_y: dy,
+                        };
+                        let owner = Self::resolve_hit_pod(root_id, hit.owner_pod);
+                        let mut acx = self
+                            .make_action_scope(owner, (px, py), ev)
+                            .with_modifiers(mods);
+                        on_hover(false, &mut acx);
+                        fired_any = true;
+                    }
+                }
+            }
+            for hit in hits.iter().rev() {
+                let eff = hit.bounds.intersect(hit.clip);
+                let was_in = prev_pos.is_some_and(|(ox, oy)| eff.contains(ox, oy));
+                let is_in = eff.contains(px, py);
+                if is_in {
+                    let ev = DragEvent {
+                        x: px,
+                        y: py,
+                        local_x: (px - hit.bounds.x).clamp(0, hit.bounds.w),
+                        local_y: (py - hit.bounds.y).clamp(0, hit.bounds.h),
+                        width: hit.bounds.w.max(1),
+                        height: hit.bounds.h.max(1),
+                        delta_x: dx,
+                        delta_y: dy,
+                    };
+                    let owner = Self::resolve_hit_pod(root_id, hit.owner_pod);
+                    if !was_in {
+                        if let Some(on_hover) = hit.on_hover() {
+                            let mut acx = self
+                                .make_action_scope(owner, (px, py), ev)
+                                .with_modifiers(mods);
+                            on_hover(true, &mut acx);
+                            fired_any = true;
+                        }
+                    }
+                    if let Some(on_move) = hit.on_pointer_move() {
+                        let mut acx = self
+                            .make_action_scope(owner, (px, py), ev)
+                            .with_modifiers(mods);
+                        on_move(&mut acx);
+                        fired_any = true;
+                    }
+                    if hit.occlude {
+                        break;
+                    }
+                }
+            }
+            if fired_any {
+                self.flush_async_after_event();
+                self.interaction_dirty = true;
+                return true;
+            }
             return false;
         }
         if dx == 0 && dy == 0 {
@@ -351,18 +422,36 @@ impl VeloxEngine {
         let Some((prev_x, prev_y)) = self.interaction.pointer_pos.take() else {
             return false;
         };
-        if self.root_pod.is_none() {
+        let Some(root_id) = self.root_pod else {
             return false;
-        }
+        };
         self.ensure_hits_available();
         let hits = self.cached_hit_regions();
         let was_hovered = hits.iter().any(|h| {
             h.has_hover_bg && h.bounds.intersect(h.clip).contains(prev_x, prev_y)
         });
-        if was_hovered {
+        let mods = self.modifiers;
+        let mut fired_leave = false;
+        for hit in hits.iter().rev() {
+            if hit.bounds.intersect(hit.clip).contains(prev_x, prev_y) {
+                if let Some(on_hover) = hit.on_hover() {
+                    let ev = DragEvent::default();
+                    let owner = Self::resolve_hit_pod(root_id, hit.owner_pod);
+                    let mut acx = self
+                        .make_action_scope(owner, (prev_x, prev_y), ev)
+                        .with_modifiers(mods);
+                    on_hover(false, &mut acx);
+                    fired_leave = true;
+                }
+            }
+        }
+        if fired_leave {
+            self.flush_async_after_event();
+        }
+        if was_hovered || fired_leave {
             self.interaction_dirty = true;
         }
-        was_hovered
+        was_hovered || fired_leave
     }
 
     /// 派发指针/手指抬起事件（释放 `active_bg`、触发点击或启动惯性滑动衰减）。
@@ -506,18 +595,16 @@ impl VeloxEngine {
             return false;
         }
         self.ensure_hits_available();
-        let hits = self.cached_hit_regions();
-        let mut preferred: Option<(u32, i16)> = None;
-        let mut fallback: Option<(u32, i16)> = None;
-        for hit in hits.iter().rev() {
+        // 支持嵌套滚动链（Scroll Chaining）：先尝试最内层匹配滚动容器，若已触顶/触底无法继续滚动则自动向上冒泡至外层容器
+        let mut preferred: crate::arena::SmallVec<(u32, i16), 8> = crate::arena::SmallVec::new();
+        let mut fallback: crate::arena::SmallVec<(u32, i16), 8> = crate::arena::SmallVec::new();
+        for hit in self.cached_hit_regions().iter().rev() {
             if hit.bounds.intersect(hit.clip).contains(px, py) {
                 if let Some(t) = hit.scroll_target {
                     if hit.scroll_horizontal == prefer_horiz {
-                        preferred = Some(t);
-                        break;
-                    }
-                    if !prefer_horiz && fallback.is_none() {
-                        fallback = Some(t);
+                        let _ = preferred.push(t);
+                    } else if !prefer_horiz {
+                        let _ = fallback.push(t);
                     }
                 }
                 if hit.occlude {
@@ -525,17 +612,26 @@ impl VeloxEngine {
                 }
             }
         }
-        if let Some((list_id, max_s)) = preferred.or(fallback) {
+        let candidates = if !preferred.is_empty() {
+            preferred.as_slice()
+        } else {
+            fallback.as_slice()
+        };
+        if candidates.is_empty() {
+            return false;
+        }
+        for &(list_id, max_s) in candidates {
             self.motion.set_scroll_inertia(list_id, 0, max_s);
             let cur = self.motion.scroll_offset(list_id);
             let next = cur.saturating_add(delta).clamp(0, max_s.max(0));
             if next != cur {
                 self.motion.set_scroll_offset(list_id, next);
                 self.interaction_dirty = true;
+                return true;
             }
-            return true;
         }
-        false
+        // 即使均在边界未产生位移，仍返回 true 表示事件已被滚动容器体系消费
+        true
     }
 
     /// 派发屏幕坐标 `(px, py)` 的点击事件。若命中某个可点击元素则执行其回调并返回 `true`。

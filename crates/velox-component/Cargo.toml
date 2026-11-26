@@ -9,6 +9,10 @@ keywords.workspace = true
 categories.workspace = true
 description = "Themed and styled zero-allocation UI component library built on velox-engine and velox-base"
 
+[features]
+default = ["std"]
+std = ["velox-engine/std", "velox-base/std"]
+
 [dependencies]
-velox-engine = { version = "0.2.0", path = "../velox-engine", default-features = false }
-velox-base = { version = "0.2.0", path = "../velox-base" }
+velox-engine = { version = "0.3.0", path = "../velox-engine", default-features = false }
+velox-base = { version = "0.3.0", path = "../velox-base" }

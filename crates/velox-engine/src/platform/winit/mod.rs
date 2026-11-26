@@ -7,6 +7,7 @@
 
 #[cfg(feature = "winit")]
 mod handler;
+pub mod multi_window;
 mod nested;
 
 use std::eprintln;
@@ -18,6 +19,10 @@ use winit::event_loop::EventLoop;
 
 #[cfg(feature = "winit")]
 use handler::{WinitAppHandler, WinitUserEvent};
+pub use multi_window::{
+    CsdConfig, CsdHitZone, MultiWindowId, MultiWindowManager, MultiWindowSpec, WindowRole,
+    WindowSession,
+};
 pub use nested::run_nested_compositor_window;
 pub use super::shm_driver::{
     write_uncompressed_png, ShmSlot, ShmSurfaceDriver, SoftwareSurfaceDriver, WaylandSurfaceDriver,
@@ -217,6 +222,8 @@ impl WinitPlatform {
     pub fn render_to_png(&self, core: &mut VeloxEngine, path: &str) -> std::io::Result<()> {
         let scale = self.dpi_scale.max(1);
         core.set_dpi_scale(scale as i16);
+        // 强制将当前已完成动画步进的完整帧重新提交给全新离屏驱动，避免引擎处于 0% CPU 休眠态时产出空缓冲
+        core.force_full_repaint();
         let phys_w = self.width * scale;
         let phys_h = self.height * scale;
         let mut driver =

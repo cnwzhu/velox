@@ -210,7 +210,9 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                     );
                     bounds = translate_region(st.bounds, inherited_offset);
                     bg = st.bg;
-                    border_color = st.border;
+                    if !show_focus_border {
+                        border_color = st.border;
+                    }
                     opacity = st.opacity;
                 } else if let Some((dx, dy, op)) =
                     motion.peek_offset_opacity_scoped(effective_id, path_hash)
@@ -222,6 +224,17 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                     );
                     bounds = translate_region(bounds, (dx, dy));
                     opacity = op;
+                }
+            }
+            // `position: sticky` 吸顶定位：当所属滚动容器滚动使当前节点超出视口顶边时，吸附夹紧至 `eff_parent_clip.y + sticky_top`
+            if let Some(st) = div.layout_ext().and_then(|l| l.sticky_top) {
+                let min_y = eff_parent_clip.y.saturating_add(st);
+                let max_y = eff_parent_clip.bottom().saturating_sub(bounds.h);
+                if bounds.y < min_y && max_y >= min_y {
+                    let clamped_y = min_y.min(max_y);
+                    let dy = clamped_y.saturating_sub(bounds.y);
+                    bounds.y = clamped_y;
+                    child_offset.1 = child_offset.1.saturating_add(dy);
                 }
             }
             if let Some(max_s) = resolved_scroll_max {
@@ -506,6 +519,9 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                     Element::SubView { id, .. } => 0x4000_0000 | (id.0 as u32),
                     Element::Text(_) => 0x1000_0000 | unkeyed_ord,
                     Element::Img(_) => 0x2000_0000 | unkeyed_ord,
+                    Element::RichText(_) => 0x3000_0000 | unkeyed_ord,
+                    Element::DecodedImage(_) => 0x5000_0000 | unkeyed_ord,
+                    Element::Vector(_) => 0x6000_0000 | unkeyed_ord,
                 }
             };
 
@@ -738,6 +754,66 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                 payload: DrawPayload::Sprite(source),
             }) {
                 *dropped_ops = dropped_ops.saturating_add(1);
+            }
+        }
+        Element::RichText(rt) => {
+            let emit_here = (!overlay_pass && !in_overlay) || (overlay_pass && in_overlay);
+            if !emit_here {
+                return;
+            }
+            let bounds = translate_region(Region::new(node.x, node.y, node.w, node.h), inherited_offset);
+            let mut spec = **rt;
+            spec.default_color = spec.default_color.scale_alpha(inherited_opacity);
+            if let Some(rt_ref) = arena.try_alloc(spec) {
+                if !out_ops.push(DrawOp {
+                    id: None,
+                    bounds,
+                    clip: parent_clip,
+                    clip_radius: parent_clip_radius,
+                    payload: DrawPayload::RichText(rt_ref),
+                }) {
+                    *dropped_ops = dropped_ops.saturating_add(1);
+                }
+            }
+        }
+        Element::DecodedImage(img) => {
+            let emit_here = (!overlay_pass && !in_overlay) || (overlay_pass && in_overlay);
+            if !emit_here {
+                return;
+            }
+            let bounds = translate_region(Region::new(node.x, node.y, node.w, node.h), inherited_offset);
+            let mut spec = **img;
+            spec.opacity = ((spec.opacity as u16 * inherited_opacity as u16) / 255) as u8;
+            if let Some(img_ref) = arena.try_alloc(spec) {
+                if !out_ops.push(DrawOp {
+                    id: None,
+                    bounds,
+                    clip: parent_clip,
+                    clip_radius: parent_clip_radius,
+                    payload: DrawPayload::DecodedImage(img_ref),
+                }) {
+                    *dropped_ops = dropped_ops.saturating_add(1);
+                }
+            }
+        }
+        Element::Vector(vec_spec) => {
+            let emit_here = (!overlay_pass && !in_overlay) || (overlay_pass && in_overlay);
+            if !emit_here {
+                return;
+            }
+            let bounds = translate_region(Region::new(node.x, node.y, node.w, node.h), inherited_offset);
+            let mut spec = **vec_spec;
+            spec.opacity = ((spec.opacity as u16 * inherited_opacity as u16) / 255) as u8;
+            if let Some(v_ref) = arena.try_alloc(spec) {
+                if !out_ops.push(DrawOp {
+                    id: None,
+                    bounds,
+                    clip: parent_clip,
+                    clip_radius: parent_clip_radius,
+                    payload: DrawPayload::Vector(v_ref),
+                }) {
+                    *dropped_ops = dropped_ops.saturating_add(1);
+                }
             }
         }
         Element::SubView { .. } => {}

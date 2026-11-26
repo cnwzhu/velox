@@ -3,7 +3,7 @@ name = "desktop_app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Velox Base Gallery — interactive cross-platform desktop component showcase built on velox-base"
+description = "Velox Component Gallery — interactive cross-platform desktop component & engine showcase built on velox-component"
 
 [lib]
 name = "desktop_app"
@@ -14,6 +14,6 @@ name = "desktop_app"
 path = "src/main.rs"
 
 [dependencies]
-velox-kit = { path = "../../crates/velox-kit", default-features = false, features = ["gpu", "winit", "base", "tokio"] }
+velox-kit = { path = "../../crates/velox-kit", default-features = false, features = ["gpu", "winit", "component", "tokio"] }
 tokio = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["default-tls", "charset", "http2"] }

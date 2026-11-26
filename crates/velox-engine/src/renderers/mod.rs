@@ -268,6 +268,28 @@ pub fn lower_draw_ops<S: LoweredPrimitiveSink + ?Sized>(
                         sink.fill_rect(scaled_bounds, r, c, c, false);
                     }
                 }
+                DrawPayload::RichText(rt) => {
+                    if let Some(first) = rt.spans.first() {
+                        let c = first.color.unwrap_or(rt.default_color);
+                        let fs = first.font_size.unwrap_or(rt.default_font_size);
+                        sink.draw_text(
+                            scaled_bounds,
+                            scaled_clip,
+                            first.text.as_str(),
+                            c,
+                            rt.align as u8,
+                            fs.saturating_mul(s as u8),
+                        );
+                    }
+                }
+                DrawPayload::DecodedImage(img) => {
+                    let c = img.fallback_bg.scale_alpha(img.opacity);
+                    if c.a() > 0 {
+                        let r = img.radii.max_radius().saturating_mul(s as u8);
+                        sink.fill_rect(scaled_bounds, r, c, c, false);
+                    }
+                }
+                DrawPayload::Vector(_) => {}
             }
 
             if needs_elem_clip {

@@ -397,7 +397,11 @@ impl<'a> Widget<'a> for Tabs<'a> {
             }
 
             if self.animated {
-                item = item.animate_color(Duration::from_millis(140));
+                {
+                    item = item
+                        .animate_color(Duration::from_millis(180))
+                        .ease(Easing::Spring);
+                }
             }
 
             item = item.child(

@@ -4,6 +4,34 @@
 use velox_engine::display::measure_line_width_f32;
 use velox_engine::prelude::*;
 
+use core::cell::RefCell;
+use std::collections::HashSet;
+
+std::thread_local! {
+    /// 非受控密码框（开启 `.password(true)` 或 `.password_toggle(true)` 且未提供 `on_toggle_mask` 时）的明文显示开关缓存。
+    static PASSWORD_REVEALED_IDS: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
+}
+
+#[inline]
+fn is_password_revealed(id: u32) -> bool {
+    PASSWORD_REVEALED_IDS.with(|s| s.borrow().contains(&id))
+}
+
+#[inline]
+fn toggle_password_revealed(id: u32) {
+    PASSWORD_REVEALED_IDS.with(|s| {
+        let mut set = s.borrow_mut();
+        if !set.remove(&id) {
+            set.insert(id);
+        }
+    });
+}
+
+const EYE_OPEN_SVG: &str =
+    "M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7ZM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z";
+const EYE_OFF_SVG: &str =
+    "M9.88 9.88a3 3 0 1 0 4.24 4.24M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61M2 2l20 20";
+
 const AUTO_COLOR: Color = Color(0x0000_0001);
 const DOUBLE_CLICK_MS: u32 = 380;
 const DOUBLE_CLICK_SLOP_PX: i16 = 6;
@@ -930,6 +958,8 @@ pub struct TextInput<'a> {
     pub disabled: bool,
     /// 是否以密码掩码圆点（`•`）显示文本。
     pub masked: bool,
+    /// 是否在输入框右侧显示密码可见性切换小眼睛按钮（点击在明文/掩码间切换）。
+    pub password_toggle: bool,
     /// 可选的光标字节偏移位置（`None` 时默认显示在文本末尾）。
     pub cursor_byte_pos: Option<usize>,
     /// 可选的活动选区字节范围 `(start, end)`。
@@ -960,6 +990,7 @@ pub struct TextInput<'a> {
     pub suffix: Option<Element<'a>>,
     pub on_focus: Option<&'a dyn Fn(&mut ActionScope)>,
     pub on_clear: Option<&'a dyn Fn(&mut ActionScope)>,
+    pub on_toggle_mask: Option<&'a dyn Fn(&mut ActionScope)>,
     pub on_key_input: Option<&'a dyn Fn(KeyCode, &mut ActionScope)>,
     /// 亚像素点击与拖拽选区回调：`(text_local_x, is_drag, now_ms, shift)`。
     pub on_pointer_action: Option<&'a dyn Fn((i16, bool, u32, bool), &mut ActionScope)>,
@@ -978,6 +1009,7 @@ impl<'a> TextInput<'a> {
             focused,
             disabled: false,
             masked: false,
+            password_toggle: false,
             cursor_byte_pos: None,
             selection_range: None,
             cursor_blink: true,
@@ -1004,6 +1036,7 @@ impl<'a> TextInput<'a> {
             suffix: None,
             on_focus: None,
             on_clear: None,
+            on_toggle_mask: None,
             on_key_input: None,
             on_pointer_action: None,
             on_secondary_click: None,
@@ -1057,6 +1090,29 @@ impl<'a> TextInput<'a> {
     #[inline(always)]
     pub const fn masked(mut self, masked: bool) -> Self {
         self.masked = masked;
+        self
+    }
+
+    /// 开启或关闭右侧密码可见性切换小眼睛按钮（点击查看/隐藏密码）。
+    #[inline(always)]
+    pub const fn password_toggle(mut self, enabled: bool) -> Self {
+        self.password_toggle = enabled;
+        self
+    }
+
+    /// 一键配置为标准密码输入框（开启掩码显示并附带右侧小眼睛切换按钮）。
+    #[inline(always)]
+    pub const fn password(mut self, enabled: bool) -> Self {
+        self.masked = enabled;
+        self.password_toggle = enabled;
+        self
+    }
+
+    /// 绑定点击右侧密码小眼睛切换按钮时的受控回调（自动显示小眼睛按钮）。
+    #[inline(always)]
+    pub fn on_toggle_mask(mut self, handler: &'a dyn Fn(&mut ActionScope)) -> Self {
+        self.on_toggle_mask = Some(handler);
+        self.password_toggle = true;
         self
     }
 
@@ -1186,11 +1242,21 @@ impl<'a> Widget<'a> for TextInput<'a> {
         let width = StyleExt::resolve_width(self.style, self.width);
         let height = StyleExt::resolve_height(self.style, self.height);
         let show_clear = self.clearable && !self.value.is_empty() && !self.disabled;
+        let show_eye = self.password_toggle && !self.disabled;
+        let effective_masked = if self.on_toggle_mask.is_some() {
+            self.masked
+        } else if self.password_toggle && self.masked {
+            {
+                !is_password_revealed(self.id)
+            }
+        } else {
+            self.masked
+        };
         let inner_h = (height - 2).max(16);
         let font_size: u8 = self.style_ext.text_size.unwrap_or(13);
 
         // 构造完整显示串（掩码模式下由等量 `•` 构成，始终整串渲染不劈裂，彻底消除光标空隙与抖动）
-        let display_str: &'a str = if self.masked && !self.value.is_empty() {
+        let display_str: &'a str = if effective_masked && !self.value.is_empty() {
             let char_count = self.value.chars().count();
             let mask_len = crate::input::MASK_CHAR.len_utf8();
             let bytes = cx.arena().alloc_bytes(char_count * mask_len);
@@ -1209,7 +1275,7 @@ impl<'a> Widget<'a> for TextInput<'a> {
             while b > 0 && !self.value.is_char_boundary(b) {
                 b -= 1;
             }
-            if self.masked {
+            if effective_masked {
                 let chars = self.value[..b].chars().count();
                 chars.saturating_mul(crate::input::MASK_CHAR.len_utf8())
             } else {
@@ -1226,7 +1292,8 @@ impl<'a> Widget<'a> for TextInput<'a> {
         let cursor_x = round_nonneg_i16(cursor_x_f);
 
         // 超长文本自动水平滚屏跟随光标
-        let avail_w = (width - 20 - if show_clear { 24 } else { 0 } - 2).max(20);
+        let trail_reserve = if show_clear { 24 } else { 0 } + if show_eye { 26 } else { 0 };
+        let avail_w = (width - 20 - trail_reserve - 2).max(20);
         let scroll_x = if self.focused && cursor_x + 4 > avail_w {
             cursor_x + 4 - avail_w
         } else {
@@ -1412,6 +1479,55 @@ impl<'a> Widget<'a> for TextInput<'a> {
 
         if let Some(suffix_el) = self.suffix {
             box_div = box_div.child(cx, suffix_el);
+        }
+
+        if show_eye {
+            let eye_svg = if effective_masked {
+                EYE_OPEN_SVG
+            } else {
+                EYE_OFF_SVG
+            };
+            let input_id = self.id;
+            let eye_cb: &'a dyn Fn(&mut ActionScope) = if let Some(cb) = self.on_toggle_mask {
+                cb
+            } else {
+                cx.arena().alloc(move |acx: &mut ActionScope| {
+                    let _ = (input_id, &acx);
+                    {
+                        toggle_password_revealed(input_id);
+                        acx.notify();
+                    }
+                })
+            };
+            let mut eye_btn = div()
+                .id(crate::scoped_child_id(self.id, 0xE7E5_4001, 1))
+                .w(22)
+                .h(22)
+                .rounded(if self.rounded > 0 {
+                    self.rounded.saturating_sub(2).max(3)
+                } else {
+                    4
+                })
+                .items_center()
+                .justify_center()
+                .cursor(CursorShape::Pointer)
+                .animate_color(Duration::from_millis(120))
+                .child(
+                    cx,
+                    svg_icon(14, 14, eye_svg)
+                        .tint(clear_icon_color)
+                        .stroke_width(18),
+                )
+                .on_click_raw(eye_cb)
+                .unfocusable()
+                .occlude_hit();
+            if let Some(h) = self.clear_hover_bg {
+                eye_btn = eye_btn.hover_bg(h);
+            }
+            if let Some(a) = self.clear_active_bg {
+                eye_btn = eye_btn.active_bg(a);
+            }
+            box_div = box_div.child(cx, eye_btn);
         }
 
         if show_clear {

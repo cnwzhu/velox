@@ -183,6 +183,18 @@ impl<'a> HitRegion<'a> {
     }
 
     #[inline(always)]
+    pub fn on_hover(&self) -> Option<&'a dyn Fn(bool, &mut ActionScope)> {
+        self.interact.and_then(|i| i.rare).and_then(|r| r.on_hover)
+    }
+
+    #[inline(always)]
+    pub fn on_pointer_move(&self) -> Option<&'a dyn Fn(&mut ActionScope)> {
+        self.interact
+            .and_then(|i| i.rare)
+            .and_then(|r| r.on_pointer_move)
+    }
+
+    #[inline(always)]
     pub fn on_swipe(&self) -> Option<&'a dyn Fn(crate::pod::SwipeDir, &mut ActionScope)> {
         self.interact.and_then(|i| i.rare).and_then(|r| r.on_swipe)
     }
@@ -286,6 +298,51 @@ pub(super) fn outer_box_spec(elem: &Element<'_>) -> OuterBoxSpec {
             max_w: img.width,
             min_h: img.height,
             max_h: img.height,
+            margin: Edges::all(0),
+            pos: None,
+            flex_grow: 0,
+            align_self: None,
+            flex_dir: FlexDir::Col,
+            justify: Justify::Start,
+        },
+        Element::RichText(_) => OuterBoxSpec {
+            kind: 2,
+            width: Length::Auto,
+            height: Length::Auto,
+            min_w: 0,
+            max_w: 0,
+            min_h: 0,
+            max_h: 0,
+            margin: Edges::all(0),
+            pos: None,
+            flex_grow: 0,
+            align_self: None,
+            flex_dir: FlexDir::Col,
+            justify: Justify::Start,
+        },
+        Element::DecodedImage(img) => OuterBoxSpec {
+            kind: 3,
+            width: Length::Px(img.width),
+            height: Length::Px(img.height),
+            min_w: img.width,
+            max_w: img.width,
+            min_h: img.height,
+            max_h: img.height,
+            margin: Edges::all(0),
+            pos: None,
+            flex_grow: 0,
+            align_self: None,
+            flex_dir: FlexDir::Col,
+            justify: Justify::Start,
+        },
+        Element::Vector(vec_spec) => OuterBoxSpec {
+            kind: 3,
+            width: Length::Px(vec_spec.width),
+            height: Length::Px(vec_spec.height),
+            min_w: vec_spec.width,
+            max_w: vec_spec.width,
+            min_h: vec_spec.height,
+            max_h: vec_spec.height,
             margin: Edges::all(0),
             pos: None,
             flex_grow: 0,

@@ -13,7 +13,7 @@ description = "The one crate applications depend on — unified facade re-export
 default = ["gpu", "winit", "component"]
 
 # 运行时与窗口（纯 Rust 平台桥接 wayland / android / ios / harmony / web 随 std 自动可用）
-std = ["velox-engine/std"]
+std = ["velox-engine/std", "velox-base?/std", "velox-component?/std"]
 winit = ["std", "velox-engine/winit"]
 
 # GPU 硬件加速后端（内置 software 软光栅始终可用；关闭 default-features 并启用 std 即纯软件渲染）
@@ -29,7 +29,7 @@ tokio = ["std", "dep:velox-async", "velox-async/tokio"]
 smol = ["std", "dep:velox-async", "velox-async/smol"]
 
 [dependencies]
-velox-engine = { version = "0.2.0", path = "../velox-engine", default-features = false }
-velox-base = { version = "0.2.0", path = "../velox-base", optional = true }
-velox-component = { version = "0.2.0", path = "../velox-component", optional = true }
-velox-async = { version = "0.2.0", path = "../velox-async", default-features = false, optional = true }
+velox-engine = { version = "0.3.0", path = "../velox-engine", default-features = false }
+velox-base = { version = "0.3.0", path = "../velox-base", optional = true }
+velox-component = { version = "0.3.0", path = "../velox-component", optional = true }
+velox-async = { version = "0.3.0", path = "../velox-async", default-features = false, optional = true }

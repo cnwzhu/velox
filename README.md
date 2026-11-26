@@ -1,158 +1,229 @@
-# Velox GUI Framework
+<div align="center">
 
-> 轻量级、帧级零堆分配友好的跨平台 Rust GUI 框架，基于 **`MPL-2.0`** 开源协议发布。
+# Velox
 
-## 核心特性
+**现代、极速、高颜值的跨平台 Rust 原生 GUI 框架**
 
-- **帧级零堆瞬态内存**：`ScratchArena` 帧级瞬态分配、`PodPool` / `Handle<T>` 稳定状态池与局部重绘边界，原生覆盖桌面（Windows / macOS / Pure Wayland）、移动（Android / iOS / HarmonyOS）与 WebAssembly 目标。
-- **双渲染后端与 HiDPI 精准排版**：默认启用自研轻量级 `wgpu` 2D SDF 单 Pass Instanced GPU 硬件渲染器，内置软件 SDF 扫描线光栅器；支持 `0.25px` 亚像素精确字号光栅化（125% / 150% / 175% / 200% DPI 零漂移）与 24×24 原生矢量 SVG 图标图集缓存。
-- **按需刷新与 0% CPU 休眠**：跨帧脏矩形追踪（`DamageTracker`）、0 脏区跳过 GPU 提交，静止状态下自动进入事件驱动休眠。
-- **完备文本与代码编辑引擎**：基于 `BufferLine` / `TextDocBuffer` / `CosmicEditor` / `SyntaxEditor` 的按需排版管线，支持软折行、530ms 标准闪烁叠层光标、亚像素鼠标任意拖选、双击选词/三击选行、全套快捷键（`Ctrl+A/C/X/V/Z/Y`、`Shift+方向键`）、右键上下文菜单与跨平台原生系统剪贴板。
-- **语义化双主题与国际化**：内置 `Dark` / `Light` 现代中性语义令牌（`CoreTheme`）、动态指针形状（`CursorShape`）、键盘可见焦点环（`:focus-visible`）及编译期静态多语言目录（`Locale` / `cx.t(...)`）。
+一套纯 Rust 声明式代码，构建桌面、移动与 Web 原生体验 —— 75+ 主题组件、物理弹簧动效、实时毛玻璃特效与 **0% CPU 静止休眠**。
 
-## Crate 分层架构
+<p>
+  <strong>简体中文</strong> &nbsp;|&nbsp; <a href="README.en.md">English</a>
+</p>
 
-- `crates/velox-engine`：核心 UI 引擎内核
-  - 帧级瞬态内存管理（`ScratchArena`、`SmallVec`、`StrRef`）
-  - 状态池、细粒度响应式信号与局部重绘边界（`PodPool`、`Handle<T>`、`Signal<T>`、`View`、`Widget`）
-  - 四步一维弹性布局求解器（`Two-Pass Axis Solver`）、跨帧插值动画（`MotionCache` / `Tween` / `Presence`）与脏矩形合并器（`DamageTracker`）
-  - 双渲染后端：`gpu`（`wgpu` 2D SDF 单 Pass Instanced 渲染器）与 `software`（内置 SDF 扫描线光栅化）
-  - 跨平台窗口、剪贴板与事件层：`winit`、`wayland`（纯客户端二进制协议）、`mobile`（Android / iOS / HarmonyOS）、`web`（WebAssembly）、`testing`（无头确定性测试）
-- `crates/velox-base`：70+ 可组合基础组件、文本/代码编辑引擎（`EditableText`、`TextInput`、`Textarea`、`CodeEditor`、`SyntaxEditor`）、页面路由栈（`Navigator`）与虚拟滚动列表（`VirtualList` / `UniformList`）
-- `crates/velox-component`：Tailwind 风格主题化 UI 组件库
-- `crates/velox-async`：可选异步调度器适配层（`tokio` / `smol`）
-- `crates/velox-kit`：应用层统一入口 Crate（重导出 `velox-engine`、`velox-base`、`velox-component` 与 `velox-async`）
+<p>
+  <a href="https://crates.io/crates/velox-kit"><img src="https://img.shields.io/crates/v/velox-kit.svg?style=flat-square&color=3B82F6" alt="crates.io" /></a>
+  <a href="https://docs.rs/velox-kit"><img src="https://img.shields.io/docsrs/velox-kit?style=flat-square" alt="docs.rs" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MPL--2.0-22C55E?style=flat-square" alt="License" /></a>
+  <img src="https://img.shields.io/badge/platforms-Win%20%7C%20macOS%20%7C%20Linux%20%7C%20Android%20%7C%20iOS%20%7C%20HarmonyOS%20%7C%20Web-18181B?style=flat-square" alt="Platforms" />
+</p>
 
-## 快速开始
+<img src="https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-overview-dark.png" alt="Velox Component Gallery" width="920" />
 
-在 `Cargo.toml` 中引入统一入口 `velox-kit`：
+</div>
+
+---
+
+## 为什么选择 Velox？
+
+- **🎨 75+ 开箱即用的现代主题组件**：内置 Shadcn / Tailwind 风格设计系统，一键切换亮色 / 暗色主题与多语言，涵盖按钮、表单、密码查看、分格 OTP 验证码、日期选择、代码编辑器、数据表、交互图表、抽屉、弹窗与 AI 对话流。
+- **✨ 丝滑物理弹簧动效 + 0% CPU 休眠**：按钮、开关、进度条、页签、弹窗、图表与聊天气泡默认自带可打断二阶物理弹簧动画；画面静止后自动挂起，**零轮询、零电量浪费**。
+- **🪟 GPU 硬件加速与现代视觉特效**：自带轻量 2D GPU 渲染管线（无 GPU 时自动回退软件光栅），原生支持多色标 OKLab 渐变、实时 Acrylic 毛玻璃、27 种混合模式、柔和阴影、SVG 路径裁剪与抗锯齿矢量画布。
+- **⚡ 优雅的 Rust 链式写法**：无 WebView 内存负担、无需 HTML/CSS 桥接、无需复杂宏魔法，直观的 Flexbox / Grid 链式 API 让你像写 Tailwind 一样快速构建原生应用。
+- **📱 全平台一次编写**：原生覆盖 **Windows、macOS、Linux（Wayland / X11）、Android、iOS、HarmonyOS NEXT** 与 **WebAssembly**。
+- **🔌 零拷贝融合外部渲染**：支持将 3D 引擎、地图/海图或视频画面零拷贝嵌入 Velox 界面，也可将 Velox 作为透明 HUD 直接零拷贝嵌入 Qt、WPF、WinUI 3 与 GTK4。
+
+---
+
+## 30 秒快速上手
+
+在 `Cargo.toml` 中添加统一入口 `velox-kit`：
 
 ```toml
 [dependencies]
-velox-kit = "0.1"
+velox-kit = "0.3"
 ```
 
-如需关闭 GPU 默认后端（仅使用内置软件光栅器）或开启 Tokio / smol 异步调度器：
+编写你的第一个 Velox 原生桌面应用：
 
-```toml
-[dependencies]
-velox-kit = { version = "0.1", default-features = false, features = ["winit", "component", "tokio"] }
+```rust
+use velox_kit::prelude::*;
+
+pub struct HelloWorld {
+    clicks: u32,
+}
+
+impl View for HelloWorld {
+    fn render<'a>(&mut self, cx: &'a mut Scope<Self>) -> Element<'a> {
+        let on_click = cx.listener(|this, _: ClickEvent, _| {
+            this.clicks += 1;
+        });
+
+        div()
+            .flex_col()
+            .gap(12)
+            .size_full()
+            .items_center()
+            .justify_center()
+            .bg(cx.theme().background)
+            .child(
+                cx,
+                text(fmt!(cx, "Hello, Velox! ({})", self.clicks))
+                    .size(20)
+                    .color(cx.theme().foreground),
+            )
+            .child(
+                cx,
+                Button::new(1, "Let's Go!")
+                    .primary()
+                    .medium()
+                    .on_click(on_click),
+            )
+            .into_element(cx)
+    }
+}
+
+fn main() {
+    velox_kit::application().run(|cx| {
+        velox_kit::init(cx);
+        velox_kit::open_window(
+            WindowOptions::new("Hello Velox").size(480, 320),
+            cx,
+            |cx| cx.new(|_| HelloWorld { clicks: 0 }),
+        )
+        .expect("Failed to open window");
+    });
+}
 ```
 
-## Velox Base Gallery 组件画廊 (`examples/desktop_app`)
+### 立即体验 15 页互动组件画廊
 
-`examples/desktop_app` 是直接基于 `velox-base` 原语构建的跨平台交互式组件画廊（默认窗口逻辑尺寸 `1080×700`），覆盖全部高频桌面交互、键盘无障碍导航、浮层遮罩与多语言热切换：
-
-- **应用壳层**：顶部栏内置 `EN / 中文 / 日本語` 三语实时切换、右上角浮动 `Toast` 通知触发、`Dark / Light` 主题即时切换与 `About` 模态对话框；左侧提供 4 大分组可折叠 `Sidebar`；底部为实时事件计数与主题状态 `StatusBar`；在输入框与代码编辑器内右击可唤起不抢焦点的 `ContextMenu`（`Cut` / `Copy` / `Paste` / `Select All`），直接与系统剪贴板互通。
-
-### 界面预览与说明
-
-以下截图均由 `desktop_app` 通过硬件 `wgpu` 2D SDF 管线在 **150% HiDPI (`1620×1050`)** 下实机离屏渲染生成：
-
-| Overview（暗色主题 · 英文） | Overview（亮色主题 · 中文热切换） |
-| :---: | :---: |
-| ![Overview Dark](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-overview-dark.png) | ![Overview Light ZH](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-overview-light-zh.png) |
-| 展示完整画廊壳层（顶栏、4 分组可折叠 `Sidebar`、底栏 `StatusBar`）、实时 SDF `ArcGauge` / `Slider` / `Switch` 体验台与现代中性语义色板。 | 点击顶栏即可零重启切换 `ThemeMode::Light` 与 `zh-CN` 静态多语言目录，全部侧边栏、标题、按钮与状态栏同步更新。 |
-
-| Button & Toggle（按钮与切换组） | Switch & Slider（开关、滑块与 SDF 仪表） |
-| :---: | :---: |
-| ![Button & Toggle](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-buttons.png) | ![Switch & Slider](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-sliders.png) |
-| 8 档语义变体（`Primary` / `Secondary` / `Outline` / `Ghost` / `Danger` / `Success` / `Warning` / `Info`）、3 档尺寸、旋转等待 `Loading` 态、`Unstyled` 逃生舱与 `ToggleGroup`。 | 3 档标准尺寸开关（`28×16` / `36×20` / `44×24`）及左右标签、连续与步进 `Slider`，以及实时联动的 `ProgressBar` 与解析圆弧 SDF `ArcGauge`。 |
-
-| Inputs & Select（输入框、选区与右键菜单） | Code Editor（多行 Rust 代码编辑器） |
-| :---: | :---: |
-| ![Inputs & Select](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-inputs.png) | ![Code Editor](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-editor.png) |
-| 4 组输入控件严密齐平；支持 530ms 闪烁细光标、亚像素鼠标任意拖选（图示选中 `velox`）、双击选词/三击全选，以及不丢焦点的右键 `ContextMenu` 系统剪贴板复制粘贴。 | 基于 `BufferLine` / `LayoutRun` 的按需排版与增量 Rust 语法高亮，提供行号、缩进参考线、软折行切换、撤销/重做与实时行列状态栏。 |
-
-| Dialog & Modal（浮层模态与遮罩拦截） | Table, List & Tree（数据密集型视图） |
-| :---: | :---: |
-| ![Dialog & Modal](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-overlays.png) | ![Table & List](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-data.png) |
-| 顶层 `.overlay().occlude_hit()` 全屏半透明遮罩严格拦截底层事件，支持解析圆角高斯柔和阴影、原生 SVG 关闭图标与 `Esc` 键关闭。 | 可点击表头排序与行选中的 `DataTable`、带右侧性能指标的双行 `List`，以及带矢量展开箭头的层级 `Tree` 视图。 |
-
-### 11 个交互故事页一览
-
-| 分组 | 故事页 | `--story` 参数 | 展示组件与交互能力 |
-| --- | --- | --- | --- |
-| **ACTIONS & INPUTS** | Overview | `overview` | 语义主题色板矩阵、实时交互快速体验台（`ArcGauge`、`Slider`、`Switch`、`Checkbox`、`ProgressBar`）与核心特性徽章 |
-| | Button & Toggle | `buttons` | 8 档语义变体、3 档尺寸、`Selected` / `Loading`（旋转动画）/ `Disabled` / `Unstyled` 按钮，以及 `Toggle` 与 `ToggleGroup` |
-| | Checkbox & Radio | `selection` | 三态（未选/已选/半选）父子联动原生 SVG 复选框、键盘方向键循环切换 `RadioGroup` |
-| | Switch & Slider | `sliders` | 3 档标准尺寸（`28×16` / `36×20` / `44×24`）左右标签开关、连续/步进滑块与联动 `ProgressBar` / SDF `ArcGauge` |
-| | Inputs & Select | `inputs` | 可清空/密码掩码/禁用 `TextInput`（530ms 闪烁光标、鼠标任意拖选、双/三击选词全选、右键剪贴板菜单）、`NumberInput`、`Select` 与 `Dropdown` |
-| **NAVIGATION & EDITOR** | Tabs & Accordion | `navigation` | `Tabs` 三变体（`Segmented` / `Underline` / `Pill`）、可折叠 `Accordion`、`Stepper` 步骤条与 `Pagination` 分页器 |
-| | Code Editor | `editor` | 完整 `CodeEditor`（Rust 语法高亮、软折行切换、行号与诊断指示、缩进参考线、亚像素拖选、双/三击选词选行、撤销/重做与右键复制粘贴） |
-| **OVERLAYS & FEEDBACK** | Dialog & Modal | `overlays` | 交互式唤起 `Dialog`、`AlertDialog`（危险确认）、`Modal` 与侧边抽屉 `Sheet`（顶层遮罩命中拦截与 `Esc` 关闭） |
-| | Alerts & Badges | `feedback` | 4 档矢量图标 `Alert`、8 档 `Badge`、`Tag`、`Tooltip`、`Popover`、`Kbd` 快捷键与带在线状态 `Avatar` |
-| **DATA DISPLAY** | Table & List | `data` | 可点击表头排序与行选中的 `DataTable`、交互列表 `List` 与可展开/折叠层级 `Tree` |
-| | Settings & Icons | `icons` / `settings` | 分组应用设置面板 `Settings`（内置开关切换）与 19 个内置 Lucide 矢量 `IconName` 全览展板 |
-
-### 画廊运行方式与 CLI 参数
-
-```powershell
-# 默认启动原生桌面画廊窗口（wgpu 2D SDF GPU 硬件加速，暗色主题）
+```bash
+# 启动原生 GPU 硬件加速桌面组件画廊
 cargo run -p desktop_app
 
-# 直达指定故事页并以亮色主题 + 中文界面启动
+# 直达指定亮点页面（支持亮色主题与中/英/日三语实时切换）
+cargo run -p desktop_app -- --story effects
+cargo run -p desktop_app -- --story motion
+cargo run -p desktop_app -- --story chat
 cargo run -p desktop_app -- --story inputs --light --lang zh
-
-# 直接打开代码编辑器故事页
-cargo run -p desktop_app -- --story editor
-
-# 切换内置软件光栅渲染器运行
-cargo run -p desktop_app -- --software
-
-# 渲染并导出指定故事页的 2x HiDPI 无损 PNG 快照
-cargo run -p desktop_app -- --story overview --scale 2 --save-png gallery.png
-
-# 无头模式验证 Winit 局部脏区刷新与 Wayland 0% CPU 休眠
-cargo run -p desktop_app -- --headless
 ```
 
-支持的 CLI 参数：
+---
 
-| 参数 | 说明 |
+## 实机效果预览
+
+以下全部界面均由 Velox 原生渲染引擎在 **2× HiDPI** 下实机渲染导出，无任何 WebView 或外部 CSS 依赖：
+
+### 亮色 / 暗色主题与多语言实时热切换
+
+| 暗色主题（英文） | 亮色主题（中文零重启切换） |
+| :---: | :---: |
+| ![Overview Dark](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-overview-dark.png) | ![Overview Light ZH](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-overview-light-zh.png) |
+| 完整应用壳层、响应式仪表盘、Tokio 异步任务演示与现代语义色板。 | 顶栏一键即时切换亮/暗主题与多语言目录，全部组件同步过渡。 |
+
+### GPU 特效实验室 & 物理弹簧动效
+
+| 实时毛玻璃、OKLab 渐变与混合模式 | 二阶物理弹簧实验室与实时示波器 |
+| :---: | :---: |
+| ![Effects & Shaders](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-effects.png) | ![Motion & Physics](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-motion.png) |
+| 感知均匀 OKLab 渐变、圆锥光谱、实时 Acrylic 毛玻璃、27 种混合模式与 SVG 裁剪。 | 5 档物理弹簧预设、运动中途平滑打断、速度冲量与自动 0% CPU 收敛。 |
+
+### AI 流式对话 & 富文本 / 矢量画布
+
+| AI 对话流与流式打字机 | 富文本 BiDi / Emoji、图片管线与矢量雷达 |
+| :---: | :---: |
+| ![AI Chat](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-chat.png) | ![Engine Lab](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-engine.png) |
+| 弹簧弹入消息气泡、3 点思考波浪、流式光标、互动表情与回底悬浮按钮。 | 多字族/编程连字/双向文本排版、纯 Rust PNG 解码、九宫格拉伸与抗锯齿矢量画布。 |
+
+### 现代输入表单 & 原生代码编辑器
+
+| 密码小眼睛、分格 OTP、选择器与日历 | 多行 Rust 语法高亮代码编辑器 |
+| :---: | :---: |
+| ![Inputs & Select](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-inputs.png) | ![Code Editor](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-editor.png) |
+| 一键清空输入、带小眼睛切换的密码框、无外框分组 OTP 验证码、取色器与插槽日历。 | 增量语法高亮、软折行、亚像素鼠标拖选、双/三击选词选行、撤销重做与系统剪贴板。 |
+
+### 语义按钮体系 & 数据表与交互图表
+
+| 8 档语义按钮与切换组 | 可排序数据表、指标列表与交互式动画图表 |
+| :---: | :---: |
+| ![Buttons & Toggle](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-buttons.png) | ![Data & Charts](https://raw.githubusercontent.com/cnwzhu/velox/main/docs/screenshots/gallery-data.png) |
+| 8 种语义变体、无闪烁平滑悬停过渡、Loading 加载态、圆角胶囊与 `ToggleGroup`。 | 支持排序与选中的 `DataTable`、树形目录、Diff 对比及带悬停追踪与扇区弹出动画的 `Chart`。 |
+
+---
+
+## 丰富的开箱即用组件生态
+
+| 类别 | 内置组件 |
 | --- | --- |
-| `--window`（默认） | 启动原生桌面画廊窗口（Windows / macOS / Pure Wayland） |
-| `--software` | 切换至内置软件 SDF 光栅渲染器（`DesktopRenderBackend::Software`） |
-| `--light` | 以亮色主题（`ThemeMode::Light`）启动（默认暗色 `ThemeMode::Dark`） |
-| `--story <name>` | 直达指定故事页：`overview` / `buttons` / `selection` / `sliders` / `inputs` / `navigation` / `editor` / `overlays` / `feedback` / `data` / `icons` |
-| `--lang <en\|zh\|ja>` | 指定初始显示语言（默认 `en`） |
-| `--scale <1..4>` | 覆盖 HiDPI 缩放倍率（窗口模式默认自动跟随系统 DPI，无头/截图模式默认 `2`） |
-| `--save-png <path>` | 渲染首帧并导出无损 PNG 画廊快照后退出 |
-| `--headless` | 无显示服务器环境下执行确定性帧步进、脏区与空闲休眠验证 |
+| **基础与表单** | `Button`、`Toggle`、`ToggleGroup`、`Checkbox`（三态）、`RadioGroup`、`Switch`、`Slider`、`TextInput`（清空 / 密码小眼睛 / 拖选 / 右键剪贴板）、`NumberInput`、`OtpInput`、`Textarea`、`Select`、`Dropdown`、`ColorPicker`、`Calendar` |
+| **导航与布局** | `Sidebar`、`Tabs`（分段 / 下划线 / 胶囊）、`Accordion`、`Breadcrumb`、`Stepper`、`Pagination`、`StatusBar`、`ResizableSplit`、`VirtualList`、`Navigator` |
+| **反馈与浮层** | `Dialog`、`AlertDialog`、`Modal`、`Sheet`（四向抽屉）、`Notification`、`Toast`、`Alert`、`Badge`、`Tag`、`Tooltip`、`Popover`、`ContextMenu`、`ProgressBar`、`ArcGauge`、`Spinner`、`Skeleton`、`Rating`、`Avatar`、`Kbd` |
+| **数据与专业场景** | `DataTable`、`List`、`Tree`、`Chart`（折线 / 面积 / 柱状 / 环形饼图 / K 线，含悬停追踪与 Morphing 动效）、`Diff`、`DescriptionList`、`CodeEditor`、`SyntaxEditor`、`Message` / `Bubble` / `MessageScroller`（AI 对话流）、`Settings` |
+| **特效、动效与图形** | `SpringAnimator`、`SpringProgress`、`SpringCard`、`SpringReveal`、`Carousel`、`Roller`、`VectorCanvas`、`RichText`、`Image`（内置 PNG/BMP 解码与 `NineSlice`）、`Svg`、`Icon`（21 个内置 Lucide 矢量图标）、`SurfaceCanvas`（外部零拷贝纹理） |
 
-## 其他示例应用 (`examples/`)
+---
 
-- `examples/android_app`：Android JNI / NDK Surface 示例
-- `examples/ios_app`：iOS UIKit / Metal 示例
-- `examples/harmony_app`：HarmonyOS NEXT XComponent 示例
-- `examples/web_app`：WebAssembly (`wasm32-wasip2`) HTML5 Canvas 示例
+## 全平台与可选特性
 
-## AI Agent 技能 (`skills/`)
+| 平台 | 支持形态 | 示例入口 |
+| --- | --- | --- |
+| **Windows / macOS / Linux** | 原生窗口（`wgpu` GPU 加速 / 自动软件回退 / Pure Wayland） | `examples/desktop_app`、`examples/hello_world` |
+| **Android / iOS / HarmonyOS** | 原生 Surface / Metal / XComponent 宿主桥接 | `examples/android_app`、`examples/ios_app`、`examples/harmony_app` |
+| **Web (WASM)** | WebAssembly Canvas / WebGPU 运行时 | `examples/web_app` |
+| **宿主框架零拷贝嵌入** | 统一 C ABI + DX12 / Vulkan DMA-BUF / IOSurface（Qt6 / WPF / WinUI 3 / GTK4） | `features = ["gpu-interop"]` |
 
-仓库内提供遵循渐进式披露规范的编码与界面设计技能，已通过 `.agents/skills.json` 自动注册：
+按需启用特性组合：
 
-- `skills/velox-kit`：Velox 架构规范、`ScratchArena` 生命周期、`View`/`PodPool`、`Signal<T>`、70+ 组件目录、平台后端与无头集成测试指南（[SKILL.md](skills/velox-kit/SKILL.md)）
-- `skills/velox-design-guides`：跨桌面/移动端 `CoreTheme` 语义令牌、壳层布局、浮层遮罩与动效节能设计规范（[SKILL.md](skills/velox-design-guides/SKILL.md)）
+```toml
+[dependencies]
+# 默认开箱即用：桌面原生窗口 + GPU 硬件加速 + 75+ 主题组件
+velox-kit = "0.3"
 
-## 构建与测试
+# 启用跨框架零拷贝 GPU 互操作（嵌入 Qt / WPF / WinUI 3 / GTK4 等）
+# velox-kit = { version = "0.3", features = ["gpu-interop"] }
 
-```powershell
-# 运行全工作区单元测试与集成测试
+# 搭配 Tokio 异步运行时，或切换轻量纯软件渲染模式
+# velox-kit = { version = "0.3", features = ["tokio"] }
+# velox-kit = { version = "0.3", default-features = false, features = ["winit", "component"] }
+```
+
+---
+
+## 工作区结构
+
+| Crate | 定位 |
+| --- | --- |
+| **`velox-kit`** | 推荐应用层统一入口，一站式引入引擎、组件与异步适配 |
+| **`velox-component`** | 75+ Shadcn 风格主题化组件库与 `motion` 物理弹簧动效体系 |
+| **`velox-base`** | 无头可组合组件原语、代码编辑器、虚拟列表与路由栈 |
+| **`velox-engine`** | 核心渲染、布局、动效、富文本、图片解码与跨平台窗口内核 |
+| **`velox-async`** | 可选 `tokio` / `smol` 异步调度器集成 |
+
+> **AI 辅助开发**：仓库内置遵循渐进式披露规范的编码与界面设计技能（[skills/velox-kit](skills/velox-kit/SKILL.md)、[skills/velox-design-guides](skills/velox-design-guides/SKILL.md)），让 AI 编码助手开箱即可写出地道高效的 Velox 界面。
+
+---
+
+## 画廊常用命令
+
+```bash
+# 运行全部自动化单元测试与画廊集成测试
 cargo test --workspace
 
-# 验证最小软光栅裁剪构建矩阵与可选异步调度器特性
-cargo check -p velox-engine --no-default-features
-cargo check -p velox-kit --no-default-features --features component
-cargo test -p velox-async --all-features
-cargo test -p velox-kit --features tokio,smol
+# 导出任意故事页的 2x HiDPI 无损 PNG 截图
+cargo run -p desktop_app -- --story overview --scale 2 --save-png preview.png
 
-# 生成全工作区 API 文档
-cargo doc --no-deps --workspace
+# 切换内置软件渲染器运行
+cargo run -p desktop_app -- --software
 ```
+
+可用 `--story` 页面：`overview` · `buttons` · `selection` · `sliders` · `inputs` · `navigation` · `editor` · `overlays` · `feedback` · `data` · `icons` · `effects` · `motion` · `engine` · `chat`
+
+
+---
 
 ## 开源协议
 
-本项目采用 **Mozilla Public License 2.0 (`MPL-2.0`)** 开源，完整条款见 [LICENSE](LICENSE)。
+本项目基于 **Mozilla Public License 2.0 (`MPL-2.0`)** 开源，完整条款见 [LICENSE](LICENSE)。
 
-- 对 `velox` 框架本身文件（Covered Software）的修改必须以 `MPL-2.0` 公开源码；
-- 下游应用（`Larger Work`）可直接静态链接未修改的 `velox` 库（支持搭配 `GPL-3.0` 等开源桌面项目或专有商业软件）。
+- 你可以自由地将未修改的 Velox 静态链接至开源项目或专有商业软件中；
+- 对 Velox 框架自身文件的修改需在 `MPL-2.0` 协议下保持开源。

@@ -1,9 +1,8 @@
-//! `Overview` 故事页：无样式 `velox-base` 应用层单色直角令牌矩阵 + 实时交互快速体验台 + 架构特性。
+//! `Overview` 故事页：`velox-component` 语义主题色板矩阵 + 实时交互体验台 + 架构特性。
 
 use super::{state_pill, story_header, story_section};
-use crate::style::{self, BasePalette};
 use crate::GalleryApp;
-use velox_kit::base::{ArcGauge, Badge, Button, Checkbox, ProgressBar, Slider, Switch};
+use velox_kit::component::{ArcGauge, Badge, Button, Checkbox, ProgressBar, Slider, Switch};
 use velox_kit::prelude::*;
 
 impl GalleryApp {
@@ -12,16 +11,15 @@ impl GalleryApp {
         cx: &'a Scope<Self>,
         theme: CoreTheme,
     ) -> Div<'a> {
-        let p = BasePalette::from_theme(theme);
-
         let swatch = |name: &'a str, bg: Color, fg: Color| -> Div<'a> {
             div()
                 .flex_col()
-                .w(112)
+                .w(108)
                 .h(52)
                 .p(8)
+                .rounded(6)
                 .bg(bg)
-                .border(1, p.border_strong)
+                .border(1, theme.border)
                 .justify_between()
                 .child(cx, text(name).size(11).color(fg))
                 .child(
@@ -35,8 +33,8 @@ impl GalleryApp {
         let palette_section = story_section(
             cx,
             theme,
-            "App-Owned High-Contrast Palette (velox-base is Headless)",
-            "All surfaces, borders & solid accents are styled explicitly in desktop_app/src/style.rs",
+            "Semantic Theme Palette (velox-component Shadcn Zinc + Blue)",
+            "Automatic Dark / Light semantic tokens shared across all 75+ velox-component widgets",
         )
         .child(
             cx,
@@ -44,13 +42,14 @@ impl GalleryApp {
                 .flex_row()
                 .flex_wrap()
                 .gap(8)
-                .child(cx, swatch("canvas", p.canvas, p.fg))
-                .child(cx, swatch("surface", p.surface, p.fg))
-                .child(cx, swatch("subtle", p.surface_subtle, p.fg))
-                .child(cx, swatch("solid", p.solid_bg, p.solid_fg))
-                .child(cx, swatch("danger", p.danger_bg, p.danger_fg))
+                .child(cx, swatch("background", theme.background, theme.foreground))
+                .child(cx, swatch("card", theme.card, theme.foreground))
+                .child(cx, swatch("primary", theme.primary, theme.primary_foreground))
+                .child(cx, swatch("secondary", theme.secondary, theme.secondary_foreground))
                 .child(cx, swatch("success", theme.success, theme.success_foreground))
-                .child(cx, swatch("warning", theme.warning, theme.warning_foreground)),
+                .child(cx, swatch("warning", theme.warning, theme.warning_foreground))
+                .child(cx, swatch("danger", theme.danger, theme.danger_foreground))
+                .child(cx, swatch("info", theme.info, theme.info_foreground)),
         );
 
         let playground_elem: Element<'a> = if let Some(pg_handle) = self.overview_playground {
@@ -98,8 +97,9 @@ impl GalleryApp {
                         .h_full()
                         .p(16)
                         .gap(12)
-                        .bg(p.surface)
-                        .border(1, p.border)
+                        .rounded(8)
+                        .bg(theme.card)
+                        .border(1, theme.border)
                         .items_center()
                         .child(
                             cx,
@@ -109,18 +109,19 @@ impl GalleryApp {
                                 .items_center()
                                 .child(
                                     cx,
-                                    svg_icon(14, 14, "M22 12h-4l-3 9L9 3l-3 9H2").tint(p.fg),
+                                    svg_icon(14, 14, "M22 12h-4l-3 9L9 3l-3 9H2")
+                                        .tint(theme.primary),
                                 )
-                                .child(cx, text(cx.t("ov.load_title")).size(13).color(p.fg)),
+                                .child(
+                                    cx,
+                                    text(cx.t("ov.load_title")).size(13).color(theme.foreground),
+                                ),
                         )
                         .child(
                             cx,
-                            style::arc_gauge(
-                                ArcGauge::new(301, 108, cpu_load)
-                                    .thickness(10)
-                                    .label(fmt!(cx, "{}%", cpu_load)),
-                                theme,
-                            ),
+                            ArcGauge::new(301, 108, cpu_load)
+                                .thickness(10)
+                                .label(fmt!(cx, "{}%", cpu_load)),
                         )
                         .child(
                             cx,
@@ -129,25 +130,19 @@ impl GalleryApp {
                                 .gap(8)
                                 .child(
                                     cx,
-                                    style::btn_outline(
-                                        Button::new(304, "-10%")
-                                            .font_size(12)
-                                            .w(74)
-                                            .h(28)
-                                            .on_click(on_dec_load),
-                                        theme,
-                                    ),
+                                    Button::new(304, "-10%")
+                                        .outline()
+                                        .small()
+                                        .w(74)
+                                        .on_click(on_dec_load),
                                 )
                                 .child(
                                     cx,
-                                    style::btn_solid(
-                                        Button::new(305, "+10%")
-                                            .font_size(12)
-                                            .w(74)
-                                            .h(28)
-                                            .on_click(on_inc_load),
-                                        theme,
-                                    ),
+                                    Button::new(305, "+10%")
+                                        .primary()
+                                        .small()
+                                        .w(74)
+                                        .on_click(on_inc_load),
                                 ),
                         ),
                 )
@@ -159,8 +154,9 @@ impl GalleryApp {
                         .h_full()
                         .p(16)
                         .gap(12)
-                        .bg(p.surface)
-                        .border(1, p.border)
+                        .rounded(8)
+                        .bg(theme.card)
+                        .border(1, theme.border)
                         .child(
                             cx,
                             div()
@@ -181,11 +177,13 @@ impl GalleryApp {
                                                 14,
                                                 "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20ZM12 6v6l4 2",
                                             )
-                                            .tint(p.fg),
+                                            .tint(theme.primary),
                                         )
                                         .child(
                                             cx,
-                                            text(cx.t("ov.budget_title")).size(13).color(p.fg),
+                                            text(cx.t("ov.budget_title"))
+                                                .size(13)
+                                                .color(theme.foreground),
                                         ),
                                 )
                                 .child(
@@ -193,23 +191,14 @@ impl GalleryApp {
                                     state_pill(cx, theme, fmt!(cx, "{} FPS", frame_budget)),
                                 ),
                         )
+                        .child(cx, ProgressBar::new(302, 280, cpu_load).height(8))
                         .child(
                             cx,
-                            style::progress_bar(
-                                ProgressBar::new(302, 280, cpu_load).height(8),
-                                theme,
-                            ),
-                        )
-                        .child(
-                            cx,
-                            style::slider(
-                                Slider::new(303, frame_budget)
-                                    .range(30, 144)
-                                    .step(2)
-                                    .w(280)
-                                    .on_change(on_budget),
-                                theme,
-                            ),
+                            Slider::new(303, frame_budget)
+                                .range(30, 144)
+                                .step(2)
+                                .w(280)
+                                .on_change(on_budget),
                         )
                         .child(
                             cx,
@@ -219,21 +208,15 @@ impl GalleryApp {
                                 .items_center()
                                 .child(
                                     cx,
-                                    style::switch(
-                                        Switch::new(306, vsync)
-                                            .label("VSync")
-                                            .on_change(on_quick_sw),
-                                        theme,
-                                    ),
+                                    Switch::new(306, vsync)
+                                        .label("VSync")
+                                        .on_change(on_quick_sw),
                                 )
                                 .child(
                                     cx,
-                                    style::checkbox(
-                                        Checkbox::new(307, dmg_hint)
-                                            .label("Damage Tracking")
-                                            .on_change(on_quick_cb),
-                                        theme,
-                                    ),
+                                    Checkbox::new(307, dmg_hint)
+                                        .label("Damage Tracking")
+                                        .on_change(on_quick_cb),
                                 ),
                         ),
                 )
@@ -243,8 +226,8 @@ impl GalleryApp {
         let arch_section = story_section(
             cx,
             theme,
-            "Headless Architecture Highlights (gpui-base Philosophy)",
-            "Zero default chrome in velox-base; Shadcn theme lives exclusively in velox-component",
+            "Velox Component & Engine Highlights",
+            "Built on velox-component themed widgets with std spring physics, RichText, PNG/VectorCanvas & zero-copy GPU",
         )
         .child(
             cx,
@@ -252,16 +235,18 @@ impl GalleryApp {
                 .flex_row()
                 .flex_wrap()
                 .gap(8)
-                .child(cx, style::badge_solid(Badge::new("Zero Default Style"), theme))
-                .child(cx, style::badge_outline(Badge::new("Tri-State SVG Checkbox"), theme))
-                .child(cx, style::badge_outline(Badge::new("28x16 / 36x20 / 44x24 Switch"), theme))
-                .child(cx, style::badge_subtle(Badge::new("Keyboard Roving Nav"), theme))
-                .child(cx, style::badge_subtle(Badge::new("Escape Overlay Dismiss"), theme))
-                .child(cx, style::badge_subtle(Badge::new("0% CPU Idle Sleep"), theme)),
+                .child(cx, Badge::new("velox-component 75+").primary())
+                .child(cx, Badge::new("std Spring Physics").info())
+                .child(cx, Badge::new("RichText • BiDi • Emoji").success())
+                .child(cx, Badge::new("Pure-Rust PNG / NineSlice").secondary())
+                .child(cx, Badge::new("Native 2D VectorCanvas").outline())
+                .child(cx, Badge::new("0% CPU Idle Sleep").warning()),
         )
         .child(
             cx,
-            text(cx.t("ov.desc_note")).size(12).color(p.muted_fg),
+            text(cx.t("ov.desc_note"))
+                .size(12)
+                .color(theme.muted_foreground),
         );
 
         let mut root = div()
@@ -275,7 +260,7 @@ impl GalleryApp {
                     theme,
                     cx.t("ov.title"),
                     cx.t("ov.subtitle"),
-                    "velox_base • Headless Primitives",
+                    "velox_component • Themed UI + Spring Motion",
                 ),
             )
             .child(cx, playground_elem);

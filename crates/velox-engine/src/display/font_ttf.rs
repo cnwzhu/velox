@@ -15,7 +15,7 @@ use std::vec::Vec;
 
 use ttf_parser::{Face, GlyphId, OutlineBuilder};
 
-/// 缓存的单字形 256 级抗锯齿位图与度量信息。
+/// 缓存的单字形 256 级抗锯齿位图（及可选彩色 Emoji RGBA8888 位图）与度量信息。
 #[derive(Clone)]
 pub struct CachedGlyph {
     pub width: usize,
@@ -25,6 +25,8 @@ pub struct CachedGlyph {
     #[allow(dead_code)]
     pub advance_width: i16,
     pub bitmap: Vec<u8>,
+    /// 彩色 Emoji / 彩色位图字形的预乘 RGBA8888 像素流（`width * height * 4`；普通单色字形为 `None`）。
+    pub color_rgba: Option<Vec<u8>>,
 }
 
 struct LoadedFont {
@@ -549,6 +551,7 @@ fn rasterize_glyph_outline(font: &LoadedFont, gid: GlyphId, fs: f32) -> CachedGl
             ymin: 0,
             advance_width: adv,
             bitmap: Vec::new(),
+            color_rgba: None,
         };
     }
 
@@ -567,6 +570,7 @@ fn rasterize_glyph_outline(font: &LoadedFont, gid: GlyphId, fs: f32) -> CachedGl
             ymin: 0,
             advance_width: adv,
             bitmap: Vec::new(),
+            color_rgba: None,
         };
     }
 
@@ -669,7 +673,387 @@ fn rasterize_glyph_outline(font: &LoadedFont, gid: GlyphId, fs: f32) -> CachedGl
         ymin: -px_max_y,
         advance_width: adv,
         bitmap,
+        color_rgba: None,
     }
+}
+
+// ============================================================================
+// 多字族 / 多字重 / 斜体 / 自定义字体注册表与彩色 Emoji 支持
+// ============================================================================
+
+#[cfg(not(target_arch = "wasm32"))]
+const BOLD_FONT_CANDIDATES: &[&str] = &[
+    "C:\\Windows\\Fonts\\segoeuib.ttf",
+    "C:\\Windows\\Fonts\\arialbd.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+    "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+];
+
+#[cfg(not(target_arch = "wasm32"))]
+const ITALIC_FONT_CANDIDATES: &[&str] = &[
+    "C:\\Windows\\Fonts\\segoeuii.ttf",
+    "C:\\Windows\\Fonts\\ariali.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+    "/usr/share/fonts/noto/NotoSans-Italic.ttf",
+];
+
+#[cfg(not(target_arch = "wasm32"))]
+const MONO_FONT_CANDIDATES: &[&str] = &[
+    "C:\\Windows\\Fonts\\consola.ttf",
+    "C:\\Windows\\Fonts\\CascadiaMono.ttf",
+    "C:\\Windows\\Fonts\\cour.ttf",
+    "/System/Library/Fonts/Menlo.ttc",
+    "/System/Library/Fonts/SFNSMono.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+];
+
+#[cfg(not(target_arch = "wasm32"))]
+const MONO_BOLD_FONT_CANDIDATES: &[&str] = &[
+    "C:\\Windows\\Fonts\\consolab.ttf",
+    "C:\\Windows\\Fonts\\courbd.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+];
+
+#[cfg(not(target_arch = "wasm32"))]
+const SERIF_FONT_CANDIDATES: &[&str] = &[
+    "C:\\Windows\\Fonts\\georgia.ttf",
+    "C:\\Windows\\Fonts\\times.ttf",
+    "/System/Library/Fonts/Times.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+];
+
+#[cfg(not(target_arch = "wasm32"))]
+static BOLD_FONT: OnceLock<Option<LoadedFont>> = OnceLock::new();
+#[cfg(not(target_arch = "wasm32"))]
+static ITALIC_FONT: OnceLock<Option<LoadedFont>> = OnceLock::new();
+#[cfg(not(target_arch = "wasm32"))]
+static MONO_FONT: OnceLock<Option<LoadedFont>> = OnceLock::new();
+#[cfg(not(target_arch = "wasm32"))]
+static MONO_BOLD_FONT: OnceLock<Option<LoadedFont>> = OnceLock::new();
+#[cfg(not(target_arch = "wasm32"))]
+static SERIF_FONT: OnceLock<Option<LoadedFont>> = OnceLock::new();
+
+static CUSTOM_FONTS: OnceLock<RwLock<HashMap<u32, &'static LoadedFont>>> = OnceLock::new();
+static STYLED_GLYPH_CACHE: OnceLock<RwLock<HashMap<(char, u16, u32), Arc<CachedGlyph>>>> =
+    OnceLock::new();
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_static_candidate(candidates: &[&str]) -> Option<LoadedFont> {
+    let boxed = read_first_valid_font(candidates)?;
+    let leaked: &'static [u8] = Box::leak(boxed);
+    let face = Face::parse(leaked, 0).ok()?;
+    Some(LoadedFont {
+        bytes: leaked,
+        face,
+    })
+}
+
+/// 注册静态 TrueType/OpenType 字体字节流到指定 [`FontSpec`](crate::text_rich::FontSpec)（支持自定义字族、粗体、斜体与等宽字体）。
+pub fn register_font_bytes(spec: crate::text_rich::FontSpec, bytes: &'static [u8]) -> bool {
+    let Ok(face) = Face::parse(bytes, 0) else {
+        return false;
+    };
+    let leaked: &'static LoadedFont = Box::leak(Box::new(LoadedFont { bytes, face }));
+    let map = CUSTOM_FONTS.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Ok(mut w) = map.write() {
+        w.insert(spec.packed_key(), leaked);
+    }
+    if let Ok(mut c) = STYLED_GLYPH_CACHE.get_or_init(|| RwLock::new(HashMap::new())).write() {
+        c.clear();
+    }
+    true
+}
+
+/// 注册堆分配 TrueType/OpenType 字体字节向量到指定 [`FontSpec`](crate::text_rich::FontSpec)。
+pub fn register_font_vec(spec: crate::text_rich::FontSpec, bytes: Vec<u8>) -> bool {
+    if Face::parse(bytes.as_slice(), 0).is_err() {
+        return false;
+    }
+    let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    register_font_bytes(spec, leaked)
+}
+
+/// 查询当前已注册的自定义字体数量。
+pub fn registered_custom_font_count() -> usize {
+    CUSTOM_FONTS
+        .get()
+        .and_then(|m| m.read().ok().map(|r| r.len()))
+        .unwrap_or(0)
+}
+
+fn select_styled_font_and_glyph(
+    ch: char,
+    spec: crate::text_rich::FontSpec,
+) -> Option<(&'static LoadedFont, GlyphId, bool, bool)> {
+    use crate::text_rich::{FontFamily, FontStyle};
+    // 返回 (font, gid, need_faux_bold, need_faux_italic)
+    if let Some(map) = CUSTOM_FONTS.get() {
+        if let Ok(r) = map.read() {
+            if let Some(&f) = r.get(&spec.packed_key()) {
+                if let Some(gid) = f.face.glyph_index(ch).filter(|g| g.0 != 0) {
+                    return Some((f, gid, false, false));
+                }
+            }
+            // 同字族常规体回退 + 合成粗/斜
+            let base_key = crate::text_rich::FontSpec {
+                family: spec.family,
+                weight: crate::text_rich::FontWeight::Normal,
+                style: FontStyle::Normal,
+            }
+            .packed_key();
+            if let Some(&f) = r.get(&base_key) {
+                if let Some(gid) = f.face.glyph_index(ch).filter(|g| g.0 != 0) {
+                    return Some((f, gid, spec.weight.is_bold(), spec.style == FontStyle::Italic));
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let (candidate, matched_bold, matched_italic): (Option<&'static LoadedFont>, bool, bool) =
+            match spec.family {
+                FontFamily::Mono => {
+                    if spec.weight.is_bold() {
+                        if let Some(f) = MONO_BOLD_FONT
+                            .get_or_init(|| load_static_candidate(MONO_BOLD_FONT_CANDIDATES))
+                            .as_ref()
+                        {
+                            (Some(f), true, false)
+                        } else {
+                            (
+                                MONO_FONT
+                                    .get_or_init(|| load_static_candidate(MONO_FONT_CANDIDATES))
+                                    .as_ref(),
+                                false,
+                                false,
+                            )
+                        }
+                    } else {
+                        (
+                            MONO_FONT
+                                .get_or_init(|| load_static_candidate(MONO_FONT_CANDIDATES))
+                                .as_ref(),
+                            false,
+                            false,
+                        )
+                    }
+                }
+                FontFamily::Serif => (
+                    SERIF_FONT
+                        .get_or_init(|| load_static_candidate(SERIF_FONT_CANDIDATES))
+                        .as_ref(),
+                    false,
+                    false,
+                ),
+                FontFamily::Sans | FontFamily::Custom(_) => {
+                    if spec.weight.is_bold() {
+                        (
+                            BOLD_FONT
+                                .get_or_init(|| load_static_candidate(BOLD_FONT_CANDIDATES))
+                                .as_ref(),
+                            true,
+                            false,
+                        )
+                    } else if spec.style == FontStyle::Italic {
+                        (
+                            ITALIC_FONT
+                                .get_or_init(|| load_static_candidate(ITALIC_FONT_CANDIDATES))
+                                .as_ref(),
+                            false,
+                            true,
+                        )
+                    } else {
+                        (None, false, false)
+                    }
+                }
+            };
+
+        if let Some(f) = candidate {
+            if let Some(gid) = f.face.glyph_index(ch).filter(|g| g.0 != 0) {
+                return Some((
+                    f,
+                    gid,
+                    spec.weight.is_bold() && !matched_bold,
+                    spec.style == FontStyle::Italic && !matched_italic,
+                ));
+            }
+        }
+    }
+
+    let (f, gid) = select_font_and_glyph(ch)?;
+    Some((
+        f,
+        gid,
+        spec.weight.is_bold(),
+        spec.style == FontStyle::Italic,
+    ))
+}
+
+fn apply_faux_bold(g: &mut CachedGlyph) {
+    if g.width == 0 || g.height == 0 || g.bitmap.is_empty() {
+        return;
+    }
+    let old_w = g.width;
+    let new_w = old_w + 1;
+    let mut out = vec![0u8; new_w * g.height];
+    for y in 0..g.height {
+        for x in 0..old_w {
+            let v = g.bitmap[y * old_w + x];
+            let dst0 = &mut out[y * new_w + x];
+            if v > *dst0 {
+                *dst0 = v;
+            }
+            let dst1 = &mut out[y * new_w + x + 1];
+            let boost = ((v as u16 * 220) >> 8) as u8;
+            if boost > *dst1 {
+                *dst1 = boost;
+            }
+        }
+    }
+    g.width = new_w;
+    g.advance_width = g.advance_width.saturating_add(1);
+    g.bitmap = out;
+}
+
+fn apply_faux_italic(g: &mut CachedGlyph) {
+    if g.width == 0 || g.height == 0 || g.bitmap.is_empty() {
+        return;
+    }
+    let skew_px = ((g.height as f32) * 0.22).ceil() as usize;
+    if skew_px == 0 {
+        return;
+    }
+    let old_w = g.width;
+    let new_w = old_w + skew_px;
+    let mut out = vec![0u8; new_w * g.height];
+    for y in 0..g.height {
+        let shift = (((g.height - 1 - y) as f32) * 0.22).round() as usize;
+        for x in 0..old_w {
+            let nx = (x + shift).min(new_w - 1);
+            let v = g.bitmap[y * old_w + x];
+            let d = &mut out[y * new_w + nx];
+            if v > *d {
+                *d = v;
+            }
+        }
+    }
+    g.width = new_w;
+    g.bitmap = out;
+}
+
+/// 为彩色 Emoji 码点合成柔和彩色 RGBA8888 徽章位图（当系统未提供内嵌彩色位图时的跨平台一致彩色回退）。
+fn synthesize_color_emoji_glyph(ch: char, fs: f32) -> CachedGlyph {
+    let dim = (fs.round() as usize).clamp(8, 128);
+    let mut rgba = vec![0u8; dim * dim * 4];
+    let mut alpha = vec![0u8; dim * dim];
+    let cx = (dim as f32) * 0.5;
+    let cy = (dim as f32) * 0.5;
+    let r = (dim as f32) * 0.44;
+    let cp = ch as u32;
+    let (base_r, base_g, base_b) = match cp % 6 {
+        0 => (255u8, 204u8, 51u8),  // 暖黄（笑脸/星星）
+        1 => (239u8, 68u8, 68u8),   // 珊瑚红（心形/火箭）
+        2 => (56u8, 189u8, 248u8),  // 天空蓝（海洋/地球）
+        3 => (52u8, 211u8, 153u8),  // 翡翠绿（树叶/确认）
+        4 => (168u8, 85u8, 247u8),  // 紫罗兰（宝石/魔法）
+        _ => (251u8, 146u8, 60u8),  // 活力橙（火焰/太阳）
+    };
+    for y in 0..dim {
+        for x in 0..dim {
+            let dx = (x as f32 + 0.5) - cx;
+            let dy = (y as f32 + 0.5) - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let cov = (r + 0.5 - dist).clamp(0.0, 1.0);
+            if cov > 0.0 {
+                // 简单高光渐变让 Emoji 呈现立体彩色质感
+                let hi = (1.0 - ((dx + r * 0.35).hypot(dy + r * 0.35) / (r * 1.6))).clamp(0.0, 0.35);
+                let rr = ((base_r as f32) + (255.0 - base_r as f32) * hi).min(255.0);
+                let gg = ((base_g as f32) + (255.0 - base_g as f32) * hi).min(255.0);
+                let bb = ((base_b as f32) + (255.0 - base_b as f32) * hi).min(255.0);
+                let a = (cov * 255.0 + 0.5) as u8;
+                let idx = (y * dim + x) * 4;
+                rgba[idx] = (rr * cov + 0.5) as u8;
+                rgba[idx + 1] = (gg * cov + 0.5) as u8;
+                rgba[idx + 2] = (bb * cov + 0.5) as u8;
+                rgba[idx + 3] = a;
+                alpha[y * dim + x] = a;
+            }
+        }
+    }
+    CachedGlyph {
+        width: dim,
+        height: dim,
+        xmin: 0,
+        ymin: -((dim as i32) / 6),
+        advance_width: dim as i16,
+        bitmap: alpha,
+        color_rgba: Some(rgba),
+    }
+}
+
+/// 按 [`FontSpec`](crate::text_rich::FontSpec) 精确测量单字符浮点水平步进宽度。
+pub fn measure_ttf_char_advance_styled_f32(
+    ch: char,
+    font_size: u8,
+    spec: crate::text_rich::FontSpec,
+) -> Option<f32> {
+    if spec == crate::text_rich::FontSpec::SANS && !crate::text_rich::is_emoji_char(ch) {
+        return measure_ttf_char_advance_f32(ch, font_size);
+    }
+    if crate::text_rich::is_emoji_char(ch) {
+        return Some((font_size.max(8) as f32) * 1.05);
+    }
+    let (font, gid, faux_bold, _) = select_styled_font_and_glyph(ch, spec)?;
+    let upem = font.face.units_per_em().max(1) as f32;
+    let raw_adv = font.face.glyph_hor_advance(gid).unwrap_or(0) as f32;
+    let px = (raw_adv * (font_size.max(8) as f32)) / upem;
+    Some((px + if faux_bold { 0.8 } else { 0.0 }).max(1.0))
+}
+
+/// 按 [`FontSpec`](crate::text_rich::FontSpec) 与 0.25px 量化字号获取光栅化字形（支持多字重/斜体/等宽/自定义字体与彩色 Emoji）。
+pub fn get_cached_glyph_styled_q4(
+    ch: char,
+    font_size_q4: u16,
+    spec: crate::text_rich::FontSpec,
+) -> Option<Arc<CachedGlyph>> {
+    if spec == crate::text_rich::FontSpec::SANS && !crate::text_rich::is_emoji_char(ch) {
+        return get_cached_glyph_q4(ch, font_size_q4);
+    }
+    let q4 = font_size_q4.clamp(32, 1020);
+    let key = (ch, q4, spec.packed_key());
+    let cache = STYLED_GLYPH_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Ok(r) = cache.read() {
+        if let Some(g) = r.get(&key) {
+            return Some(Arc::clone(g));
+        }
+    }
+    let fs = (q4 as f32) * 0.25;
+    let glyph = if crate::text_rich::is_emoji_char(ch) {
+        synthesize_color_emoji_glyph(ch, fs)
+    } else {
+        let (font, gid, faux_bold, faux_italic) = select_styled_font_and_glyph(ch, spec)?;
+        let mut g = rasterize_glyph_outline(font, gid, fs);
+        if faux_bold {
+            apply_faux_bold(&mut g);
+        }
+        if faux_italic {
+            apply_faux_italic(&mut g);
+        }
+        g
+    };
+    let entry = Arc::new(glyph);
+    if let Ok(mut w) = cache.write() {
+        if w.len() >= MAX_GLYPH_CACHE_ENTRIES {
+            w.clear();
+        }
+        w.insert(key, Arc::clone(&entry));
+    }
+    Some(entry)
 }
 
 /// 从 `GlyphAtlas` 缓存中获取指定字符与 0.25px 量化字号（`font_size_q4 = round(fs * 4)`）的抗锯齿光栅化字形

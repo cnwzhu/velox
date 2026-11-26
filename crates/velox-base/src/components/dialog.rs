@@ -30,6 +30,7 @@ pub struct Dialog<'a> {
     pub close_active_bg: Option<Color>,
     pub shadow: Option<(u8, i8, i8, Color)>,
     pub focus_ring: bool,
+    pub animated: bool,
     pub rounded: u8,
     pub style: Style,
     pub style_ext: StyleExt,
@@ -58,6 +59,7 @@ impl<'a> Dialog<'a> {
             close_active_bg: None,
             shadow: None,
             focus_ring: false,
+            animated: false,
             rounded: 0,
             style: Style::DEFAULT,
             style_ext: StyleExt::DEFAULT,
@@ -79,6 +81,13 @@ impl<'a> Dialog<'a> {
     #[inline(always)]
     pub const fn width(mut self, width: i16) -> Self {
         self.width = width;
+        self
+    }
+
+    /// 启用或禁用对话框入场弹入过渡动画。
+    #[inline(always)]
+    pub const fn animated(mut self, enabled: bool) -> Self {
+        self.animated = enabled;
         self
     }
 
@@ -207,6 +216,12 @@ impl<'a> Widget<'a> for Dialog<'a> {
             panel = panel.child(cx, div().flex_row().justify_end().gap(8).child(cx, f));
         }
 
+        if self.animated {
+            panel = panel
+                .enter_from(255, 0, 14, Duration::from_millis(220))
+                .ease(Easing::EaseOutBack);
+        }
+
         panel = self.style_ext.apply_to_div(panel, self.style);
         if let Some(renderer) = self.backdrop_renderer {
             let mut backdrop = div()
@@ -218,6 +233,9 @@ impl<'a> Widget<'a> for Dialog<'a> {
                 .items_center()
                 .justify_center()
                 .child(cx, panel);
+            if self.animated {
+                backdrop = backdrop.fade_in(Duration::from_millis(150));
+            }
             if let Some(cb) = self.on_close {
                 backdrop = backdrop.on_click_raw(cb).on_navigate_back(cb);
             }

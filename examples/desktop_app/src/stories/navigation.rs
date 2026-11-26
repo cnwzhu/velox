@@ -1,9 +1,10 @@
-//! `Tabs & Accordion` 故事页：`Tabs` 三变体（Segmented / Underline / Pill）+ `Accordion` + `Stepper` + `Pagination`。
+//! `Tabs & Accordion` 故事页：完全基于 `velox-component` 的 `Tabs`（Segmented / Underline / Pill）+ `Accordion` + `Stepper` + `Pagination`。
 
 use super::{state_pill, story_header, story_section};
-use crate::style::{self, BasePalette};
 use crate::GalleryApp;
-use velox_kit::base::{Accordion, AccordionItem, Pagination, StepItem, StepStatus, Stepper, Tabs};
+use velox_kit::component::{
+    Accordion, AccordionItem, Pagination, StepItem, StepStatus, Stepper, Tabs,
+};
 use velox_kit::prelude::*;
 
 const ACCORDION_ITEMS: &[AccordionItem<'static>] = &[
@@ -27,7 +28,6 @@ impl GalleryApp {
         cx: &'a Scope<Self>,
         theme: CoreTheme,
     ) -> Div<'a> {
-        let p = BasePalette::from_theme(theme);
         let on_tab_seg = cx.listener(|this, idx: usize, _acx| {
             this.tabs_segmented_idx = idx;
             this.event_count = this.event_count.saturating_add(1);
@@ -63,7 +63,7 @@ impl GalleryApp {
         let tabs_section = story_section(
             cx,
             theme,
-            "Tabs (Segmented • Underline • Pill)",
+            "Tabs (velox-component Segmented • Underline • Pill)",
             "Focus any tab and use Arrow Left/Right or Home/End to traverse",
         )
         .child(
@@ -77,21 +77,23 @@ impl GalleryApp {
                     div()
                         .flex_col()
                         .gap(4)
-                        .child(cx, text("Segmented (Default)").size(11).color(p.muted_fg))
+                        .child(
+                            cx,
+                            text("Segmented (Default)")
+                                .size(11)
+                                .color(theme.muted_foreground),
+                        )
                         .child(
                             cx,
                             div().w(420).child(
                                 cx,
-                                style::tabs(
-                                    Tabs::new(
-                                        1501,
-                                        &["Account", "Security", "Billing", "API Keys"],
-                                        self.tabs_segmented_idx,
-                                    )
-                                    .segmented()
-                                    .on_select(on_tab_seg),
-                                    theme,
-                                ),
+                                Tabs::new(
+                                    1501,
+                                    &["Account", "Security", "Billing", "API Keys"],
+                                    self.tabs_segmented_idx,
+                                )
+                                .segmented()
+                                .on_select(on_tab_seg),
                             ),
                         ),
                 )
@@ -100,21 +102,18 @@ impl GalleryApp {
                     div()
                         .flex_col()
                         .gap(4)
-                        .child(cx, text("Underline").size(11).color(p.muted_fg))
+                        .child(cx, text("Underline").size(11).color(theme.muted_foreground))
                         .child(
                             cx,
                             div().w(420).child(
                                 cx,
-                                style::tabs(
-                                    Tabs::new(
-                                        1502,
-                                        &["Overview", "Performance", "Diagnostics"],
-                                        self.tabs_underline_idx,
-                                    )
-                                    .underline()
-                                    .on_select(on_tab_ul),
-                                    theme,
-                                ),
+                                Tabs::new(
+                                    1502,
+                                    &["Overview", "Performance", "Diagnostics"],
+                                    self.tabs_underline_idx,
+                                )
+                                .underline()
+                                .on_select(on_tab_ul),
                             ),
                         ),
                 )
@@ -123,21 +122,23 @@ impl GalleryApp {
                     div()
                         .flex_col()
                         .gap(4)
-                        .child(cx, text("Block / Pill").size(11).color(p.muted_fg))
+                        .child(
+                            cx,
+                            text("Block / Pill")
+                                .size(11)
+                                .color(theme.muted_foreground),
+                        )
                         .child(
                             cx,
                             div().w(360).child(
                                 cx,
-                                style::tabs(
-                                    Tabs::new(
-                                        1503,
-                                        &["Daily", "Weekly", "Monthly"],
-                                        self.tabs_pill_idx,
-                                    )
-                                    .pill()
-                                    .on_select(on_tab_pill),
-                                    theme,
-                                ),
+                                Tabs::new(
+                                    1503,
+                                    &["Daily", "Weekly", "Monthly"],
+                                    self.tabs_pill_idx,
+                                )
+                                .pill()
+                                .on_select(on_tab_pill),
                             ),
                         ),
                 ),
@@ -167,15 +168,12 @@ impl GalleryApp {
                 cx,
                 div().flex_grow(1).child(
                     cx,
-                    story_section(cx, theme, "Accordion", "SVG chevrons & crisp dividers")
+                    story_section(cx, theme, "Accordion", "SVG chevrons & smooth reveal")
                         .child(
                             cx,
-                            style::accordion(
-                                Accordion::new(1510, ACCORDION_ITEMS, self.accordion_mask)
-                                    .width(380)
-                                    .on_toggle_item(on_acc),
-                                theme,
-                            ),
+                            Accordion::new(1510, ACCORDION_ITEMS, self.accordion_mask)
+                                .width(380)
+                                .on_toggle_item(on_acc),
                         ),
                 ),
             )
@@ -184,13 +182,7 @@ impl GalleryApp {
                 div().flex_grow(1).flex_col().gap(16).child(
                     cx,
                     story_section(cx, theme, "Stepper & Pagination", "Click steps or page numbers")
-                        .child(
-                            cx,
-                            style::stepper(
-                                Stepper::new(1520, steps).on_step_click(on_step),
-                                theme,
-                            ),
-                        )
+                        .child(cx, Stepper::new(1520, steps).on_step_click(on_step))
                         .child(
                             cx,
                             div()
@@ -200,12 +192,9 @@ impl GalleryApp {
                                 .justify_between()
                                 .child(
                                     cx,
-                                    style::pagination(
-                                        Pagination::new(1521, self.pagination_page, 9)
-                                            .visible_pages(5)
-                                            .on_change(on_page),
-                                        theme,
-                                    ),
+                                    Pagination::new(1521, self.pagination_page, 9)
+                                        .visible_pages(5)
+                                        .on_change(on_page),
                                 )
                                 .child(
                                     cx,
@@ -229,8 +218,8 @@ impl GalleryApp {
                     cx,
                     theme,
                     "Tabs, Accordion & Navigation",
-                    "Headless tabs, accordions, steppers & pagination styled with 0px monochrome geometry.",
-                    "velox_base::{Tabs, Accordion, Stepper, Pagination}",
+                    "Themed velox-component tabs, accordions, steppers & pagination with spring transitions.",
+                    "velox_component::{Tabs, Accordion, Stepper, Pagination}",
                 ),
             )
             .child(cx, tabs_section)

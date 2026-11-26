@@ -8,9 +8,8 @@
 
 use crate::i18n::DESKTOP_CATALOG;
 use crate::stories::state_pill;
-use crate::style::{self, BasePalette};
 use crate::GalleryStory;
-use velox_kit::base::{ArcGauge, Button, Checkbox, ProgressBar, Slider, StatusBarItem, Switch};
+use velox_kit::component::{ArcGauge, Button, Checkbox, ProgressBar, Slider, StatusBarItem, Switch};
 use velox_kit::prelude::*;
 
 /// 画廊跨区块细粒度响应式共享信号集合（纯 `Copy` 轻量句柄集合）。
@@ -73,7 +72,6 @@ impl View for StatusBarView {
         cx.override_locale(locale);
         cx.override_i18n_catalog(&DESKTOP_CATALOG);
 
-        let p = BasePalette::from_theme(theme);
         let active_story_label = cx.t(active_story.i18n_key());
         let theme_name = if theme_mode.is_dark() {
             cx.t("theme.dark")
@@ -100,13 +98,13 @@ impl View for StatusBarView {
             .w_full()
             .h(26)
             .px(12)
-            .bg(p.surface)
-            .border(1, p.border)
+            .bg(theme.card)
+            .border(1, theme.border)
             .items_center()
             .justify_between()
-            .child(cx, text(left_item.label).size(11).color(p.muted_fg))
-            .child(cx, text(center_item.label).size(11).color(p.fg))
-            .child(cx, text(right_item.label).size(11).color(p.muted_fg))
+            .child(cx, text(left_item.label).size(11).color(theme.muted_foreground))
+            .child(cx, text(center_item.label).size(11).color(theme.foreground))
+            .child(cx, text(right_item.label).size(11).color(theme.muted_foreground))
             .into_element(cx)
     }
 }
@@ -152,8 +150,11 @@ impl View for OverviewPlaygroundView {
             });
         });
 
-        let p = BasePalette::from_theme(theme);
-        let gauge_accent = if is_high_load { theme.danger } else { p.solid_bg };
+        let gauge_accent = if is_high_load {
+            theme.danger
+        } else {
+            theme.primary
+        };
 
         div()
             .id(300)
@@ -169,8 +170,9 @@ impl View for OverviewPlaygroundView {
                     .h_full()
                     .p(16)
                     .gap(12)
-                    .bg(p.surface)
-                    .border(1, p.border)
+                    .rounded(8)
+                    .bg(theme.card)
+                    .border(1, theme.border)
                     .items_center()
                     .child(
                         cx,
@@ -182,17 +184,14 @@ impl View for OverviewPlaygroundView {
                                 cx,
                                 svg_icon(14, 14, "M22 12h-4l-3 9L9 3l-3 9H2").tint(gauge_accent),
                             )
-                            .child(cx, text(cx.t("ov.load_title")).size(13).color(p.fg)),
+                            .child(cx, text(cx.t("ov.load_title")).size(13).color(theme.foreground)),
                     )
                     .child(
                         cx,
-                        style::arc_gauge(
-                            ArcGauge::new(301, 108, cpu_load)
-                                .thickness(10)
-                                .color(gauge_accent)
-                                .label(fmt!(cx, "{}%", cpu_load)),
-                            theme,
-                        ),
+                        ArcGauge::new(301, 108, cpu_load)
+                            .thickness(10)
+                            .color(gauge_accent)
+                            .label(fmt!(cx, "{}%", cpu_load)),
                     )
                     .child(
                         cx,
@@ -201,25 +200,21 @@ impl View for OverviewPlaygroundView {
                             .gap(8)
                             .child(
                                 cx,
-                                style::btn_outline(
-                                    Button::new(304, "-10%")
-                                        .font_size(12)
-                                        .w(74)
-                                        .h(28)
-                                        .on_click(on_dec_load),
-                                    theme,
-                                ),
+                                Button::new(304, "-10%")
+                                    .outline()
+                                    .font_size(12)
+                                    .w(74)
+                                    .h(28)
+                                    .on_click(on_dec_load),
                             )
                             .child(
                                 cx,
-                                style::btn_solid(
-                                    Button::new(305, "+10%")
-                                        .font_size(12)
-                                        .w(74)
-                                        .h(28)
-                                        .on_click(on_inc_load),
-                                    theme,
-                                ),
+                                Button::new(305, "+10%")
+                                    .primary()
+                                    .font_size(12)
+                                    .w(74)
+                                    .h(28)
+                                    .on_click(on_inc_load),
                             ),
                     ),
             )
@@ -231,8 +226,9 @@ impl View for OverviewPlaygroundView {
                     .h_full()
                     .p(16)
                     .gap(12)
-                    .bg(p.surface)
-                    .border(1, p.border)
+                    .rounded(8)
+                    .bg(theme.card)
+                    .border(1, theme.border)
                     .child(
                         cx,
                         div()
@@ -253,11 +249,13 @@ impl View for OverviewPlaygroundView {
                                             14,
                                             "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20ZM12 6v6l4 2",
                                         )
-                                        .tint(p.fg),
+                                        .tint(theme.primary),
                                     )
                                     .child(
                                         cx,
-                                        text(cx.t("ov.budget_title")).size(13).color(p.fg),
+                                        text(cx.t("ov.budget_title"))
+                                            .size(13)
+                                            .color(theme.foreground),
                                     ),
                             )
                             .child(
@@ -265,22 +263,13 @@ impl View for OverviewPlaygroundView {
                                 state_pill(cx, theme, fmt!(cx, "{} FPS", frame_budget)),
                             ),
                     )
+                    .child(cx, ProgressBar::new(302, 280, cpu_load).height(8))
                     .child(
                         cx,
-                        style::progress_bar(
-                            ProgressBar::new(302, 280, cpu_load).height(8),
-                            theme,
-                        ),
-                    )
-                    .child(
-                        cx,
-                        style::slider(
-                            Slider::bind(cx, 303, signals.frame_budget_pct)
-                                .range(30, 144)
-                                .step(2)
-                                .w(280),
-                            theme,
-                        ),
+                        Slider::bind(cx, 303, signals.frame_budget_pct)
+                            .range(30, 144)
+                            .step(2)
+                            .w(280),
                     )
                     .child(
                         cx,
@@ -288,20 +277,11 @@ impl View for OverviewPlaygroundView {
                             .flex_row()
                             .gap(16)
                             .items_center()
+                            .child(cx, Switch::bind(cx, 306, signals.vsync_enabled).label("VSync"))
                             .child(
                                 cx,
-                                style::switch(
-                                    Switch::bind(cx, 306, signals.vsync_enabled).label("VSync"),
-                                    theme,
-                                ),
-                            )
-                            .child(
-                                cx,
-                                style::checkbox(
-                                    Checkbox::bind(cx, 307, signals.damage_overlay_hint)
-                                        .label("Damage Tracking"),
-                                    theme,
-                                ),
+                                Checkbox::bind(cx, 307, signals.damage_overlay_hint)
+                                    .label("Damage Tracking"),
                             ),
                     ),
             )

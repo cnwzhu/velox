@@ -1,9 +1,9 @@
-//! `Dialog & Modal` 故事页：交互式唤起 `Dialog`、`AlertDialog (Destructive)`、`Modal` 与 `Sheet`（支持遮罩拦截与 Esc 关闭）。
+//! `Dialog & Modal` 故事页：使用 `velox-component` 交互式唤起自带弹簧/回弹入场动画的
+//! `Dialog`、`AlertDialog (Destructive)`、`Modal`、`Sheet` 与 `Notification`（支持遮罩拦截与 Esc 关闭）。
 
 use super::{state_pill, story_header, story_section};
-use crate::style::{self, BasePalette};
 use crate::GalleryApp;
-use velox_kit::base::Button;
+use velox_kit::component::Button;
 use velox_kit::prelude::*;
 
 impl GalleryApp {
@@ -12,7 +12,6 @@ impl GalleryApp {
         cx: &'a Scope<Self>,
         theme: CoreTheme,
     ) -> Div<'a> {
-        let p = BasePalette::from_theme(theme);
         let on_open_dialog = cx.listener(|this, _: ClickEvent, _acx| {
             this.demo_dialog_open = true;
             this.last_overlay_result = "Opened Dialog (press Escape or Close)";
@@ -45,10 +44,11 @@ impl GalleryApp {
                 .w(240)
                 .p(16)
                 .gap(10)
-                .bg(p.surface)
-                .border(1, p.border)
-                .child(cx, text(title).size(14).color(p.fg))
-                .child(cx, text(desc).size(12).color(p.muted_fg))
+                .rounded(8)
+                .bg(theme.card)
+                .border(1, theme.border)
+                .child(cx, text(title).size(14).color(theme.foreground))
+                .child(cx, text(desc).size(12).color(theme.muted_foreground))
                 .child(cx, btn)
         };
 
@@ -60,60 +60,55 @@ impl GalleryApp {
                 cx,
                 trigger_card(
                     "Standard Dialog",
-                    "Header, description, SVG close icon, footer actions & sharp border.",
-                    style::btn_solid(
-                        Button::new(1601, "Open Dialog").on_click(on_open_dialog),
-                        theme,
-                    )
-                    .into_element(cx),
+                    "EaseOutBack spring entry, SVG close icon, footer actions & rounded card.",
+                    Button::new(1601, "Open Dialog")
+                        .primary()
+                        .on_click(on_open_dialog)
+                        .into_element(cx),
                 ),
             )
             .child(
                 cx,
                 trigger_card(
                     "AlertDialog (Destructive)",
-                    "Explicit destructive confirm button, i18n labels & Escape cancel.",
-                    style::btn_danger(
-                        Button::new(1602, "Delete Workspace").on_click(on_open_alert),
-                        theme,
-                    )
-                    .into_element(cx),
+                    "Destructive confirm button, i18n labels, spring entry & Escape cancel.",
+                    Button::new(1602, "Delete Workspace")
+                        .danger()
+                        .on_click(on_open_alert)
+                        .into_element(cx),
                 ),
             )
             .child(
                 cx,
                 trigger_card(
                     "Centered Modal",
-                    "Backdrop occlusion & click-outside / Escape dismissal.",
-                    style::btn_outline(
-                        Button::new(1603, "Open Modal").on_click(on_open_modal),
-                        theme,
-                    )
-                    .into_element(cx),
+                    "Backdrop fade-in occlusion & click-outside / Escape dismissal.",
+                    Button::new(1603, "Open Modal")
+                        .outline()
+                        .on_click(on_open_modal)
+                        .into_element(cx),
                 ),
             )
             .child(
                 cx,
                 trigger_card(
                     "Side Sheet Drawer",
-                    "Edge drawer panel with overlay hit occlusion and Escape dismiss.",
-                    style::btn_outline(
-                        Button::new(1604, "Open Sheet").on_click(on_open_sheet),
-                        theme,
-                    )
-                    .into_element(cx),
+                    "Directional Spring slide-in drawer with hit occlusion & Escape dismiss.",
+                    Button::new(1604, "Open Sheet")
+                        .outline()
+                        .on_click(on_open_sheet)
+                        .into_element(cx),
                 ),
             )
             .child(
                 cx,
                 trigger_card(
                     "Floating Notification",
-                    "Top-right notification card with vector SVG status icon.",
-                    style::btn_subtle(
-                        Button::new(1605, "Show Notification").on_click(on_open_notif),
-                        theme,
-                    )
-                    .into_element(cx),
+                    "Spring slide-in top-right notification card with vector SVG status icon.",
+                    Button::new(1605, "Show Notification")
+                        .secondary()
+                        .on_click(on_open_notif)
+                        .into_element(cx),
                 ),
             );
 
@@ -121,7 +116,7 @@ impl GalleryApp {
             cx,
             theme,
             "Overlay Lifecycle & Escape Handling",
-            "All overlays use .overlay().occlude_hit() + .on_navigate_back() for Escape dismissal",
+            "All overlays use .overlay().occlude_hit() + std spring enter animations + Escape dismissal",
         )
         .child(
             cx,
@@ -129,7 +124,7 @@ impl GalleryApp {
                 .flex_row()
                 .gap(10)
                 .items_center()
-                .child(cx, text("Last Action:").size(12).color(p.muted_fg))
+                .child(cx, text("Last Action:").size(12).color(theme.muted_foreground))
                 .child(cx, state_pill(cx, theme, self.last_overlay_result)),
         );
 
@@ -143,8 +138,8 @@ impl GalleryApp {
                     cx,
                     theme,
                     "Dialog, AlertDialog, Modal & Sheet",
-                    "Hit-occluded headless overlays styled explicitly by the app with sharp 1px borders & Escape dismissal.",
-                    "velox_base::{Dialog, AlertDialog, Modal, Sheet}",
+                    "Themed velox-component overlays with std spring entry animations, hit occlusion & Escape dismissal.",
+                    "velox_component::{Dialog, AlertDialog, Modal, Sheet}",
                 ),
             )
             .child(cx, triggers)

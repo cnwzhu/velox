@@ -11,6 +11,12 @@ crate::define_themed_component! {
     variants: false,
     sizable: false,
     disableable: false,
+    init: |base| {
+        let _ = base;
+        {
+            base.animated = true;
+        }
+    },
     apply_tw: |base, theme| {
         fill_color(&mut base.bg, theme.popover);
         fill_color(&mut base.border_color, theme.border);
@@ -20,6 +26,7 @@ crate::define_themed_component! {
         }
     },
     forward: [
+        animated(enabled: bool),
         trigger(cx: &'a FrameScope, el: impl IntoElement<'a>),
         content(cx: &'a FrameScope, el: impl IntoElement<'a>),
         on_close(handler: &'a dyn Fn(&mut ActionScope)),

@@ -172,6 +172,42 @@ pub fn rasterize_region<P: PixelFormat>(
                     dst,
                 );
             }
+            DrawPayload::RichText(rt) => {
+                super::text::rasterize_rich_text(
+                    rt,
+                    op.bounds,
+                    sub_clip,
+                    1.0,
+                    buffer_origin_x,
+                    buffer_origin_y,
+                    buffer_stride,
+                    dst,
+                );
+            }
+            DrawPayload::DecodedImage(img) => {
+                super::text::rasterize_decoded_image(
+                    img,
+                    op.bounds,
+                    sub_clip,
+                    1.0,
+                    buffer_origin_x,
+                    buffer_origin_y,
+                    buffer_stride,
+                    dst,
+                );
+            }
+            DrawPayload::Vector(vec_spec) => {
+                crate::vector_canvas::rasterize_vector_spec(
+                    vec_spec,
+                    op.bounds,
+                    sub_clip,
+                    1.0,
+                    buffer_origin_x,
+                    buffer_origin_y,
+                    buffer_stride,
+                    dst,
+                );
+            }
         };
 
         if corner_clip_active {
@@ -568,6 +604,42 @@ pub(crate) fn rasterize_region_scaled<P: PixelFormat>(
                     sb,
                     sub_clip,
                     &sq,
+                    sf,
+                    buffer_origin_x,
+                    buffer_origin_y,
+                    buffer_stride,
+                    dst,
+                );
+            }
+            DrawPayload::RichText(rt) => {
+                super::text::rasterize_rich_text(
+                    rt,
+                    sb,
+                    sub_clip,
+                    sf,
+                    buffer_origin_x,
+                    buffer_origin_y,
+                    buffer_stride,
+                    dst,
+                );
+            }
+            DrawPayload::DecodedImage(img) => {
+                super::text::rasterize_decoded_image(
+                    img,
+                    sb,
+                    sub_clip,
+                    sf,
+                    buffer_origin_x,
+                    buffer_origin_y,
+                    buffer_stride,
+                    dst,
+                );
+            }
+            DrawPayload::Vector(vec_spec) => {
+                crate::vector_canvas::rasterize_vector_spec(
+                    vec_spec,
+                    sb,
+                    sub_clip,
                     sf,
                     buffer_origin_x,
                     buffer_origin_y,

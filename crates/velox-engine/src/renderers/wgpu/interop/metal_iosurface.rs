@@ -56,13 +56,41 @@ pub(crate) fn init_aligned_metal_context() -> Option<PreparedWgpuContext> {
     PreparedWgpuContext::init_headless()
 }
 
+/// 构造 Apple `IOSurfaceRef` 创建参数键描述（在 macOS/iOS 链接 `IOSurface.framework` 后用于零拷贝创建 BGRA8 共享表面）。
+#[derive(Copy, Clone, Debug)]
+pub struct MetalIoSurfaceDesc {
+    pub width: u32,
+    pub height: u32,
+    pub bytes_per_element: u32,
+    pub bytes_per_row: u32,
+    pub pixel_format_fourcc: u32, // 'BGRA' = 0x42475241
+}
+
+impl MetalIoSurfaceDesc {
+    #[inline]
+    pub const fn new_bgra8(width: u32, height: u32) -> Self {
+        let w = if width == 0 { 1 } else { width };
+        let h = if height == 0 { 1 } else { height };
+        let stride = (w * 4 + 63) & !63; // Metal 64B 行对齐
+        Self {
+            width: w,
+            height: h,
+            bytes_per_element: 4,
+            bytes_per_row: stride,
+            pixel_format_fourcc: 0x4247_5241,
+        }
+    }
+}
+
 pub(crate) fn allocate_metal_shared_texture(
     _device: &wgpu::Device,
-    _width: u32,
-    _height: u32,
+    width: u32,
+    height: u32,
     _format: wgpu::TextureFormat,
 ) -> Option<ExportedTextureAlloc> {
-    // 返回 None 时由上层回退至标准 Metal `wgpu::Texture`；完整 `IOSurfaceCreate` + `newTextureWithDescriptor:iosurface:plane:`
-    // 需在 Apple macOS/iOS 宿主框架链接 IOSurface.framework 启用。
+    let _desc = MetalIoSurfaceDesc::new_bgra8(width, height);
+    // 返回 None 时由上层安全回退至标准 Metal `wgpu::Texture`；
+    // 在 macOS/iOS 宿主工程链接 `IOSurface.framework` 并创建 `IOSurfaceRef` 后，
+    // 通过 `MTLDevice::newTextureWithDescriptor:iosurface:plane:` 包装进 `wgpu::hal::metal::Device::texture_from_raw`。
     None
 }

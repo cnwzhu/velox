@@ -29,6 +29,7 @@ pub struct Sheet<'a> {
     pub rounded: u8,
     pub shadow: Option<(u8, i8, i8, Color)>,
     pub focus_ring: bool,
+    pub animated: bool,
     pub style: Style,
     pub style_ext: StyleExt,
     pub content: Option<Element<'a>>,
@@ -56,6 +57,7 @@ impl<'a> Sheet<'a> {
             rounded: 0,
             shadow: None,
             focus_ring: false,
+            animated: false,
             style: Style::DEFAULT,
             style_ext: StyleExt::DEFAULT,
             content: None,
@@ -68,6 +70,13 @@ impl<'a> Sheet<'a> {
     #[inline(always)]
     pub const fn size(mut self, size: i16) -> Self {
         self.size = size;
+        self
+    }
+
+    /// 启用或禁用按方向滑入的弹簧动画。
+    #[inline(always)]
+    pub const fn animated(mut self, enabled: bool) -> Self {
+        self.animated = enabled;
         self
     }
 
@@ -187,6 +196,18 @@ impl<'a> Widget<'a> for Sheet<'a> {
 
         if let Some(body) = self.content {
             panel = panel.child(cx, body);
+        }
+
+        if self.animated {
+            let (dx, dy) = match self.side {
+                SheetSide::Right => (36i16, 0i16),
+                SheetSide::Left => (-36, 0),
+                SheetSide::Top => (0, -28),
+                SheetSide::Bottom => (0, 28),
+            };
+            panel = panel
+                .enter_from(255, dx, dy, Duration::from_millis(240))
+                .ease(Easing::Spring);
         }
 
         panel = self.style_ext.apply_to_div(panel, self.style);

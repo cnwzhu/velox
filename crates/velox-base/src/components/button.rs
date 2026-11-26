@@ -18,6 +18,8 @@ pub struct Button<'a> {
     pub selected: bool,
     pub loading: bool,
     pub auto_repeat: bool,
+    /// 是否启用悬停/按压颜色平滑过渡（无样式原语默认关闭）。
+    pub animated: bool,
     pub font_size: u8,
     pub text_color: Color,
     pub hover_bg: Option<Color>,
@@ -45,6 +47,7 @@ impl<'a> Button<'a> {
             selected: false,
             loading: false,
             auto_repeat: false,
+            animated: false,
             font_size: 0,
             text_color: AUTO_COLOR,
             hover_bg: None,
@@ -140,6 +143,13 @@ impl<'a> Button<'a> {
         self
     }
 
+    /// 启用或禁用背景与边框配色平滑过渡动画。
+    #[inline(always)]
+    pub const fn animated(mut self, enabled: bool) -> Self {
+        self.animated = enabled;
+        self
+    }
+
     /// 绑定点击回调闭包。
     #[inline(always)]
     pub fn on_click(mut self, handler: &'a dyn Fn(ClickEvent, &mut ActionScope)) -> Self {
@@ -207,6 +217,9 @@ impl<'a> Widget<'a> for Button<'a> {
             }
             if let Some(a_bg) = self.active_bg {
                 d = d.active_bg(a_bg);
+            }
+            if self.animated {
+                d = d.animate_color(Duration::from_millis(120));
             }
             d = ext.apply_ext_only(d);
             if self.auto_repeat {
