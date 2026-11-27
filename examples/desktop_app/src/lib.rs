@@ -33,9 +33,9 @@ use velox_kit::component::{
 use velox_kit::prelude::*;
 
 /// 默认桌面画廊窗口逻辑宽度（像素）。
-pub const DEFAULT_DESKTOP_WIDTH: i16 = 1080;
+pub const DEFAULT_DESKTOP_WIDTH: i16 = 1280;
 /// 默认桌面画廊窗口逻辑高度（像素）。
-pub const DEFAULT_DESKTOP_HEIGHT: i16 = 700;
+pub const DEFAULT_DESKTOP_HEIGHT: i16 = 820;
 
 /// Velox 原生多色矢量 Logo SVG。
 const VELOX_LOGO_SVG: &str = r##"<svg viewBox="0 0 24 24">
@@ -348,7 +348,7 @@ pub struct GalleryApp {
     pub fx_rotation_deg: i32,
     pub fx_clip_shape: usize,
 
-    // Motion & Physics Lab (std SpringAnimator + Carousel + Roller)
+    // Motion & Physics Lab (std SpringAnimator + Carousel + Roller + Engine Native Motion 2.0)
     pub spring_anim: SpringAnimator,
     pub motion_last_ms: u32,
     pub motion_target_pct: f32,
@@ -357,6 +357,11 @@ pub struct GalleryApp {
     pub motion_roller_idx: usize,
     pub motion_accordion_mask: u32,
     pub motion_tab_idx: usize,
+    pub motion_auto_items: Vec<u32>,
+    pub motion_next_item_id: u32,
+    pub motion_flip_expanded: bool,
+    pub motion_spring_stop: usize,
+    pub motion_rubber_pull: i16,
 
     // Engine Lab & Extended Component States
     pub lab_object_fit_idx: usize,
@@ -488,6 +493,11 @@ impl GalleryApp {
             motion_roller_idx: 0,
             motion_accordion_mask: 0b01,
             motion_tab_idx: 1,
+            motion_auto_items: vec![1, 2, 3, 4],
+            motion_next_item_id: 5,
+            motion_flip_expanded: false,
+            motion_spring_stop: 0,
+            motion_rubber_pull: 0,
             lab_object_fit_idx: 1,
             lab_rtl_enabled: false,
             lab_radar_angle: 35,
@@ -823,12 +833,14 @@ impl View for GalleryApp {
             .h_full()
             .bg(theme.sidebar)
             .border(1, theme.border)
+            .spring_bounds(Duration::from_millis(240))
+            .animate_color(Duration::from_millis(180))
             .scrollable(280)
             .overflow_hidden()
             .child(cx, sidebar);
 
-        // 3. 右侧可滚动 Story 展示主画布
-        let content_inner = match self.active_story {
+        // 3. 右侧可滚动 Story 展示主画布（非默认首页切换时自动执行弹簧上浮淡入，首页保持首帧零延迟直出）
+        let raw_story = match self.active_story {
             GalleryStory::Overview => self.render_story_overview(cx, theme),
             GalleryStory::Buttons => self.render_story_buttons(cx, theme),
             GalleryStory::Selection => self.render_story_selection(cx, theme),
@@ -846,11 +858,19 @@ impl View for GalleryApp {
             GalleryStory::Chat => self.render_story_chat(cx, theme),
             GalleryStory::Canvas => self.render_story_canvas(cx, theme),
         };
+        let content_inner = if self.active_story == GalleryStory::Overview {
+            raw_story
+        } else {
+            raw_story
+                .id(7000 + self.active_story.id())
+                .slide_in(0, 12, Duration::from_millis(200))
+                .ease_spring()
+        };
 
         let content_scroll_max = match self.active_story {
+            GalleryStory::Motion => 1080,
             GalleryStory::Effects | GalleryStory::Data | GalleryStory::Inputs => 760,
-            GalleryStory::Motion
-            | GalleryStory::EngineLab
+            GalleryStory::EngineLab
             | GalleryStory::Feedback
             | GalleryStory::Chat
             | GalleryStory::Canvas => 620,
@@ -927,7 +947,7 @@ impl View for GalleryApp {
             .child(cx, body_row)
             .child(cx, status_bar_elem);
 
-        // 5. 顶层浮动通知层（直接使用 velox-component::Notification，自带 std 物理弹簧滑入动画）
+        // 5. 顶层浮动通知层（内层 Notification 自带弹簧下滑入场 + 右滑淡出退场）
         if self.notification_open {
             root = root.child(
                 cx,
@@ -952,7 +972,7 @@ impl View for GalleryApp {
             );
         }
 
-        // 6. Overlays Story 交互式演示浮层（直接使用 velox-component::{Dialog, AlertDialog, Modal, Sheet}，自带 std 弹簧/回弹入场动画）
+        // 6. Overlays Story 交互式演示浮层（遮罩淡入淡出 + 卡片本体对称弹簧入场与滑出淡出退场）
         if self.demo_dialog_open {
             root = root.child(
                 cx,
@@ -962,6 +982,8 @@ impl View for GalleryApp {
                     .size_full()
                     .overlay()
                     .occlude_hit()
+                    .fade_in(Duration::from_millis(150))
+                    .fade_out(Duration::from_millis(150))
                     .flex_col()
                     .items_center()
                     .justify_center()
@@ -999,6 +1021,8 @@ impl View for GalleryApp {
                     .size_full()
                     .overlay()
                     .occlude_hit()
+                    .fade_in(Duration::from_millis(150))
+                    .fade_out(Duration::from_millis(150))
                     .flex_col()
                     .items_center()
                     .justify_center()
@@ -1057,6 +1081,8 @@ impl View for GalleryApp {
                     .size_full()
                     .overlay()
                     .occlude_hit()
+                    .fade_in(Duration::from_millis(150))
+                    .fade_out(Duration::from_millis(160))
                     .flex_row()
                     .justify_end()
                     .items_center()
@@ -1099,6 +1125,8 @@ impl View for GalleryApp {
                     .size_full()
                     .overlay()
                     .occlude_hit()
+                    .fade_in(Duration::from_millis(150))
+                    .fade_out(Duration::from_millis(150))
                     .flex_col()
                     .items_center()
                     .justify_center()
@@ -1127,7 +1155,7 @@ impl View for GalleryApp {
             );
         }
 
-        // 7.5 内置 DevTools Inspector HUD 实时浮层条
+        // 7.5 内置 DevTools Inspector HUD 实时浮层条（带弹簧下滑入场与上滑幽灵退场）
         if self.inspector_enabled {
             root = root.child(
                 cx,
@@ -1135,6 +1163,9 @@ impl View for GalleryApp {
                     .id(860)
                     .pos(236, 52)
                     .overlay()
+                    .slide_in(0, -10, Duration::from_millis(180))
+                    .ease_spring()
+                    .slide_out(0, -10, Duration::from_millis(150))
                     .px(10)
                     .py(5)
                     .rounded(6)

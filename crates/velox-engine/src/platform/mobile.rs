@@ -8,20 +8,15 @@
 //! - **异形屏安全区域与软键盘避让（`SafeAreaInsets` & `KeyboardInset`）**：实时同步状态栏、灵动岛/刘海屏/挖孔屏、底部导航横条与软键盘高度；
 //! - **单路径渲染后端分发**：当挂载了 [`WgpuWindowRenderer`](crate::renderers::wgpu::WgpuWindowRenderer) 硬件 Swapchain 时直接零拷贝呈现至 GPU，否则按激活后端（`Wgpu` / `Software`）单路径渲染至 `Rgba8888` 缓冲区。
 
-use std::vec;
 use std::vec::Vec;
 
 use crate::arena::SmallVec;
 use crate::display::Rgba8888;
-#[cfg(feature = "gpu")]
-use crate::display::PixelFormat;
 use crate::engine::VeloxEngine;
 use crate::platform::testing::TestingPlatform;
 use crate::pod::InputEvent;
 use crate::pod::SafeAreaInsets;
 use crate::solver::Region;
-#[cfg(feature = "gpu")]
-use crate::style::Color;
 
 /// 移动端操作系统生态枚举（Android、iOS、鸿蒙 HarmonyOS NEXT / OpenHarmony）。
 #[repr(u8)]
@@ -191,7 +186,8 @@ impl MobileEmbedApp {
             dpi_scale: 1,
             orientation: DeviceOrientation::Portrait,
             backend: super::DesktopRenderBackend::default_desktop(),
-            framebuffer: vec![Rgba8888(0); (w as usize) * (h as usize)],
+            // 按需懒分配：走原生 GPU Swapchain 直出时保持 0 字节，避免无条件常驻整屏 CPU 帧缓冲。
+            framebuffer: Vec::new(),
             dirty_rects: Vec::with_capacity(8),
             active_touch_id: None,
             #[cfg(feature = "gpu")]
@@ -283,6 +279,8 @@ impl MobileEmbedApp {
 
     /// 绑定原生移动端窗口句柄（Android `ANativeWindow` / iOS `UIView` `CAMetalLayer` / HarmonyOS `OHNativeWindow`），
     /// 开启轻量级 `wgpu` (Vulkan / Metal) 2D SDF 120Hz 零拷贝 Swapchain 直通硬件加速渲染。
+    ///
+    /// 绑定成功后会自动释放不再需要的 CPU `framebuffer` 与离屏渲染器内存。
     #[cfg(feature = "gpu")]
     pub fn attach_gpu_window<T>(&mut self, window_handle: T) -> bool
     where
@@ -291,13 +289,62 @@ impl MobileEmbedApp {
         let pw = self.physical_width().max(1) as u32;
         let ph = self.physical_height().max(1) as u32;
         self.gpu_window = crate::renderers::wgpu::WgpuWindowRenderer::new(window_handle, pw, ph);
-        self.gpu_window.is_some()
+        if self.gpu_window.is_some() {
+            self.framebuffer = Vec::new();
+            self.gpu_offscreen = None;
+            true
+        } else {
+            false
+        }
     }
 
     /// 解绑/挂起移动端 GPU Swapchain 表面。
     #[cfg(feature = "gpu")]
     pub fn detach_gpu_window(&mut self) {
         self.gpu_window = None;
+    }
+
+    /// 后台化或收到系统内存压力回调（`onTrimMemory` / `didReceiveMemoryWarning`）时释放闲置 CPU 帧缓冲与 GPU 离屏显存。
+    pub fn trim_memory(&mut self) {
+        self.framebuffer = Vec::new();
+        self.engine.resize(self.width, self.height);
+        #[cfg(feature = "gpu")]
+        {
+            if let Some(off) = &mut self.gpu_offscreen {
+                off.trim_cpu_buffers();
+                off.trim_gpu_memory();
+            }
+            if let Some(win) = &mut self.gpu_window {
+                win.trim_gpu_memory();
+            }
+        }
+    }
+
+    /// 返回当前移动端实例 CPU 侧 `framebuffer` 占用的字节容量（原生 GPU Swapchain 路径下为 `0`）。
+    #[inline]
+    pub fn cpu_framebuffer_bytes(&self) -> usize {
+        self.framebuffer.capacity() * core::mem::size_of::<Rgba8888>()
+    }
+
+    /// 返回当前移动端实例在 CPU 侧持有的像素缓冲总字节容量（包含 `framebuffer` 与离屏渲染器内部缓冲）。
+    #[inline]
+    pub fn cpu_memory_bytes(&self) -> usize {
+        #[allow(unused_mut)]
+        let mut total = self.cpu_framebuffer_bytes();
+        #[cfg(feature = "gpu")]
+        if let Some(off) = &self.gpu_offscreen {
+            total = total.saturating_add(off.cpu_memory_bytes());
+        }
+        total
+    }
+
+    fn ensure_cpu_framebuffer(&mut self) {
+        let pw = self.physical_width().max(1) as usize;
+        let ph = self.physical_height().max(1) as usize;
+        let needed = pw.saturating_mul(ph);
+        if self.framebuffer.len() != needed {
+            self.framebuffer.resize(needed, Rgba8888(0));
+        }
     }
 
     /// 检查当前是否已挂载并激活硬件 GPU Swapchain 表面。
@@ -322,7 +369,9 @@ impl MobileEmbedApp {
             self.engine.set_dpi_scale(s);
             let pw = (self.width as usize) * (s as usize);
             let ph = (self.height as usize) * (s as usize);
-            self.framebuffer.resize(pw * ph, Rgba8888(0));
+            if !self.framebuffer.is_empty() && !self.has_active_gpu_window() {
+                self.framebuffer.resize(pw * ph, Rgba8888(0));
+            }
             #[cfg(feature = "gpu")]
             if let Some(gpu_win) = &mut self.gpu_window {
                 gpu_win.resize(pw.max(1) as u32, ph.max(1) as u32);
@@ -358,7 +407,9 @@ impl MobileEmbedApp {
             self.height = h;
             let pw = (w as usize) * (self.dpi_scale as usize);
             let ph = (h as usize) * (self.dpi_scale as usize);
-            self.framebuffer.resize(pw * ph, Rgba8888(0));
+            if !self.framebuffer.is_empty() && !self.has_active_gpu_window() {
+                self.framebuffer.resize(pw * ph, Rgba8888(0));
+            }
             #[cfg(feature = "gpu")]
             if let Some(gpu_win) = &mut self.gpu_window {
                 gpu_win.resize(pw.max(1) as u32, ph.max(1) as u32);
@@ -463,30 +514,23 @@ impl MobileEmbedApp {
 
         let _pw = self.physical_width().max(1) as usize;
         let _ph = self.physical_height().max(1) as usize;
+        self.ensure_cpu_framebuffer();
 
-        // 2. 离屏 / ANativeWindow 缓冲区模式：按选定后端单路径产出 Rgba8888 像素
+        // 2. 离屏 / ANativeWindow 缓冲区模式：按选定后端单路径直写 `self.framebuffer`，消除多余整屏 CPU 副本
         match self.backend {
             super::DesktopRenderBackend::Wgpu => {
                 #[cfg(feature = "gpu")]
                 {
                     use crate::renderers::wgpu::WgpuOffscreenRenderer;
-                    use crate::renderers::Renderer;
                     let offscreen = self
                         .gpu_offscreen
-                        .get_or_insert_with(|| WgpuOffscreenRenderer::new(_pw, _ph));
-                    let _ = offscreen.render_draw_ops(
+                        .get_or_insert_with(|| WgpuOffscreenRenderer::new_lazy(_pw, _ph));
+                    let _ = offscreen.render_draw_ops_rgba8888_into(
                         self.engine.cached_draw_ops(),
                         self.engine.viewport_region(),
                         s,
                         regions.as_slice(),
-                    );
-                    copy_rgba_to_rgba8888(
-                        &offscreen.rgba_buffer,
-                        _pw,
-                        _ph,
-                        s,
-                        regions.as_slice(),
-                        &mut self.framebuffer,
+                        self.framebuffer.as_mut_slice(),
                     );
                 }
                 #[cfg(not(feature = "gpu"))]
@@ -692,42 +736,6 @@ pub mod ffi {
             app_ref.dirty_rects().len()
         } else {
             0
-        }
-    }
-}
-
-#[cfg(feature = "gpu")]
-fn copy_rgba_to_rgba8888(
-    rgba: &[u8],
-    stride: usize,
-    height: usize,
-    scale: i16,
-    regions: &[Region],
-    dst: &mut [Rgba8888],
-) {
-    let s = scale.max(1);
-    for reg in regions {
-        let x0 = (reg.x.saturating_mul(s).max(0) as usize).min(stride);
-        let y0 = (reg.y.saturating_mul(s).max(0) as usize).min(height);
-        let x1 = (reg.right().saturating_mul(s).max(0) as usize).min(stride);
-        let y1 = (reg.bottom().saturating_mul(s).max(0) as usize).min(height);
-        for py in y0..y1 {
-            let row_off = py * stride;
-            for px in x0..x1 {
-                let idx = row_off + px;
-                let b_off = idx * 4;
-                if b_off + 4 <= rgba.len() && idx < dst.len() {
-                    let r = rgba[b_off];
-                    let g = rgba[b_off + 1];
-                    let b = rgba[b_off + 2];
-                    let a = rgba[b_off + 3];
-                    if a == 255 {
-                        dst[idx] = Rgba8888::from_color(Color::rgb(r, g, b));
-                    } else if a > 0 {
-                        dst[idx] = dst[idx].blend(Color::rgba(r, g, b, a), a);
-                    }
-                }
-            }
         }
     }
 }

@@ -159,9 +159,9 @@ fn main() {
         let r1 = winit_plat.flush_frame_dt(&mut engine, 16);
         assert!(r1.has_updates(), "Frame 1 must render initial gallery frame");
 
-        // 点击顶部栏 "Toast" 按钮弹出右上角 Notification
-        let clicked = engine.dispatch_click(844, 22);
-        assert!(clicked, "Expected click at (844, 22) to trigger Gallery Toast");
+        // 点击顶部栏 "Toast" 按钮弹出右上角 Notification（1280px 宽窗口右侧按钮区坐标）
+        let clicked = engine.dispatch_click(1044, 22);
+        assert!(clicked, "Expected click at (1044, 22) to trigger Gallery Toast");
         let r2 = winit_plat.flush_frame_dt(&mut engine, 16);
         assert!(r2.has_updates(), "Frame 2 must repaint notification dirty region");
         assert!(engine.view(root).unwrap().notification_open);

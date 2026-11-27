@@ -96,16 +96,29 @@ impl<'a> Widget<'a> for Carousel<'a> {
         let slide_txt = self.slides.get(cur).copied().unwrap_or("Empty Slide");
         let on_chg = self.on_change;
 
+        let btn_hover = if self.btn_bg.a() > 0 {
+            self.btn_bg.lerp(text_color, 26)
+        } else {
+            text_color.scale_alpha(28)
+        };
         let mut prev_btn = div()
             .id(crate::scoped_child_id(self.id, 0x4F34_8A33, 1))
             .w(28)
             .h(28)
             .rounded(self.btn_rounded)
             .bg(self.btn_bg)
+            .hover_bg(btn_hover)
+            .cursor(CursorShape::Pointer)
+            .animate_color(Duration::from_millis(120))
             .items_center()
             .justify_center()
             .focusable()
-            .child(cx, text("<").size(12).color(text_color));
+            .child(
+                cx,
+                svg_icon(14, 14, "M15 18l-6-6 6-6")
+                    .tint(text_color)
+                    .stroke_width(22),
+            );
         if self.border_color.a() > 0 {
             prev_btn = prev_btn.border(1, self.border_color);
         }
@@ -119,10 +132,18 @@ impl<'a> Widget<'a> for Carousel<'a> {
             .h(28)
             .rounded(self.btn_rounded)
             .bg(self.btn_bg)
+            .hover_bg(btn_hover)
+            .cursor(CursorShape::Pointer)
+            .animate_color(Duration::from_millis(120))
             .items_center()
             .justify_center()
             .focusable()
-            .child(cx, text(">").size(12).color(text_color));
+            .child(
+                cx,
+                svg_icon(14, 14, "M9 18l6-6-6-6")
+                    .tint(text_color)
+                    .stroke_width(22),
+            );
         if self.border_color.a() > 0 {
             next_btn = next_btn.border(1, self.border_color);
         }
@@ -147,32 +168,42 @@ impl<'a> Widget<'a> for Carousel<'a> {
         let height = StyleExt::resolve_height(self.style, self.height);
         let stage = div()
             .flex_row()
-            .w(width - 16)
-            .h(height - 36)
+            .w((width - 24).max(80))
+            .h((height - 38).max(32))
+            .gap(12)
             .items_center()
             .justify_between()
             .child(cx, prev_btn)
             .child(
                 cx,
                 div()
-                    .w((width - 88).max(60))
+                    .flex_grow(1)
+                    .px(6)
                     .items_center()
                     .justify_center()
-                    .child(cx, text(slide_txt).size(14).color(text_color)),
+                    .child(cx, text(slide_txt).size(13).color(text_color).text_center()),
             )
             .child(cx, next_btn);
 
         let mut dots = div().flex_row().gap(6).items_center().justify_center();
         for i in 0..count {
             let active = i == cur;
-            dots = dots.child(
-                cx,
-                div()
-                    .w(if active { 16 } else { 6 })
-                    .h(6)
-                    .rounded(self.dot_rounded)
-                    .bg(if active { active_dot_bg } else { dot_bg }),
-            );
+            let mut dot = div()
+                .id(crate::scoped_child_id(self.id, 0x4F34_8A33, 10 + i as u32))
+                .w(if active { 18 } else { 6 })
+                .h(6)
+                .rounded(self.dot_rounded)
+                .bg(if active { active_dot_bg } else { dot_bg })
+                .cursor(CursorShape::Pointer)
+                .spring_bounds(Duration::from_millis(200))
+                .animate_color(Duration::from_millis(140));
+            if let Some(cb) = on_chg {
+                let dcb = cx.arena().alloc(move |scope: &mut ActionScope| {
+                    cb(i, scope);
+                });
+                dot = dot.on_click_raw(dcb);
+            }
+            dots = dots.child(cx, dot);
         }
 
         let mut root = div()
@@ -180,8 +211,9 @@ impl<'a> Widget<'a> for Carousel<'a> {
             .flex_col()
             .w(width)
             .h(height)
-            .p(8)
-            .gap(6)
+            .px(12)
+            .py(10)
+            .gap(8)
             .rounded(self.rounded)
             .bg(self.bg)
             .items_center()

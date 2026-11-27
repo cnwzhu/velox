@@ -16,7 +16,7 @@ use crate::pod::{FrameScope, Handle, PodId, Scope};
 
 pub use div::{div, Div};
 pub use div_node::{
-    DivInteractivity, DivNode, DivRareHandlers, DivVisual, EnterFrom, TransitionSpec,
+    DivInteractivity, DivNode, DivRareHandlers, DivVisual, EnterFrom, ExitTo, TransitionSpec,
 };
 pub use image::{
     img, img_arc, img_rotated_rgb565, img_shader, svg, svg_a4, svg_icon, svg_path, svg_str, Img,

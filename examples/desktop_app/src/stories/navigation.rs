@@ -64,28 +64,28 @@ impl GalleryApp {
             cx,
             theme,
             "Tabs (velox-component Segmented • Underline • Pill)",
-            "Focus any tab and use Arrow Left/Right or Home/End to traverse",
+            "Elevated segmented surface, native shared-element spring underline & pill tabs",
         )
         .child(
             cx,
             div()
                 .flex_col()
                 .w_full()
-                .gap(12)
+                .gap(14)
                 .child(
                     cx,
                     div()
                         .flex_col()
-                        .gap(4)
+                        .gap(6)
                         .child(
                             cx,
-                            text("Segmented (Default)")
+                            text("Segmented")
                                 .size(11)
                                 .color(theme.muted_foreground),
                         )
                         .child(
                             cx,
-                            div().w(420).child(
+                            div().w(440).child(
                                 cx,
                                 Tabs::new(
                                     1501,
@@ -101,8 +101,13 @@ impl GalleryApp {
                     cx,
                     div()
                         .flex_col()
-                        .gap(4)
-                        .child(cx, text("Underline").size(11).color(theme.muted_foreground))
+                        .gap(6)
+                        .child(
+                            cx,
+                            text("Underline (Native Spring Follower)")
+                                .size(11)
+                                .color(theme.muted_foreground),
+                        )
                         .child(
                             cx,
                             div().w(420).child(
@@ -172,7 +177,7 @@ impl GalleryApp {
                         .child(
                             cx,
                             Accordion::new(1510, ACCORDION_ITEMS, self.accordion_mask)
-                                .width(380)
+                                .width(460)
                                 .on_toggle_item(on_acc),
                         ),
                 ),

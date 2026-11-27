@@ -11,6 +11,7 @@ pub struct Tooltip<'a> {
     pub border_color: Color,
     pub text_color: Color,
     pub rounded: u8,
+    pub animated: bool,
     pub shadow: Option<(u8, i8, i8, Color)>,
     pub style: Style,
     pub style_ext: StyleExt,
@@ -30,12 +31,20 @@ impl<'a> Tooltip<'a> {
             border_color: Color::TRANSPARENT,
             text_color: Color::TRANSPARENT,
             rounded: 0,
+            animated: false,
             shadow: None,
             style: Style::DEFAULT,
             style_ext: StyleExt::DEFAULT,
             child: None,
             popup_renderer: None,
         }
+    }
+
+    /// 启用或禁用提示气泡淡入淡出动画。
+    #[inline(always)]
+    pub const fn animated(mut self, enabled: bool) -> Self {
+        self.animated = enabled;
+        self
     }
 
     /// 设置触发宿主子元素。
@@ -91,6 +100,11 @@ impl<'a> Widget<'a> for Tooltip<'a> {
             }
             if let Some((blur, ox, oy, col)) = self.shadow {
                 tip = tip.shadow(blur, ox, oy, col);
+            }
+            if self.animated {
+                tip = tip
+                    .fade_in(Duration::from_millis(110))
+                    .fade_out(Duration::from_millis(100));
             }
             if let Some(renderer) = self.popup_renderer {
                 wrap = wrap.child(cx, renderer(tip, cx));

@@ -80,163 +80,183 @@ pub fn rasterize_region<P: PixelFormat>(
             continue;
         }
 
-        let clip_r = (op.clip_radius as i16).min(op.clip.w / 2).min(op.clip.h / 2);
-        let corner_clip_active = clip_r > 0 && touches_rounded_corners(effective_clip, op.clip, clip_r);
+        rasterize_op_in_clip(
+            op,
+            effective_clip,
+            buffer_origin_x,
+            buffer_origin_y,
+            buffer_stride,
+            target,
+        );
+    }
+}
 
-        let draw_in_clip = |sub_clip: Region, dst: &mut [P]| match op.payload {
-            DrawPayload::Quad {
+/// 在给定最终可见裁剪区域 `effective_clip` 内光栅化单个 `DrawOp`（含分瓦片圆角裁切与全部载荷变体）。
+#[inline]
+pub(super) fn rasterize_op_in_clip<P: PixelFormat>(
+    op: &DrawOp<'_>,
+    effective_clip: Region,
+    buffer_origin_x: i16,
+    buffer_origin_y: i16,
+    buffer_stride: usize,
+    target: &mut [P],
+) {
+    let clip_r = (op.clip_radius as i16).min(op.clip.w / 2).min(op.clip.h / 2);
+    let corner_clip_active = clip_r > 0 && touches_rounded_corners(effective_clip, op.clip, clip_r);
+
+    let draw_in_clip = |sub_clip: Region, dst: &mut [P]| match op.payload {
+        DrawPayload::Quad {
+            bg,
+            bg_grad,
+            border_color,
+            rounded,
+            border_width,
+        } => {
+            rasterize_quad(
+                op.bounds,
+                sub_clip,
                 bg,
                 bg_grad,
                 border_color,
-                rounded,
+                rounded as i16,
                 border_width,
-            } => {
-                rasterize_quad(
-                    op.bounds,
-                    sub_clip,
-                    bg,
-                    bg_grad,
-                    border_color,
-                    rounded as i16,
-                    border_width,
-                    buffer_origin_x,
-                    buffer_origin_y,
-                    buffer_stride,
-                    dst,
-                );
-            }
-            DrawPayload::TextRun {
-                text,
-                color,
-                font_size,
-                text_flags,
-            } => {
-                rasterize_text(
-                    op.bounds,
-                    sub_clip,
-                    text.as_str(),
-                    color,
-                    font_size,
-                    text_flags,
-                    buffer_origin_x,
-                    buffer_origin_y,
-                    buffer_stride,
-                    dst,
-                );
-            }
-            DrawPayload::Sprite(sprite) => {
-                rasterize_sprite_source(
-                    op.bounds,
-                    sub_clip,
-                    sprite,
-                    buffer_origin_x,
-                    buffer_origin_y,
-                    buffer_stride,
-                    dst,
-                );
-            }
-            DrawPayload::StyledQuad(sq) => {
-                rasterize_styled_quad(
-                    op.bounds,
-                    sub_clip,
-                    sq,
-                    1.0,
-                    buffer_origin_x,
-                    buffer_origin_y,
-                    buffer_stride,
-                    dst,
-                );
-            }
-            DrawPayload::PushLayer(layer) => {
-                let _ = layer;
-            }
-            DrawPayload::PopLayer => {}
-            DrawPayload::ExternalTexture(ext) => {
-                let sq = crate::paint::StyledQuad {
-                    paint: crate::paint::Paint::Solid(ext.fallback_bg),
-                    border_color: Color::TRANSPARENT,
-                    border_width: 0,
-                    radii: ext.radii,
-                    opacity: ext.opacity,
-                    blend_mode: ext.blend_mode,
-                    transform: None,
-                };
-                rasterize_styled_quad(
-                    op.bounds,
-                    sub_clip,
-                    &sq,
-                    1.0,
-                    buffer_origin_x,
-                    buffer_origin_y,
-                    buffer_stride,
-                    dst,
-                );
-            }
-            DrawPayload::RichText(rt) => {
-                super::text::rasterize_rich_text(
-                    rt,
-                    op.bounds,
-                    sub_clip,
-                    1.0,
-                    buffer_origin_x,
-                    buffer_origin_y,
-                    buffer_stride,
-                    dst,
-                );
-            }
-            DrawPayload::DecodedImage(img) => {
-                super::text::rasterize_decoded_image(
-                    img,
-                    op.bounds,
-                    sub_clip,
-                    1.0,
-                    buffer_origin_x,
-                    buffer_origin_y,
-                    buffer_stride,
-                    dst,
-                );
-            }
-            DrawPayload::Vector(vec_spec) => {
-                crate::vector_canvas::rasterize_vector_spec(
-                    vec_spec,
-                    op.bounds,
-                    sub_clip,
-                    1.0,
-                    buffer_origin_x,
-                    buffer_origin_y,
-                    buffer_stride,
-                    dst,
-                );
-            }
-            DrawPayload::SceneCanvas(spec) => {
-                crate::canvas_scene::rasterize_scene_canvas(
-                    op.bounds,
-                    sub_clip,
-                    spec,
-                    1.0,
-                    buffer_origin_x,
-                    buffer_origin_y,
-                    buffer_stride,
-                    dst,
-                );
-            }
-        };
-
-        if corner_clip_active {
-            draw_op_with_tiled_rounded_clip(
-                effective_clip,
-                op.clip,
-                clip_r,
                 buffer_origin_x,
                 buffer_origin_y,
                 buffer_stride,
-                target,
-                draw_in_clip,
-                |px, py| compute_sdf_coverage(px, py, op.clip, clip_r),
+                dst,
             );
-        } else {
-            draw_in_clip(effective_clip, target);
         }
+        DrawPayload::TextRun {
+            text,
+            color,
+            font_size,
+            text_flags,
+        } => {
+            rasterize_text(
+                op.bounds,
+                sub_clip,
+                text.as_str(),
+                color,
+                font_size,
+                text_flags,
+                buffer_origin_x,
+                buffer_origin_y,
+                buffer_stride,
+                dst,
+            );
+        }
+        DrawPayload::Sprite(sprite) => {
+            rasterize_sprite_source(
+                op.bounds,
+                sub_clip,
+                sprite,
+                buffer_origin_x,
+                buffer_origin_y,
+                buffer_stride,
+                dst,
+            );
+        }
+        DrawPayload::StyledQuad(sq) => {
+            rasterize_styled_quad(
+                op.bounds,
+                sub_clip,
+                sq,
+                1.0,
+                buffer_origin_x,
+                buffer_origin_y,
+                buffer_stride,
+                dst,
+            );
+        }
+        DrawPayload::PushLayer(layer) => {
+            let _ = layer;
+        }
+        DrawPayload::PopLayer => {}
+        DrawPayload::ExternalTexture(ext) => {
+            let sq = crate::paint::StyledQuad {
+                paint: crate::paint::Paint::Solid(ext.fallback_bg),
+                border_color: Color::TRANSPARENT,
+                border_width: 0,
+                radii: ext.radii,
+                opacity: ext.opacity,
+                blend_mode: ext.blend_mode,
+                transform: None,
+            };
+            rasterize_styled_quad(
+                op.bounds,
+                sub_clip,
+                &sq,
+                1.0,
+                buffer_origin_x,
+                buffer_origin_y,
+                buffer_stride,
+                dst,
+            );
+        }
+        DrawPayload::RichText(rt) => {
+            super::text::rasterize_rich_text(
+                rt,
+                op.bounds,
+                sub_clip,
+                1.0,
+                buffer_origin_x,
+                buffer_origin_y,
+                buffer_stride,
+                dst,
+            );
+        }
+        DrawPayload::DecodedImage(img) => {
+            super::text::rasterize_decoded_image(
+                img,
+                op.bounds,
+                sub_clip,
+                1.0,
+                buffer_origin_x,
+                buffer_origin_y,
+                buffer_stride,
+                dst,
+            );
+        }
+        DrawPayload::Vector(vec_spec) => {
+            crate::vector_canvas::rasterize_vector_spec(
+                vec_spec,
+                op.bounds,
+                sub_clip,
+                1.0,
+                buffer_origin_x,
+                buffer_origin_y,
+                buffer_stride,
+                dst,
+            );
+        }
+        DrawPayload::SceneCanvas(spec) => {
+            crate::canvas_scene::rasterize_scene_canvas(
+                op.bounds,
+                sub_clip,
+                spec,
+                1.0,
+                buffer_origin_x,
+                buffer_origin_y,
+                buffer_stride,
+                dst,
+            );
+        }
+    };
+
+    if corner_clip_active {
+        draw_op_with_tiled_rounded_clip(
+            effective_clip,
+            op.clip,
+            clip_r,
+            buffer_origin_x,
+            buffer_origin_y,
+            buffer_stride,
+            target,
+            draw_in_clip,
+            |px, py| compute_sdf_coverage(px, py, op.clip, clip_r),
+        );
+    } else {
+        draw_in_clip(effective_clip, target);
     }
 }
 

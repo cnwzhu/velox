@@ -7,5 +7,5 @@ mod tween;
 
 pub use cache::{MotionCache, MotionState};
 pub use draw_op::{DrawOp, DrawOpSnapshot, DrawPayload};
-pub use spring::{Spring, SpringConfig};
+pub use spring::{rubberband, rubberband_i16, Spring, SpringConfig};
 pub use tween::{Presence, Tween};

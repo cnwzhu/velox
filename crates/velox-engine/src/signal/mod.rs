@@ -27,6 +27,10 @@ pub use handles::{computed, computed_eq, effect, signal, Computed, Effect, Signa
 pub use runtime::{batch, has_pending_dirty_pods};
 pub(crate) use runtime::{
     begin_pod_tracking, drain_pending_dirty_pods, end_pod_tracking, remove_pod_subscriptions,
+    remove_pool_subscriptions,
 };
 pub(crate) use storage::alloc_pool_id;
-pub use table::active_dep_edge_count;
+pub use table::{
+    active_dep_edge_count, dropped_pool_subscriptions, reset_dropped_pool_subscriptions,
+    MAX_INLINE_SIGNAL_POOLS,
+};

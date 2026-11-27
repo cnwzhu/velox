@@ -219,11 +219,15 @@ impl<'a> Widget<'a> for Collapsible<'a> {
         };
 
         let mut wrap = div()
+            .id(crate::scoped_child_id(self.id, 0x75C4_E819, 1))
             .flex_col()
             .w(eff_w)
             .rounded(self.rounded)
             .overflow_hidden()
             .child(cx, header_el);
+        if self.animated {
+            wrap = wrap.spring_bounds(Duration::from_millis(200));
+        }
         if self.border_color.a() > 0 {
             wrap = wrap.border(1, self.border_color);
         }
@@ -245,7 +249,8 @@ impl<'a> Widget<'a> for Collapsible<'a> {
                     if self.animated {
                         body_div = body_div
                             .enter_from(255, 0, -6, Duration::from_millis(180))
-                            .ease(Easing::EaseOut);
+                            .ease(Easing::EaseOut)
+                            .exit_to(0, 0, -6, Duration::from_millis(150));
                     }
                     wrap = wrap.child(cx, body_div);
                 }

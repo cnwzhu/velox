@@ -115,7 +115,8 @@ impl<'a> Widget<'a> for Popover<'a> {
                 if self.animated {
                     panel = panel
                         .enter_from(255, 0, -8, Duration::from_millis(170))
-                        .ease(Easing::EaseOutBack);
+                        .ease(Easing::EaseOutBack)
+                        .exit_to(0, 0, -8, Duration::from_millis(140));
                 }
                 panel = panel.child(cx, body);
                 if let Some(cb) = self.on_close {

@@ -303,9 +303,9 @@ pub fn map_nine_slice_coord(pos: f32, dst_len: f32, src_len: f32, start_inset: u
 
 mod std_pipeline {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex, OnceLock, RwLock};
+    use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
     use std::vec;
     use std::vec::Vec;
 
@@ -350,15 +350,33 @@ mod std_pipeline {
         }
     }
 
-    /// 异步图像加载状态。
-    #[derive(Clone, Debug)]
+    /// 图像资产的轻量元数据（不持有像素 `Arc` 强引用，像素被 CPU LRU 淘汰后仍可查询尺寸与版本号）。
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct ImageMetadata {
+        pub width: u32,
+        pub height: u32,
+        pub revision: u64,
+    }
+
+    impl ImageMetadata {
+        /// 展开为 RGBA8888 后的字节大小。
+        #[inline]
+        pub const fn byte_size(&self) -> usize {
+            (self.width as usize)
+                .saturating_mul(self.height as usize)
+                .saturating_mul(4)
+        }
+    }
+
+    /// 异步图像加载状态（`Ready` 仅持有轻量 [`ImageMetadata`]，绝不钉死像素缓存内存）。
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     pub enum ImageLoadState {
         Loading,
-        Ready(DecodedPixels),
+        Ready(ImageMetadata),
         Failed,
     }
 
-    /// 按显存/内存字节预算自动淘汰最久未用条目的 LRU 图像缓存。
+    /// 按显存/内存字节预算严格淘汰最久未用条目的 LRU 图像缓存。
     pub struct LruImageCache {
         max_bytes: usize,
         cur_bytes: usize,
@@ -369,7 +387,7 @@ mod std_pipeline {
     impl LruImageCache {
         pub fn new(max_bytes: usize) -> Self {
             Self {
-                max_bytes: max_bytes.max(1024),
+                max_bytes,
                 cur_bytes: 0,
                 clock: 0,
                 entries: HashMap::new(),
@@ -388,7 +406,7 @@ mod std_pipeline {
 
         #[inline]
         pub fn set_max_bytes(&mut self, max_bytes: usize) {
-            self.max_bytes = max_bytes.max(1024);
+            self.max_bytes = max_bytes;
             self.evict_if_needed();
         }
 
@@ -402,14 +420,26 @@ mod std_pipeline {
             self.entries.is_empty()
         }
 
+        /// 将解码像素写入 LRU 缓存；若单张图像字节数已超过总预算 `max_bytes`，则不留驻常驻缓存以严格守住预算上限。
         pub fn insert(&mut self, id: ImageAssetId, pixels: DecodedPixels) {
+            let _ = self.insert_checked(id, pixels);
+        }
+
+        /// 将解码像素写入 LRU 缓存，返回是否成功留驻在预算范围内（单图超出 `max_bytes` 时返回 `false`）。
+        pub fn insert_checked(&mut self, id: ImageAssetId, pixels: DecodedPixels) -> bool {
             if let Some((old, _)) = self.entries.remove(&id) {
                 self.cur_bytes = self.cur_bytes.saturating_sub(old.byte_size());
             }
+            let sz = pixels.byte_size();
+            if sz > self.max_bytes {
+                // 单图即超总预算：不留驻缓存，严格确保 `cur_bytes <= max_bytes`。
+                return false;
+            }
             self.clock = self.clock.saturating_add(1);
-            self.cur_bytes = self.cur_bytes.saturating_add(pixels.byte_size());
+            self.cur_bytes = self.cur_bytes.saturating_add(sz);
             self.entries.insert(id, (pixels, self.clock));
             self.evict_if_needed();
+            true
         }
 
         pub fn get(&mut self, id: ImageAssetId) -> Option<DecodedPixels> {
@@ -437,7 +467,7 @@ mod std_pipeline {
         }
 
         fn evict_if_needed(&mut self) {
-            while self.cur_bytes > self.max_bytes && self.entries.len() > 1 {
+            while self.cur_bytes > self.max_bytes {
                 let Some((&victim_id, _)) = self.entries.iter().min_by_key(|(_, (_, ts))| *ts) else {
                     break;
                 };
@@ -449,10 +479,161 @@ mod std_pipeline {
     }
 
     type CustomDecoderFn = fn(&[u8]) -> Option<(u32, u32, Vec<u8>)>;
+    type ReadyCallback = Arc<dyn Fn(ImageAssetId, bool) + Send + Sync + 'static>;
+
+    const DEFAULT_IMAGE_CACHE_BUDGET: usize = 64 * 1024 * 1024;
+    const MAX_DECODE_QUEUE_LEN: usize = 256;
+    const DEFAULT_MAX_IN_FLIGHT_DECODE_BYTES: usize = 32 * 1024 * 1024;
+
     static CUSTOM_DECODERS: OnceLock<RwLock<Vec<CustomDecoderFn>>> = OnceLock::new();
     static GLOBAL_IMAGE_CACHE: OnceLock<Mutex<LruImageCache>> = OnceLock::new();
     static GLOBAL_IMAGE_STATES: OnceLock<Mutex<HashMap<ImageAssetId, ImageLoadState>>> = OnceLock::new();
     static NEXT_IMAGE_REV: AtomicU64 = AtomicU64::new(1);
+
+    struct DecodeJob {
+        id: ImageAssetId,
+        bytes: Vec<u8>,
+        estimated_rgba_bytes: usize,
+        on_ready: Option<ReadyCallback>,
+    }
+
+    struct DecodePoolState {
+        queue: VecDeque<DecodeJob>,
+        in_flight_bytes: usize,
+        max_in_flight_bytes: usize,
+        worker_count: usize,
+    }
+
+    struct DecodePool {
+        state: Mutex<DecodePoolState>,
+        cv: Condvar,
+    }
+
+    static DECODE_POOL: OnceLock<Arc<DecodePool>> = OnceLock::new();
+
+    fn estimate_decoded_rgba_bytes(bytes: &[u8]) -> usize {
+        // 尽量从 PNG IHDR / BMP BITMAPINFOHEADER 读取真实展开尺寸，精准限制并发展开像素内存。
+        if bytes.len() >= 24 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" && &bytes[12..16] == b"IHDR" {
+            let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) as usize;
+            let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]) as usize;
+            if w > 0 && h > 0 {
+                return w.saturating_mul(h).saturating_mul(4).max(4096);
+            }
+        } else if bytes.len() >= 26 && &bytes[..2] == b"BM" {
+            let w = i32::from_le_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]);
+            let h = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]).unsigned_abs();
+            if w > 0 && h > 0 {
+                return (w as usize).saturating_mul(h as usize).saturating_mul(4).max(4096);
+            }
+        }
+        bytes.len().saturating_mul(4).max(4096)
+    }
+
+    fn decode_pool() -> &'static Arc<DecodePool> {
+        DECODE_POOL.get_or_init(|| {
+            let workers = std::thread::available_parallelism()
+                .map(|n| n.get().clamp(2, 4))
+                .unwrap_or(2);
+            let pool = Arc::new(DecodePool {
+                state: Mutex::new(DecodePoolState {
+                    queue: VecDeque::with_capacity(32),
+                    in_flight_bytes: 0,
+                    max_in_flight_bytes: DEFAULT_MAX_IN_FLIGHT_DECODE_BYTES,
+                    worker_count: workers,
+                }),
+                cv: Condvar::new(),
+            });
+            for idx in 0..workers {
+                let p = Arc::clone(&pool);
+                let _ = std::thread::Builder::new()
+                    .name(std::format!("velox-img-decode-{idx}"))
+                    .spawn(move || decode_worker_loop(p));
+            }
+            pool
+        })
+    }
+
+    fn decode_worker_loop(pool: Arc<DecodePool>) {
+        loop {
+            let (job, reserved_bytes) = {
+                let Ok(mut st) = pool.state.lock() else {
+                    return;
+                };
+                loop {
+                    if let Some(front) = st.queue.front() {
+                        // 无在途任务时放行单张大图避免饥饿死锁；并发时受 `max_in_flight_bytes` 字节配额节流。
+                        if st.in_flight_bytes == 0
+                            || st.in_flight_bytes.saturating_add(front.estimated_rgba_bytes)
+                                <= st.max_in_flight_bytes
+                        {
+                            let job = st.queue.pop_front().unwrap();
+                            let est = job.estimated_rgba_bytes;
+                            st.in_flight_bytes = st.in_flight_bytes.saturating_add(est);
+                            break (job, est);
+                        }
+                    }
+                    let Ok(guard) = pool.cv.wait(st) else {
+                        return;
+                    };
+                    st = guard;
+                }
+            };
+
+            let ok = decode_and_commit_async(job.id, &job.bytes);
+
+            {
+                if let Ok(mut st) = pool.state.lock() {
+                    st.in_flight_bytes = st.in_flight_bytes.saturating_sub(reserved_bytes);
+                    pool.cv.notify_all();
+                }
+            }
+
+            if let Some(cb) = job.on_ready {
+                cb(job.id, ok);
+            }
+        }
+    }
+
+    fn decode_and_commit_async(id: ImageAssetId, bytes: &[u8]) -> bool {
+        let decoded = decode_image_bytes(bytes);
+        let states = GLOBAL_IMAGE_STATES.get_or_init(|| Mutex::new(HashMap::new()));
+        // 若解码期间资产已被显式 `unload_image` 或已被更新的同步注册覆盖，避免回写陈旧状态。
+        let still_loading = states
+            .lock()
+            .ok()
+            .is_some_and(|s| matches!(s.get(&id), Some(ImageLoadState::Loading)));
+        if !still_loading {
+            return false;
+        }
+        if let Some((w, h, rgba)) = decoded {
+            register_image_rgba(id, w, h, rgba).is_some()
+        } else {
+            if let Ok(mut s) = states.lock() {
+                if matches!(s.get(&id), Some(ImageLoadState::Loading)) {
+                    s.insert(id, ImageLoadState::Failed);
+                }
+            }
+            false
+        }
+    }
+
+    /// 配置后台异步图像解码池允许同时展开的最大像素字节配额（默认 32 MiB）。
+    pub fn set_async_decode_in_flight_budget(max_bytes: usize) {
+        let pool = decode_pool();
+        if let Ok(mut st) = pool.state.lock() {
+            st.max_in_flight_bytes = max_bytes.max(64 * 1024);
+            pool.cv.notify_all();
+        }
+    }
+
+    /// 返回后台异步解码工作池的常驻复用线程数。
+    pub fn async_decode_worker_count() -> usize {
+        decode_pool()
+            .state
+            .lock()
+            .map(|st| st.worker_count)
+            .unwrap_or(0)
+    }
 
     /// 注册外部格式解码器（例如项目外部接入 `zune-jpeg` / `webp` 时无缝挂载到统一管线）。
     pub fn register_custom_image_decoder(decoder: CustomDecoderFn) {
@@ -462,17 +643,55 @@ mod std_pipeline {
         }
     }
 
-    /// 设置全局图像 LRU 缓存字节上限（默认 64 MiB）。
+    /// 设置全局图像 LRU 缓存字节上限（默认 64 MiB），并立即淘汰超出新预算的旧条目。
     pub fn set_global_image_cache_budget(max_bytes: usize) {
-        let cache = GLOBAL_IMAGE_CACHE.get_or_init(|| Mutex::new(LruImageCache::new(64 * 1024 * 1024)));
+        let cache = GLOBAL_IMAGE_CACHE.get_or_init(|| Mutex::new(LruImageCache::new(DEFAULT_IMAGE_CACHE_BUDGET)));
         if let Ok(mut c) = cache.lock() {
             c.set_max_bytes(max_bytes);
         }
     }
 
+    /// 返回全局图像 CPU 像素缓存实时统计：`(current_bytes, max_bytes, entry_count)`。
+    pub fn global_image_cache_stats() -> (usize, usize, usize) {
+        let cache = GLOBAL_IMAGE_CACHE.get_or_init(|| Mutex::new(LruImageCache::new(DEFAULT_IMAGE_CACHE_BUDGET)));
+        cache
+            .lock()
+            .map(|c| (c.current_bytes(), c.max_bytes(), c.len()))
+            .unwrap_or((0, DEFAULT_IMAGE_CACHE_BUDGET, 0))
+    }
+
+    /// 显式释放指定图像在全局 CPU LRU 缓存中的像素数据，但保留轻量元数据（尺寸与版本号）以防 GPU 纹理版本回退。
+    pub fn release_cached_image(id: ImageAssetId) -> bool {
+        let cache = GLOBAL_IMAGE_CACHE.get_or_init(|| Mutex::new(LruImageCache::new(DEFAULT_IMAGE_CACHE_BUDGET)));
+        cache.lock().map(|mut c| c.remove(id)).unwrap_or(false)
+    }
+
+    /// 清空全局 CPU 像素 LRU 缓存中的所有像素数据（保留元数据状态）。
+    pub fn clear_global_image_cache() {
+        let cache = GLOBAL_IMAGE_CACHE.get_or_init(|| Mutex::new(LruImageCache::new(DEFAULT_IMAGE_CACHE_BUDGET)));
+        if let Ok(mut c) = cache.lock() {
+            c.clear();
+        }
+    }
+
+    /// 彻底卸载指定图像资产：同时移除 CPU LRU 像素缓存与加载状态/元数据记录。
+    pub fn unload_image(id: ImageAssetId) -> bool {
+        let removed_px = release_cached_image(id);
+        let states = GLOBAL_IMAGE_STATES.get_or_init(|| Mutex::new(HashMap::new()));
+        let removed_st = states
+            .lock()
+            .map(|mut s| s.remove(&id).is_some())
+            .unwrap_or(false);
+        removed_px || removed_st
+    }
+
     /// 直接向全局 LRU 缓存注册已解码的 RGBA8888 像素（返回递增版本号）。
+    ///
+    /// 像素内存仅由全局 LRU 缓存与当前使用中的 [`DecodedPixels`] 句柄持有；
+    /// `GLOBAL_IMAGE_STATES` 仅记录轻量 [`ImageMetadata`]，被 LRU 淘汰后底层像素会被立即释放。
     pub fn register_image_rgba(id: ImageAssetId, width: u32, height: u32, rgba: Vec<u8>) -> Option<u64> {
-        if width == 0 || height == 0 || rgba.len() != (width as usize) * (height as usize) * 4 {
+        let expected_len = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+        if width == 0 || height == 0 || rgba.len() != expected_len {
             return None;
         }
         let rev = NEXT_IMAGE_REV.fetch_add(1, Ordering::Relaxed);
@@ -482,13 +701,18 @@ mod std_pipeline {
             rgba: Arc::from(rgba.into_boxed_slice()),
             revision: rev,
         };
-        let cache = GLOBAL_IMAGE_CACHE.get_or_init(|| Mutex::new(LruImageCache::new(64 * 1024 * 1024)));
+        let meta = ImageMetadata {
+            width,
+            height,
+            revision: rev,
+        };
+        let cache = GLOBAL_IMAGE_CACHE.get_or_init(|| Mutex::new(LruImageCache::new(DEFAULT_IMAGE_CACHE_BUDGET)));
         if let Ok(mut c) = cache.lock() {
-            c.insert(id, px.clone());
+            c.insert(id, px);
         }
         let states = GLOBAL_IMAGE_STATES.get_or_init(|| Mutex::new(HashMap::new()));
         if let Ok(mut s) = states.lock() {
-            s.insert(id, ImageLoadState::Ready(px));
+            s.insert(id, ImageLoadState::Ready(meta));
         }
         Some(rev)
     }
@@ -499,42 +723,72 @@ mod std_pipeline {
         register_image_rgba(id, w, h, rgba)
     }
 
-    /// 在后台线程异步解码图像字节流，完成后自动写入全局 LRU 缓存并触发 `on_ready` 唤醒回调。
+    /// 在有界复用后台解码工作池中异步解码图像字节流，完成后写入全局 LRU 缓存并触发 `on_ready` 唤醒回调。
+    ///
+    /// 工作池固定复用 `2..=4` 个工作线程并按展开后 RGBA 字节配额节流，避免批量加载时无限开线程或瞬时内存峰值暴涨。
     pub fn load_image_bytes_async(
         id: ImageAssetId,
         bytes: Vec<u8>,
-        on_ready: Option<Arc<dyn Fn(ImageAssetId, bool) + Send + Sync + 'static>>,
+        on_ready: Option<ReadyCallback>,
     ) {
         let states = GLOBAL_IMAGE_STATES.get_or_init(|| Mutex::new(HashMap::new()));
         if let Ok(mut s) = states.lock() {
             s.insert(id, ImageLoadState::Loading);
         }
-        let _ = std::thread::Builder::new()
-            .name(std::string::String::from("velox-img-decode"))
-            .spawn(move || {
-                let ok = load_image_bytes(id, &bytes).is_some();
-                if !ok {
-                    let states = GLOBAL_IMAGE_STATES.get_or_init(|| Mutex::new(HashMap::new()));
-                    if let Ok(mut s) = states.lock() {
-                        s.insert(id, ImageLoadState::Failed);
-                    }
+        let estimated_rgba_bytes = estimate_decoded_rgba_bytes(&bytes);
+        let pool = decode_pool();
+        let rejected = {
+            let Ok(mut st) = pool.state.lock() else {
+                return;
+            };
+            if st.queue.len() >= MAX_DECODE_QUEUE_LEN {
+                true
+            } else {
+                st.queue.push_back(DecodeJob {
+                    id,
+                    bytes,
+                    estimated_rgba_bytes,
+                    on_ready: on_ready.clone(),
+                });
+                pool.cv.notify_one();
+                false
+            }
+        };
+        if rejected {
+            if let Ok(mut s) = states.lock() {
+                if matches!(s.get(&id), Some(ImageLoadState::Loading)) {
+                    s.insert(id, ImageLoadState::Failed);
                 }
-                if let Some(cb) = on_ready {
-                    cb(id, ok);
-                }
-            });
+            }
+            if let Some(cb) = on_ready {
+                cb(id, false);
+            }
+        }
     }
 
     /// 查询指定图像 ID 的缓存像素（同时刷新其 LRU 活跃时间戳）。
     pub fn get_cached_image(id: ImageAssetId) -> Option<DecodedPixels> {
-        let cache = GLOBAL_IMAGE_CACHE.get_or_init(|| Mutex::new(LruImageCache::new(64 * 1024 * 1024)));
+        let cache = GLOBAL_IMAGE_CACHE.get_or_init(|| Mutex::new(LruImageCache::new(DEFAULT_IMAGE_CACHE_BUDGET)));
         cache.lock().ok().and_then(|mut c| c.get(id))
     }
 
-    /// 查询指定图像 ID 的异步加载状态。
+    /// 查询指定图像 ID 的异步加载状态（不含像素强引用）。
     pub fn image_load_state(id: ImageAssetId) -> Option<ImageLoadState> {
         let states = GLOBAL_IMAGE_STATES.get_or_init(|| Mutex::new(HashMap::new()));
-        states.lock().ok().and_then(|s| s.get(&id).cloned())
+        states.lock().ok().and_then(|s| s.get(&id).copied())
+    }
+
+    /// 直接读取指定图像 ID 的轻量元数据（即使 CPU 像素已被 LRU 淘汰，仍可准确获取宽高与版本号）。
+    pub fn image_metadata(id: ImageAssetId) -> Option<ImageMetadata> {
+        match image_load_state(id) {
+            Some(ImageLoadState::Ready(meta)) => Some(meta),
+            _ => None,
+        }
+    }
+
+    /// 直接读取指定图像 ID 的资产版本号（供 GPU 精灵图集缓存键读取，不受 CPU 像素淘汰影响）。
+    pub fn image_revision(id: ImageAssetId) -> Option<u64> {
+        image_metadata(id).map(|m| m.revision)
     }
 
     /// 统一解码入口：内置纯 Rust PNG + BMP 解码器，未知或 JPEG/WebP 格式自动尝试已注册外部解码器。
@@ -1012,7 +1266,9 @@ mod std_pipeline {
 }
 
 pub use std_pipeline::{
-    decode_image_bytes, detect_image_format, get_cached_image, image_load_state,
+    async_decode_worker_count, clear_global_image_cache, decode_image_bytes, detect_image_format,
+    get_cached_image, global_image_cache_stats, image_load_state, image_metadata, image_revision,
     load_image_bytes, load_image_bytes_async, register_custom_image_decoder, register_image_rgba,
-    set_global_image_cache_budget, DecodedPixels, ImageFormat, ImageLoadState, LruImageCache,
+    release_cached_image, set_async_decode_in_flight_budget, set_global_image_cache_budget,
+    unload_image, DecodedPixels, ImageFormat, ImageLoadState, ImageMetadata, LruImageCache,
 };

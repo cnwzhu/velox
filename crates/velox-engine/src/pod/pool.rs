@@ -203,9 +203,9 @@ impl Default for PodPool {
 impl Drop for PodPool {
     fn drop(&mut self) {
         let pid = self.pool_id.get();
-        for (idx, slot) in self.slots.iter_mut().enumerate() {
+        crate::signal::remove_pool_subscriptions(pid);
+        for slot in self.slots.iter_mut() {
             if let Some(vt) = slot.vtable.take() {
-                crate::signal::remove_pod_subscriptions(pid, PodId(idx as u16));
                 if !slot.heap_ptr.is_null() {
                     let ptr = slot.heap_ptr;
                     slot.heap_ptr = core::ptr::null_mut();

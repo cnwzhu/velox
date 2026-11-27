@@ -122,6 +122,10 @@ pub struct WgpuRenderer {
     next_external_id: u32,
     target_format: wgpu::TextureFormat,
     primitives: Vec<GpuPrimitive>,
+    /// 上一帧已上传到 GPU `instance_buf` 的实例镜像，用于增量局部区间 `queue.write_buffer`。
+    uploaded_primitives: Vec<GpuPrimitive>,
+    instance_buf_dirty_all: bool,
+    last_uploaded_instance_bytes: usize,
     sprite_scratch: Vec<Rgba8888>,
     #[cfg(not(target_endian = "little"))]
     sprite_bytes_scratch: Vec<u8>,
@@ -317,6 +321,9 @@ impl WgpuRenderer {
             next_external_id: 1,
             target_format,
             primitives: Vec::with_capacity(INITIAL_INSTANCE_CAPACITY),
+            uploaded_primitives: Vec::with_capacity(INITIAL_INSTANCE_CAPACITY),
+            instance_buf_dirty_all: true,
+            last_uploaded_instance_bytes: 0,
             sprite_scratch: Vec::new(),
             #[cfg(not(target_endian = "little"))]
             sprite_bytes_scratch: Vec::new(),
@@ -474,6 +481,214 @@ impl WgpuRenderer {
     #[inline]
     pub fn external_texture_count(&self) -> usize {
         self.external_textures.len()
+    }
+
+    /// 返回当前离屏图层纹理池占用的估算 GPU 显存字节数（无特效子引擎时为 `0`）。
+    #[inline]
+    pub fn layer_pool_bytes(&self) -> usize {
+        self.effects.as_ref().map(|fx| fx.pool.target_bytes()).unwrap_or(0)
+    }
+
+    /// 返回当前离屏图层纹理池中驻留的纹理数量。
+    #[inline]
+    pub fn layer_pool_target_count(&self) -> usize {
+        self.effects.as_ref().map(|fx| fx.pool.target_count()).unwrap_or(0)
+    }
+
+    /// 返回当前 SVG Path 遮罩缓存占用的估算 GPU 显存字节数。
+    #[inline]
+    pub fn layer_mask_cache_bytes(&self) -> usize {
+        self.effects.as_ref().map(|fx| fx.pool.mask_bytes()).unwrap_or(0)
+    }
+
+    /// 返回当前 SVG Path 遮罩缓存驻留的条目数量。
+    #[inline]
+    pub fn layer_mask_cache_count(&self) -> usize {
+        self.effects.as_ref().map(|fx| fx.pool.mask_count()).unwrap_or(0)
+    }
+
+    /// 配置离屏图层纹理池的空闲字节预算（超出时在帧末按 LRU 立即回收）。
+    pub fn set_layer_pool_idle_budget(&mut self, bytes: usize) {
+        if let Some(fx) = &mut self.effects {
+            if fx.pool.set_idle_target_budget_bytes(bytes) {
+                fx.prune_stale_bind_groups();
+            }
+        }
+    }
+
+    /// 配置离屏图层纹理池的最大闲置帧数（切回普通页超过该帧数后自动回收）。
+    pub fn set_layer_pool_idle_max_age_frames(&mut self, frames: u64) {
+        if let Some(fx) = &mut self.effects {
+            if fx.pool.set_idle_target_max_age_frames(frames) {
+                fx.prune_stale_bind_groups();
+            }
+        }
+    }
+
+    /// 配置 SVG Path 遮罩缓存的显存字节预算。
+    pub fn set_layer_mask_cache_budget(&mut self, bytes: usize) {
+        if let Some(fx) = &mut self.effects {
+            if fx.pool.set_mask_budget_bytes(bytes) {
+                fx.prune_stale_bind_groups();
+            }
+        }
+    }
+
+    /// 视口尺寸缩小或变更时调用，立即回收远大于新视口的空闲离屏大纹理。
+    pub fn on_viewport_resized(&mut self, phys_width: u32, phys_height: u32) {
+        if let Some(fx) = &mut self.effects {
+            fx.on_viewport_resized(phys_width, phys_height);
+        }
+    }
+
+    /// 后台化或收到内存警告时主动回收全部空闲 GPU 离屏纹理、SVG 遮罩缓存与 Canvas 场景缓冲。
+    pub fn trim_gpu_memory(&mut self) {
+        if let Some(fx) = &mut self.effects {
+            fx.trim_idle_all();
+        }
+        if let Some(canvas) = &mut self.canvas_engine {
+            canvas.trim_idle_scenes();
+        }
+    }
+
+    /// 返回最近一帧增量上传至 GPU `instance_buf` 的实际字节数（用于观测增量上传收益）。
+    #[inline]
+    pub fn last_uploaded_instance_bytes(&self) -> usize {
+        self.last_uploaded_instance_bytes
+    }
+
+    /// 显式移除并释放指定 `SceneCanvas` 场景的 GPU 显存缓冲。
+    #[inline]
+    pub fn remove_canvas_scene(&mut self, scene_id: crate::canvas_scene::StaticSceneId) -> bool {
+        self.canvas_engine
+            .as_mut()
+            .is_some_and(|c| c.remove_scene(scene_id))
+    }
+
+    /// 返回 `CanvasGpuEngine` 当前缓存的所有场景 GPU 显存总字节数。
+    #[inline]
+    pub fn canvas_cache_bytes(&self) -> usize {
+        self.canvas_engine
+            .as_ref()
+            .map(|c| c.total_gpu_bytes())
+            .unwrap_or(0)
+    }
+
+    /// 返回 `CanvasGpuEngine` 当前缓存的场景数量。
+    #[inline]
+    pub fn canvas_scene_count(&self) -> usize {
+        self.canvas_engine
+            .as_ref()
+            .map(|c| c.scene_count())
+            .unwrap_or(0)
+    }
+
+    /// 返回最近一次 `SceneCanvas` 动态状态增量上传的实际字节数。
+    #[inline]
+    pub fn canvas_last_state_upload_bytes(&self) -> usize {
+        self.canvas_engine
+            .as_ref()
+            .map(|c| c.last_state_upload_bytes())
+            .unwrap_or(0)
+    }
+
+    /// 配置 `CanvasGpuEngine` 空闲场景显存预算（超出时按 LRU 淘汰切走的旧场景）。
+    #[inline]
+    pub fn set_canvas_idle_budget(&mut self, bytes: usize) {
+        if let Some(c) = &mut self.canvas_engine {
+            c.set_idle_budget_bytes(bytes);
+        }
+    }
+
+    /// 配置 `CanvasGpuEngine` 空闲场景最大存活帧数。
+    #[inline]
+    pub fn set_canvas_idle_max_age_frames(&mut self, frames: u64) {
+        if let Some(c) = &mut self.canvas_engine {
+            c.set_idle_max_age_frames(frames);
+        }
+    }
+
+    /// 将当前帧 `self.primitives` 增量同步至 GPU `instance_buf`：
+    /// - 新建或扩容缓冲时整块上传；
+    /// - 稳态帧按 192B 实例逐项位级比对，合并相邻变更区间（间隙 <= 16 项），仅对实际改动区间局部 `queue.write_buffer`。
+    fn sync_instance_buffer(&mut self, queue: &wgpu::Queue) {
+        const INSTANCE_STRIDE: usize = core::mem::size_of::<GpuPrimitive>();
+        const INSTANCE_MERGE_GAP: usize = 16;
+
+        let new_len = self.primitives.len();
+        if new_len == 0 {
+            self.uploaded_primitives.clear();
+            self.last_uploaded_instance_bytes = 0;
+            return;
+        }
+
+        if self.instance_buf_dirty_all || self.uploaded_primitives.is_empty() {
+            let bytes = pod_as_bytes(&self.primitives);
+            queue.write_buffer(&self.instance_buf, 0, bytes);
+            self.uploaded_primitives.clear();
+            self.uploaded_primitives.extend_from_slice(&self.primitives);
+            self.instance_buf_dirty_all = false;
+            self.last_uploaded_instance_bytes = bytes.len();
+            return;
+        }
+
+        let old_len = self.uploaded_primitives.len();
+        let common = old_len.min(new_len);
+        let new_bytes = pod_as_bytes(&self.primitives);
+        let old_bytes = pod_as_bytes(&self.uploaded_primitives);
+
+        let mut uploaded_bytes = 0usize;
+        let mut run_start: Option<usize> = None;
+        let mut run_end: usize = 0;
+
+        for i in 0..new_len {
+            let changed = if i < common {
+                let off = i * INSTANCE_STRIDE;
+                new_bytes[off..off + INSTANCE_STRIDE] != old_bytes[off..off + INSTANCE_STRIDE]
+            } else {
+                true
+            };
+            if changed {
+                match run_start {
+                    None => {
+                        run_start = Some(i);
+                        run_end = i + 1;
+                    }
+                    Some(rs) => {
+                        if i.saturating_sub(run_end) <= INSTANCE_MERGE_GAP {
+                            run_end = i + 1;
+                        } else {
+                            let b_start = rs * INSTANCE_STRIDE;
+                            let b_end = run_end * INSTANCE_STRIDE;
+                            queue.write_buffer(
+                                &self.instance_buf,
+                                b_start as u64,
+                                &new_bytes[b_start..b_end],
+                            );
+                            uploaded_bytes += b_end - b_start;
+                            run_start = Some(i);
+                            run_end = i + 1;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(rs) = run_start {
+            let b_start = rs * INSTANCE_STRIDE;
+            let b_end = run_end * INSTANCE_STRIDE;
+            queue.write_buffer(
+                &self.instance_buf,
+                b_start as u64,
+                &new_bytes[b_start..b_end],
+            );
+            uploaded_bytes += b_end - b_start;
+        }
+
+        if uploaded_bytes > 0 || old_len != new_len {
+            self.uploaded_primitives.clear();
+            self.uploaded_primitives.extend_from_slice(&self.primitives);
+        }
+        self.last_uploaded_instance_bytes = uploaded_bytes;
     }
 
     fn rebuild_bind_group(&mut self, device: &wgpu::Device) {
@@ -897,9 +1112,8 @@ impl WgpuRenderer {
                 }
                 let w = eff.w.max(1) as usize;
                 let h = eff.h.max(1) as usize;
-                let cache_rev = crate::image_pipeline::get_cached_image(img.id)
-                    .map(|p| p.revision)
-                    .unwrap_or(0);
+                // 从轻量资产元数据读取版本号，不触发 CPU 像素缓存查询，CPU 像素淘汰后也不会退化为 0。
+                let cache_rev = crate::image_pipeline::image_revision(img.id).unwrap_or(0);
                 let mut kh: u32 = 0x4449_4D47 ^ (cache_rev as u32);
                 img.mix_hash(&mut kh);
                 let hash = ((kh as u64) << 32)
@@ -1467,6 +1681,7 @@ impl WgpuRenderer {
         if self.primitives.len() > self.instance_capacity {
             self.instance_capacity = self.primitives.len().next_power_of_two();
             self.instance_buf = Self::create_instance_buffer(device, self.instance_capacity);
+            self.instance_buf_dirty_all = true;
             bind_group_dirty = true;
         }
         if bind_group_dirty {
@@ -1482,10 +1697,7 @@ impl WgpuRenderer {
             _pad: [0u8; 256 - core::mem::size_of::<ViewportUniform>()],
         };
         queue.write_buffer(&self.viewport_buf, 0, pod_as_bytes(&[slot0]));
-
-        if !self.primitives.is_empty() {
-            queue.write_buffer(&self.instance_buf, 0, pod_as_bytes(&self.primitives));
-        }
+        self.sync_instance_buffer(queue);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("velox_wgpu_render_encoder"),
@@ -1514,6 +1726,12 @@ impl WgpuRenderer {
             }
         }
         queue.submit([encoder.finish()]);
+        if let Some(fx) = &mut self.effects {
+            fx.tick_idle_frame();
+        }
+        if let Some(canvas) = &mut self.canvas_engine {
+            canvas.tick_frame_reclaim();
+        }
     }
 
     /// 面向持久离屏画布的 GPU 硬件脏区 Scissor 局部增量渲染（仅重绘 `dirty_regions` 覆盖的物理像素，保留未脏区域以压低 4K 功耗）。
@@ -1574,6 +1792,7 @@ impl WgpuRenderer {
         if self.primitives.len() > self.instance_capacity {
             self.instance_capacity = self.primitives.len().next_power_of_two();
             self.instance_buf = Self::create_instance_buffer(device, self.instance_capacity);
+            self.instance_buf_dirty_all = true;
             bind_group_dirty = true;
         }
         if bind_group_dirty {
@@ -1589,9 +1808,7 @@ impl WgpuRenderer {
             _pad: [0u8; 256 - core::mem::size_of::<ViewportUniform>()],
         };
         queue.write_buffer(&self.viewport_buf, 0, pod_as_bytes(&[slot0]));
-        if !self.primitives.is_empty() {
-            queue.write_buffer(&self.instance_buf, 0, pod_as_bytes(&self.primitives));
-        }
+        self.sync_instance_buffer(queue);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("velox_wgpu_dirty_scissor_encoder"),
@@ -1630,6 +1847,12 @@ impl WgpuRenderer {
             }
         }
         queue.submit([encoder.finish()]);
+        if let Some(fx) = &mut self.effects {
+            fx.tick_idle_frame();
+        }
+        if let Some(canvas) = &mut self.canvas_engine {
+            canvas.tick_frame_reclaim();
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1674,6 +1897,7 @@ impl WgpuRenderer {
         if self.primitives.len() > self.instance_capacity {
             self.instance_capacity = self.primitives.len().next_power_of_two();
             self.instance_buf = Self::create_instance_buffer(device, self.instance_capacity);
+            self.instance_buf_dirty_all = true;
             bind_group_dirty = true;
         }
         if self.viewport_slots.len() > self.viewport_capacity {
@@ -1688,9 +1912,7 @@ impl WgpuRenderer {
         if !self.viewport_slots.is_empty() {
             queue.write_buffer(&self.viewport_buf, 0, pod_as_bytes(&self.viewport_slots));
         }
-        if !self.primitives.is_empty() {
-            queue.write_buffer(&self.instance_buf, 0, pod_as_bytes(&self.primitives));
-        }
+        self.sync_instance_buffer(queue);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("velox_wgpu_multi_pass_encoder"),
@@ -1704,10 +1926,19 @@ impl WgpuRenderer {
                 &self.bind_group,
                 &self.linear_sampler,
                 &self.external_textures,
+                ops,
+                &mut self.canvas_engine,
+                self.target_format,
                 target_view,
             );
         }
         queue.submit([encoder.finish()]);
+        if let Some(fx) = &mut self.effects {
+            fx.end_frame_reclaim();
+        }
+        if let Some(canvas) = &mut self.canvas_engine {
+            canvas.tick_frame_reclaim();
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1797,7 +2028,7 @@ impl WgpuRenderer {
         };
 
         let result: Result<(), AtlasGrowNeed> = (|| {
-            for op in ops {
+            for (op_idx, op) in ops.iter().enumerate() {
                 match op.payload {
                     DrawPayload::PushLayer(spec) => {
                         flush_top(&mut stack, &mut fx, self.primitives.len() as u32);
@@ -2486,6 +2717,61 @@ impl WgpuRenderer {
                         }
                     }
 
+                    // 含图层/毛玻璃页内的 `SceneCanvas` 依然原地走原生硬件 `CanvasGpuEngine` 实例化管线（0 CPU 光栅、0 大图集拷贝）
+                    DrawPayload::SceneCanvas(spec) => {
+                        let raw_clip = viewport.intersect(op.clip).intersect(op.bounds);
+                        if raw_clip.is_empty() {
+                            continue;
+                        }
+                        let (parent_idx, ox, oy) = {
+                            let top = stack.last().unwrap();
+                            (top.tex_idx, top.origin_x, top.origin_y)
+                        };
+                        let raw_b = snap_bounds(op.bounds, sf);
+                        let raw_c = snap_clip(raw_clip, sf);
+                        let bounds_phys = [raw_b[0] - ox, raw_b[1] - oy, raw_b[2], raw_b[3]];
+                        let clip_phys = [raw_c[0] - ox, raw_c[1] - oy, raw_c[2] - ox, raw_c[3] - oy];
+                        let raw_sc = snap_clip_region_scaled(raw_clip, sf);
+                        let scissor = Region::new(
+                            raw_sc.x.saturating_sub(ox.round() as i16),
+                            raw_sc.y.saturating_sub(oy.round() as i16),
+                            raw_sc.w,
+                            raw_sc.h,
+                        );
+                        if spec.bg.a() > 0 && spec.opacity > 0 {
+                            let bg = spec.bg.scale_alpha(spec.opacity);
+                            self.primitives.push(make_quad_primitive(
+                                bounds_phys,
+                                clip_phys,
+                                (op.clip_radius as f32) * sf,
+                                0.0,
+                                0.0,
+                                false,
+                                bg,
+                                Color::TRANSPARENT,
+                                Color::TRANSPARENT,
+                            ));
+                        }
+                        flush_top(&mut stack, &mut fx, self.primitives.len() as u32);
+                        fx.steps.push(GpuPassStep::DrawSceneCanvas {
+                            target_idx: parent_idx,
+                            op_idx,
+                            bounds_phys,
+                            clip_phys,
+                            scissor,
+                            sf,
+                            is_srgb,
+                        });
+                        self.encode_canvas_overlay_primitives(
+                            queue,
+                            spec,
+                            bounds_phys,
+                            clip_phys,
+                            (op.clip_radius as f32) * sf,
+                            sf,
+                        )?;
+                    }
+
                     _ => {
                         let raw_clip = match op.payload {
                             DrawPayload::StyledQuad(sq) if sq.transform.is_some() => {
@@ -2647,6 +2933,7 @@ impl WgpuRenderer {
         if self.primitives.len() > self.instance_capacity {
             self.instance_capacity = self.primitives.len().next_power_of_two();
             self.instance_buf = Self::create_instance_buffer(device, self.instance_capacity);
+            self.instance_buf_dirty_all = true;
             bind_group_dirty = true;
         }
         if bind_group_dirty {
@@ -2662,9 +2949,7 @@ impl WgpuRenderer {
             _pad: [0u8; 256 - core::mem::size_of::<ViewportUniform>()],
         };
         queue.write_buffer(&self.viewport_buf, 0, pod_as_bytes(&[slot0]));
-        if !self.primitives.is_empty() {
-            queue.write_buffer(&self.instance_buf, 0, pod_as_bytes(&self.primitives));
-        }
+        self.sync_instance_buffer(queue);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("velox_wgpu_scene_canvas_encoder"),
@@ -2753,8 +3038,12 @@ impl WgpuRenderer {
             }
         }
 
+        canvas_eng.tick_frame_reclaim();
         self.canvas_engine = Some(canvas_eng);
         queue.submit([encoder.finish()]);
+        if let Some(fx) = &mut self.effects {
+            fx.tick_idle_frame();
+        }
     }
 
     /// 编码画布近景 ASCII 快速标签（手势缩放时自动锁定 16px/32px 离散基准字号 + `O(1)` 查表防图集抖动）与橡皮筋框选矩形。

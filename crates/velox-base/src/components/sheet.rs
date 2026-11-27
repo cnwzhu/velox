@@ -207,17 +207,24 @@ impl<'a> Widget<'a> for Sheet<'a> {
             };
             panel = panel
                 .enter_from(255, dx, dy, Duration::from_millis(240))
-                .ease(Easing::Spring);
+                .ease(Easing::Spring)
+                .exit_to(0, dx, dy, Duration::from_millis(180));
         }
 
         panel = self.style_ext.apply_to_div(panel, self.style);
         if let Some(renderer) = self.backdrop_renderer {
             let mut backdrop = div()
+                .id(crate::scoped_child_id(self.id, 0x5EE7_BACC, 1))
                 .pos(0, 0)
                 .size_full()
                 .overlay()
                 .occlude_hit()
                 .child(cx, panel);
+            if self.animated {
+                backdrop = backdrop
+                    .fade_in(Duration::from_millis(150))
+                    .fade_out(Duration::from_millis(160));
+            }
             if let Some(cb) = self.on_dismiss {
                 backdrop = backdrop.on_click_raw(cb).on_navigate_back(cb);
             }

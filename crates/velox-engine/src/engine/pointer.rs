@@ -386,12 +386,17 @@ impl VeloxEngine {
         if !self.allows_drag_scroll() {
             return false;
         }
-        let mut scroll_to_apply: Option<((u32, i16), bool)> = None;
+        let mut scroll_to_apply: Option<((u32, i16), bool, i16)> = None;
         for hit in hits.iter().rev() {
             let effective = hit.bounds.intersect(hit.clip);
             if effective.contains(sx, sy) {
                 if let Some(target) = hit.scroll_target {
-                    scroll_to_apply = Some((target, hit.scroll_horizontal));
+                    let dim = if hit.scroll_horizontal {
+                        effective.w.max(64)
+                    } else {
+                        effective.h.max(64)
+                    };
+                    scroll_to_apply = Some((target, hit.scroll_horizontal, dim));
                     break;
                 }
                 if hit.occlude {
@@ -400,15 +405,13 @@ impl VeloxEngine {
             }
         }
 
-        if let Some(((scroll_id, max_s), is_horiz)) = scroll_to_apply {
+        if let Some(((scroll_id, max_s), is_horiz, dim)) = scroll_to_apply {
             let delta = if is_horiz { dx } else { dy };
             if delta != 0 {
                 let delta_scroll = -delta;
                 self.last_drag_vy = delta_scroll;
-                self.motion.set_scroll_inertia(scroll_id, 0, max_s);
-                let cur = self.motion.scroll_offset(scroll_id);
-                let next = cur.saturating_add(delta_scroll).clamp(0, max_s.max(0));
-                self.motion.set_scroll_offset(scroll_id, next);
+                self.motion
+                    .apply_scroll_drag(scroll_id, delta_scroll, max_s, dim);
                 self.interaction_dirty = true;
                 return true;
             }
@@ -543,7 +546,7 @@ impl VeloxEngine {
                 }
                 if let Some((scroll_id, max_s)) = scroll_target {
                     self.motion
-                        .set_scroll_inertia(scroll_id, self.last_drag_vy, max_s);
+                        .release_scroll_drag(scroll_id, self.last_drag_vy, max_s);
                     self.last_drag_vy = 0;
                     return true;
                 }

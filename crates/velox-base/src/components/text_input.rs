@@ -1438,7 +1438,7 @@ impl<'a> Widget<'a> for TextInput<'a> {
                 );
             }
 
-            // 3. 零抖动闪烁叠层光标（标准 530ms 周期，输入瞬间立即常亮）
+            // 3. 零抖动闪烁叠层光标（标准 530ms 周期，输入瞬间立即常亮；暗期保持透明 `.ime_caret()` 锚点防止候选窗跳动）
             if self.focused && !self.disabled {
                 let caret_visible = if self.cursor_blink {
                     cx.request_frame();
@@ -1447,27 +1447,31 @@ impl<'a> Widget<'a> for TextInput<'a> {
                 } else {
                     true
                 };
-                if caret_visible {
-                    let cur_h = ((font_size as i16) + 2).clamp(12, (inner_h - 6).max(12));
-                    let cur_y = ((inner_h - cur_h) / 2).max(1);
-                    let raw_cur_x = if disp_cursor == 0 {
-                        0
-                    } else if disp_cursor < display_str.len() {
-                        round_nonneg_i16(cursor_x_f - 0.85)
-                    } else {
-                        cursor_x
-                    };
-                    let cur_x = raw_cur_x.saturating_sub(scroll_x).max(0);
-                    content = content.child(
-                        cx,
-                        div()
-                            .id(self.id ^ 0x4355_5253)
-                            .pos(cur_x, cur_y)
-                            .w(1)
-                            .h(cur_h)
-                            .bg(cursor_color),
-                    );
-                }
+                let cur_h = ((font_size as i16) + 2).clamp(12, (inner_h - 6).max(12));
+                let cur_y = ((inner_h - cur_h) / 2).max(1);
+                let raw_cur_x = if disp_cursor == 0 {
+                    0
+                } else if disp_cursor < display_str.len() {
+                    round_nonneg_i16(cursor_x_f - 0.85)
+                } else {
+                    cursor_x
+                };
+                let cur_x = raw_cur_x.saturating_sub(scroll_x).max(0);
+                let caret_bg = if caret_visible {
+                    cursor_color
+                } else {
+                    Color::TRANSPARENT
+                };
+                content = content.child(
+                    cx,
+                    div()
+                        .id(self.id ^ 0x4355_5253)
+                        .pos(cur_x, cur_y)
+                        .w(1)
+                        .h(cur_h)
+                        .bg(caret_bg)
+                        .ime_caret(),
+                );
             }
         }
 

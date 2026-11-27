@@ -95,9 +95,42 @@ pub struct FlushReport {
     pub strips_or_buffers: usize,
     /// 本帧实际光栅化并刷新的像素总数。
     pub pixels_updated: usize,
+    /// 本帧瞬态内存池（`ScratchArena`）触及的峰值占用字节数。
+    pub arena_peak_bytes: usize,
+    /// 本帧 `ScratchArena` 发生静默字符串截断或临时切片空降级的次数（非 0 说明竞技场容量紧张）。
+    pub arena_truncations: u32,
 }
 
 impl FlushReport {
+    /// 编译期空刷新报告常量（供 `const fn` 平台构造器使用）。
+    #[inline(always)]
+    pub const fn const_empty() -> Self {
+        Self {
+            dirty_regions: 0,
+            strips_or_buffers: 0,
+            pixels_updated: 0,
+            arena_peak_bytes: 0,
+            arena_truncations: 0,
+        }
+    }
+
+    /// 构造并自动附加来自 [`VeloxEngine`] 的 `ScratchArena` 峰值水位与静默截断遥测。
+    #[inline(always)]
+    pub fn with_engine(
+        dirty_regions: usize,
+        strips_or_buffers: usize,
+        pixels_updated: usize,
+        engine: &VeloxEngine,
+    ) -> Self {
+        Self {
+            dirty_regions,
+            strips_or_buffers,
+            pixels_updated,
+            arena_peak_bytes: engine.last_arena_peak_bytes(),
+            arena_truncations: engine.last_arena_truncations(),
+        }
+    }
+
     /// 本帧是否发生了实际像素重绘。
     #[inline(always)]
     pub const fn has_updates(&self) -> bool {

@@ -121,6 +121,16 @@ pub(crate) enum GpuPassStep {
         effect_slot: u32,
         use_hw_blend: bool,
     },
+    /// 在多 Pass 图层合成流程中原地执行原生硬件加速 `SceneCanvas` 渲染（避免退化到 CPU 软件光栅与大纹理图集拷贝）。
+    DrawSceneCanvas {
+        target_idx: usize,
+        op_idx: usize,
+        bounds_phys: [f32; 4],
+        clip_phys: [f32; 4],
+        scissor: crate::solver::Region,
+        sf: f32,
+        is_srgb: bool,
+    },
     /// 最终将根离屏画布 Blit 到外部传入的 `target_view`。
     BlitToTarget {
         src_idx: usize,
@@ -488,6 +498,9 @@ impl GpuEffectsEngine {
             crate::paint::ExternalTextureId,
             super::pipeline::ExternalTextureEntry,
         >,
+        ops: &[crate::motion::DrawOp<'_>],
+        canvas_engine: &mut Option<super::canvas_pipeline::CanvasGpuEngine>,
+        target_format: wgpu::TextureFormat,
         target_view: &wgpu::TextureView,
     ) {
         if self.slots.len() > self.uniform_capacity {
@@ -617,6 +630,16 @@ impl GpuEffectsEngine {
                         .map(|(path_d, mw, mh)| {
                             self.pool.ensure_path_mask(device, queue, path_d, *mw, *mh)
                         });
+                    if self.pool.take_masks_evicted() {
+                        let uniform_gen = self.uniform_gen;
+                        let pool = &self.pool;
+                        self.bg_cache.retain(|&(u_gen, src_gen, snap_gen, mask_k), _| {
+                            u_gen == uniform_gen
+                                && pool.has_live_generation(src_gen)
+                                && pool.has_live_generation(snap_gen)
+                                && pool.has_live_mask(mask_k)
+                        });
+                    }
                     let src_gen = self.pool.get(*src_idx).generation;
                     let use_src_as_dummy_snap = *use_hw_blend || *dst_snap_idx == *dst_idx;
                     let snap_gen = if use_src_as_dummy_snap {
@@ -773,6 +796,39 @@ impl GpuEffectsEngine {
                     rpass.draw(0..6, 0..1);
                 }
 
+                GpuPassStep::DrawSceneCanvas {
+                    target_idx,
+                    op_idx,
+                    bounds_phys,
+                    clip_phys,
+                    scissor,
+                    sf,
+                    is_srgb,
+                } => {
+                    if let Some(op) = ops.get(*op_idx) {
+                        if let crate::motion::DrawPayload::SceneCanvas(spec) = op.payload {
+                            let canvas_eng = canvas_engine.get_or_insert_with(|| {
+                                super::canvas_pipeline::CanvasGpuEngine::new(device, target_format)
+                            });
+                            let dst = self.pool.get(*target_idx);
+                            canvas_eng.render_canvas(
+                                device,
+                                queue,
+                                encoder,
+                                &dst.view,
+                                dst.width,
+                                dst.height,
+                                *bounds_phys,
+                                *clip_phys,
+                                *scissor,
+                                *sf,
+                                *is_srgb,
+                                spec,
+                            );
+                        }
+                    }
+                }
+
                 GpuPassStep::BlitToTarget {
                     src_idx,
                     effect_slot,
@@ -836,6 +892,46 @@ impl GpuEffectsEngine {
                     rpass.draw(0..6, 0..1);
                 }
             }
+        }
+    }
+
+    /// 同步清理 `bg_cache` 中引用已被淘汰纹理或遮罩的 `BindGroup`，避免隐式延长 GPU 显存生命周期。
+    pub(crate) fn prune_stale_bind_groups(&mut self) {
+        let uniform_gen = self.uniform_gen;
+        let pool = &self.pool;
+        self.bg_cache.retain(|&(u_gen, src_gen, snap_gen, mask_key), _| {
+            u_gen == uniform_gen
+                && pool.has_live_generation(src_gen)
+                && pool.has_live_generation(snap_gen)
+                && pool.has_live_mask(mask_key)
+        });
+    }
+
+    /// 多 Pass 帧提交后按字节预算与年龄回收多余空闲离屏纹理，并同步清理陈旧 `BindGroup`。
+    pub(crate) fn end_frame_reclaim(&mut self) {
+        if self.pool.end_frame_reclaim() {
+            self.prune_stale_bind_groups();
+        }
+    }
+
+    /// 普通单 Pass 帧推进空闲纹理老化并回收过期/超预算纹理。
+    pub(crate) fn tick_idle_frame(&mut self) {
+        if self.pool.tick_idle_frame() {
+            self.prune_stale_bind_groups();
+        }
+    }
+
+    /// 视口尺寸缩小/变更时回收远大于新视口的空闲大纹理。
+    pub(crate) fn on_viewport_resized(&mut self, width: u32, height: u32) {
+        if self.pool.on_viewport_resized(width, height) {
+            self.prune_stale_bind_groups();
+        }
+    }
+
+    /// 后台化或显式内存整理时立即清空全部空闲离屏纹理、遮罩与 `BindGroup` 缓存。
+    pub(crate) fn trim_idle_all(&mut self) {
+        if self.pool.trim_all_idle() {
+            self.prune_stale_bind_groups();
         }
     }
 }

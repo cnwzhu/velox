@@ -32,7 +32,7 @@ smol = ["std", "dep:velox-async", "velox-async/smol"]
 
 [dependencies]
 velox-engine = { version = "0.4.0", path = "../velox-engine", default-features = false }
-velox-base = { version = "0.4.0", path = "../velox-base", optional = true }
-velox-component = { version = "0.4.0", path = "../velox-component", optional = true }
+velox-base = { version = "0.4.0", path = "../velox-base", default-features = false, optional = true }
+velox-component = { version = "0.4.0", path = "../velox-component", default-features = false, optional = true }
 velox-canvas = { version = "0.4.0", path = "../velox-canvas", optional = true }
 velox-async = { version = "0.4.0", path = "../velox-async", default-features = false, optional = true }

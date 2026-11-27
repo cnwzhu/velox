@@ -52,9 +52,12 @@ impl GalleryApp {
         .child(
             cx,
             div()
+                .id(1700)
                 .flex_row()
                 .flex_wrap()
                 .gap(10)
+                .auto_animate_with(Duration::from_millis(220))
+                .stagger(Duration::from_millis(45))
                 .child(
                     cx,
                     Alert::new(1701, "System Ready", "wgpu 2D SDF pipeline active at 1.5x HiDPI.")
@@ -81,7 +84,13 @@ impl GalleryApp {
                 ),
         );
 
-        let mut tags_row = div().flex_row().flex_wrap().gap(8).items_center();
+        let mut tags_row = div()
+            .id(1719)
+            .flex_row()
+            .flex_wrap()
+            .gap(8)
+            .items_center()
+            .auto_animate_with(Duration::from_millis(220));
         if (self.tag_visible_mask & (1 << 0)) != 0 {
             tags_row = tags_row.child(
                 cx,

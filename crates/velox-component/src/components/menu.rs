@@ -51,6 +51,9 @@ crate::define_themed_component! {
     variants: false,
     sizable: false,
     disableable: false,
+    init: |base| {
+        base.animated = true;
+    },
     apply_tw: |base, theme| {
         let menu = &mut base.menu;
         fill_color(&mut menu.bg, theme.popover);
@@ -73,6 +76,7 @@ crate::define_themed_component! {
     },
     forward: [
         width(width: i16),
+        animated(enabled: bool),
         on_select(handler: &'a dyn Fn(usize, &mut ActionScope)),
         on_dismiss(handler: &'a dyn Fn(&mut ActionScope)),
     ],

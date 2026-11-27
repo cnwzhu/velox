@@ -38,29 +38,36 @@ impl GalleryApp {
             this.event_count = this.event_count.saturating_add(1);
         });
 
-        let trigger_card = |title: &'a str, desc: &'a str, btn: Element<'a>| -> Div<'a> {
+        let trigger_card = |id: u32, title: &'a str, desc: &'a str, btn: Element<'a>| -> Div<'a> {
             div()
+                .id(id)
                 .flex_col()
                 .w(240)
                 .p(16)
                 .gap(10)
                 .rounded(8)
                 .bg(theme.card)
+                .hover_bg(theme.secondary)
                 .border(1, theme.border)
+                .animate_color(Duration::from_millis(160))
                 .child(cx, text(title).size(14).color(theme.foreground))
                 .child(cx, text(desc).size(12).color(theme.muted_foreground))
                 .child(cx, btn)
         };
 
         let triggers = div()
+            .id(1650)
             .flex_row()
             .flex_wrap()
             .gap(14)
+            .auto_animate_with(Duration::from_millis(220))
+            .stagger(Duration::from_millis(40))
             .child(
                 cx,
                 trigger_card(
+                    1651,
                     "Standard Dialog",
-                    "EaseOutBack spring entry, SVG close icon, footer actions & rounded card.",
+                    "EaseOutBack spring entry, SVG close icon, ghost fade-out & Escape dismiss.",
                     Button::new(1601, "Open Dialog")
                         .primary()
                         .on_click(on_open_dialog)
@@ -70,8 +77,9 @@ impl GalleryApp {
             .child(
                 cx,
                 trigger_card(
+                    1652,
                     "AlertDialog (Destructive)",
-                    "Destructive confirm button, i18n labels, spring entry & Escape cancel.",
+                    "Destructive confirm button, spring entry, ghost fade-out & Escape cancel.",
                     Button::new(1602, "Delete Workspace")
                         .danger()
                         .on_click(on_open_alert)
@@ -81,6 +89,7 @@ impl GalleryApp {
             .child(
                 cx,
                 trigger_card(
+                    1653,
                     "Centered Modal",
                     "Backdrop fade-in occlusion & click-outside / Escape dismissal.",
                     Button::new(1603, "Open Modal")
@@ -92,8 +101,9 @@ impl GalleryApp {
             .child(
                 cx,
                 trigger_card(
+                    1654,
                     "Side Sheet Drawer",
-                    "Directional Spring slide-in drawer with hit occlusion & Escape dismiss.",
+                    "Directional Spring slide-in & ghost slide-out drawer with Escape dismiss.",
                     Button::new(1604, "Open Sheet")
                         .outline()
                         .on_click(on_open_sheet)
@@ -103,8 +113,9 @@ impl GalleryApp {
             .child(
                 cx,
                 trigger_card(
+                    1655,
                     "Floating Notification",
-                    "Spring slide-in top-right notification card with vector SVG status icon.",
+                    "Spring slide-in top-right toast with zero-config ghost slide-out exit.",
                     Button::new(1605, "Show Notification")
                         .secondary()
                         .on_click(on_open_notif)

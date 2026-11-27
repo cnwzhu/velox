@@ -25,6 +25,7 @@ pub struct DropdownButton<'a> {
     pub shadow: Option<(u8, i8, i8, Color)>,
     pub focus_ring: bool,
     pub rounded: u8,
+    pub animated: bool,
     pub on_click: Option<&'a dyn Fn(&mut ActionScope)>,
     pub on_toggle_menu: Option<&'a dyn Fn(&mut ActionScope)>,
     pub on_select: Option<&'a dyn Fn(usize, &mut ActionScope)>,
@@ -69,11 +70,19 @@ impl<'a> DropdownButton<'a> {
             shadow: None,
             focus_ring: false,
             rounded: 0,
+            animated: false,
             on_click: None,
             on_toggle_menu: None,
             on_select: None,
             item_renderer: None,
         }
+    }
+
+    /// 启用或禁用下拉菜单开关过渡动画。
+    #[inline(always)]
+    pub const fn animated(mut self, enabled: bool) -> Self {
+        self.animated = enabled;
+        self
     }
 
     /// 绑定点击主按钮区域的回调。
@@ -212,6 +221,11 @@ impl<'a> Widget<'a> for DropdownButton<'a> {
             }
             if let Some((blur, ox, oy, col)) = self.shadow {
                 menu = menu.shadow(blur, ox, oy, col);
+            }
+            if self.animated {
+                menu = menu
+                    .slide_in(0, -6, Duration::from_millis(140))
+                    .slide_out(0, -6, Duration::from_millis(120));
             }
 
             let on_sel = self.on_select;

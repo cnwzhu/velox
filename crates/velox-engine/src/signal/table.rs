@@ -2,7 +2,7 @@
 
 use core::cell::UnsafeCell;
 
-use super::storage::{InlineFnStorage, InlineValueStorage, NO_EDGE};
+use super::storage::{EdgeIdx, InlineFnStorage, InlineValueStorage, NO_EDGE};
 use super::MAX_EFFECTS;
 
 #[repr(u8)]
@@ -27,50 +27,76 @@ pub(super) enum NodeState {
 /// 侵入式双向链表依赖边：两端（上游 `first_sub` 与下游 `first_dep`）均为 $O(1)$ 插删。
 #[derive(Copy, Clone)]
 pub(super) struct DepEdge {
-    pub(super) src_kind: NodeKind,
-    dst_kind: NodeKind,
+    pub(super) seen_version: u32,
     pub(super) src_idx: u16,
     pub(super) src_gen: u16,
     dst_idx: u16,
     dst_gen: u16,
-    pub(super) seen_version: u32,
     /// 目标节点（`Computed` / `Effect`）的上游依赖双向链表
-    prev_dep: u32,
-    pub(super) next_dep: u32,
+    prev_dep: EdgeIdx,
+    pub(super) next_dep: EdgeIdx,
     /// 源节点（`Signal` / `Computed`）的下游订阅者双向链表
-    prev_sub: u32,
-    next_sub: u32,
+    prev_sub: EdgeIdx,
+    next_sub: EdgeIdx,
+    pub(super) src_kind: NodeKind,
+    dst_kind: NodeKind,
     pub(super) active: bool,
 }
 
 impl DepEdge {
     pub(super) const EMPTY: Self = Self {
-        src_kind: NodeKind::Signal,
-        dst_kind: NodeKind::Computed,
+        seen_version: 0,
         src_idx: 0,
         src_gen: 0,
         dst_idx: 0,
         dst_gen: 0,
-        seen_version: 0,
         prev_dep: NO_EDGE,
         next_dep: NO_EDGE,
         prev_sub: NO_EDGE,
         next_sub: NO_EDGE,
+        src_kind: NodeKind::Signal,
+        dst_kind: NodeKind::Computed,
         active: false,
     };
+}
+
+/// `std` 模式下每个 `SignalSlot` 内联前 2 个引擎池零堆快速路径，超出部分自动扩展至动态向量（无上限）。
+pub const MAX_INLINE_SIGNAL_POOLS: usize = 2;
+type PodSubMask = u64;
+const POD_SUB_MASK_BITS: u16 = 64;
+
+const INLINE_SIGNAL_POOLS: usize = MAX_INLINE_SIGNAL_POOLS;
+
+/// 单个 `PodPool` 实例在某个 `SignalSlot` 上的独立订阅与脏位掩码。
+#[derive(Copy, Clone)]
+pub(super) struct PoolSubSlot {
+    pub(super) pool_id: u16,
+    pub(super) subscribers_mask: PodSubMask,
+    pub(super) pending_dirty_mask: PodSubMask,
+}
+
+impl PoolSubSlot {
+    pub(super) const EMPTY: Self = Self {
+        pool_id: 0,
+        subscribers_mask: 0,
+        pending_dirty_mask: 0,
+    };
+
+    #[inline(always)]
+    fn is_unused(&self) -> bool {
+        self.subscribers_mask == 0 && self.pending_dirty_mask == 0
+    }
 }
 
 #[derive(Clone)]
 pub(super) struct SignalSlot {
     pub(super) storage: InlineValueStorage,
     pub(super) version: u32,
-    pub(super) subscribers_mask: u64,
-    pub(super) pending_dirty_mask: u64,
-    ext_subscribers: std::vec::Vec<u16>,
-    pub(super) ext_pending_dirty: std::vec::Vec<u16>,
+    pub(super) pool_subs: [PoolSubSlot; INLINE_SIGNAL_POOLS],
+    ext_subscribers: std::vec::Vec<(u16, u16)>,
+    pub(super) ext_pending_dirty: std::vec::Vec<(u16, u16)>,
     /// 侵入式下游订阅者链表头（`Computed` 与 `Effect`）
-    pub(super) first_sub: u32,
-    pub(super) owner_pool: u16,
+    pub(super) first_sub: EdgeIdx,
     pub(super) generation: u16,
     pub(super) occupied: bool,
 }
@@ -81,55 +107,112 @@ impl SignalSlot {
         Self {
             storage: InlineValueStorage::ZERO,
             version: 0,
-            subscribers_mask: 0,
-            pending_dirty_mask: 0,
+            pool_subs: [PoolSubSlot::EMPTY; INLINE_SIGNAL_POOLS],
             ext_subscribers: std::vec::Vec::new(),
             ext_pending_dirty: std::vec::Vec::new(),
             first_sub: NO_EDGE,
-            owner_pool: 0,
             generation: 0,
             occupied: false,
         }
     }
 
     #[inline(always)]
-    pub(super) fn add_subscriber(&mut self, pod_idx: u16) {
-        if pod_idx < 64 {
-            self.subscribers_mask |= 1u64 << pod_idx;
-        } else {
-            if !self.ext_subscribers.contains(&pod_idx) {
-                self.ext_subscribers.push(pod_idx);
+    fn find_or_alloc_pool_slot(&mut self, pool_id: u16) -> Option<usize> {
+        let mut free_idx = None;
+        for (i, entry) in self.pool_subs.iter().enumerate() {
+            if entry.pool_id == pool_id && (!entry.is_unused() || pool_id != 0) {
+                return Some(i);
             }
+            if free_idx.is_none() && (entry.pool_id == 0 || entry.is_unused()) {
+                free_idx = Some(i);
+            }
+        }
+        if let Some(idx) = free_idx {
+            self.pool_subs[idx].pool_id = pool_id;
+            self.pool_subs[idx].subscribers_mask = 0;
+            self.pool_subs[idx].pending_dirty_mask = 0;
+            Some(idx)
+        } else {
+            None
         }
     }
 
     #[inline(always)]
-    pub(super) fn remove_subscriber(&mut self, pod_idx: u16) {
-        if pod_idx < 64 {
-            let bit = 1u64 << pod_idx;
-            self.subscribers_mask &= !bit;
-            self.pending_dirty_mask &= !bit;
-        } else {
-            {
-                self.ext_subscribers.retain(|&x| x != pod_idx);
-                self.ext_pending_dirty.retain(|&x| x != pod_idx);
+    pub(super) fn add_subscriber(&mut self, pool_id: u16, pod_idx: u16) -> bool {
+        if pod_idx < POD_SUB_MASK_BITS {
+            if let Some(slot_idx) = self.find_or_alloc_pool_slot(pool_id) {
+                self.pool_subs[slot_idx].subscribers_mask |= (1 as PodSubMask) << pod_idx;
+                return true;
             }
+        }
+        {
+            let key = (pool_id, pod_idx);
+            if !self.ext_subscribers.contains(&key) {
+                self.ext_subscribers.push(key);
+            }
+            true
         }
     }
 
     #[inline(always)]
-    pub(super) fn clear_subscriber_on_render(&mut self, pod_idx: u16) {
-        if pod_idx < 64 {
-            self.subscribers_mask &= !(1u64 << pod_idx);
-        } else {
-            self.ext_subscribers.retain(|&x| x != pod_idx);
+    pub(super) fn remove_subscriber(&mut self, pool_id: u16, pod_idx: u16) {
+        if pod_idx < POD_SUB_MASK_BITS {
+            let bit = (1 as PodSubMask) << pod_idx;
+            for entry in self.pool_subs.iter_mut() {
+                if entry.pool_id == pool_id {
+                    entry.subscribers_mask &= !bit;
+                    entry.pending_dirty_mask &= !bit;
+                    if entry.is_unused() {
+                        entry.pool_id = 0;
+                    }
+                }
+            }
+        }
+        {
+            let key = (pool_id, pod_idx);
+            self.ext_subscribers.retain(|&x| x != key);
+            self.ext_pending_dirty.retain(|&x| x != key);
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn clear_subscriber_on_render(&mut self, pool_id: u16, pod_idx: u16) {
+        if pod_idx < POD_SUB_MASK_BITS {
+            let bit = (1 as PodSubMask) << pod_idx;
+            for entry in self.pool_subs.iter_mut() {
+                if entry.pool_id == pool_id {
+                    entry.subscribers_mask &= !bit;
+                    if entry.is_unused() {
+                        entry.pool_id = 0;
+                    }
+                }
+            }
+        }
+        {
+            let key = (pool_id, pod_idx);
+            self.ext_subscribers.retain(|&x| x != key);
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn remove_pool(&mut self, pool_id: u16) {
+        if pool_id == 0 {
+            return;
+        }
+        for entry in self.pool_subs.iter_mut() {
+            if entry.pool_id == pool_id {
+                *entry = PoolSubSlot::EMPTY;
+            }
+        }
+        {
+            self.ext_subscribers.retain(|&(pid, _)| pid != pool_id);
+            self.ext_pending_dirty.retain(|&(pid, _)| pid != pool_id);
         }
     }
 
     #[inline(always)]
     pub(super) fn clear_all_subscribers(&mut self) {
-        self.subscribers_mask = 0;
-        self.pending_dirty_mask = 0;
+        self.pool_subs = [PoolSubSlot::EMPTY; INLINE_SIGNAL_POOLS];
         {
             self.ext_subscribers.clear();
             self.ext_pending_dirty.clear();
@@ -137,38 +220,103 @@ impl SignalSlot {
     }
 
     #[inline(always)]
+    pub(super) fn all_subscribers_mask(&self) -> u64 {
+        let mut mask = 0u64;
+        for entry in self.pool_subs.iter() {
+            mask |= entry.subscribers_mask as u64;
+        }
+        mask
+    }
+
+    #[inline(always)]
     pub(super) fn has_any_subscribers(&self) -> bool {
         if self.first_sub != NO_EDGE {
             return true;
         }
+        for entry in self.pool_subs.iter() {
+            if entry.subscribers_mask != 0 {
+                return true;
+            }
+        }
         if !self.ext_subscribers.is_empty() {
             return true;
         }
-        self.subscribers_mask != 0
+        false
     }
 
     #[inline(always)]
     pub(super) fn has_any_pending_dirty(&self) -> bool {
+        for entry in self.pool_subs.iter() {
+            if entry.pending_dirty_mask != 0 {
+                return true;
+            }
+        }
         if !self.ext_pending_dirty.is_empty() {
             return true;
         }
-        self.pending_dirty_mask != 0
+        false
+    }
+
+    /// 取出并清零归属于 `pool_id`（及未绑定池 `0`）的待处理脏 Pod，返回 `(out_mask, any_other_pool_remaining)`。
+    #[inline(always)]
+    pub(super) fn drain_pending_dirty_for_pool(
+        &mut self,
+        pool_id: u16,
+        ext_out: &mut std::vec::Vec<u16>,
+    ) -> (u64, bool) {
+        let mut out_mask = 0u64;
+        let mut other_remaining = false;
+        for entry in self.pool_subs.iter_mut() {
+            if entry.pending_dirty_mask != 0 {
+                if entry.pool_id == pool_id || entry.pool_id == 0 {
+                    out_mask |= entry.pending_dirty_mask as u64;
+                    entry.pending_dirty_mask = 0;
+                    if entry.is_unused() {
+                        entry.pool_id = 0;
+                    }
+                } else {
+                    other_remaining = true;
+                }
+            }
+        }
+        if !self.ext_pending_dirty.is_empty() {
+            let mut i = 0;
+            while i < self.ext_pending_dirty.len() {
+                let (pid, pod_idx) = self.ext_pending_dirty[i];
+                if pid == pool_id || pid == 0 {
+                    self.ext_pending_dirty.swap_remove(i);
+                    if !ext_out.contains(&pod_idx) {
+                        ext_out.push(pod_idx);
+                    }
+                } else {
+                    other_remaining = true;
+                    i += 1;
+                }
+            }
+        }
+        (out_mask, other_remaining)
     }
 
     #[inline(always)]
     fn queue_subscribers_dirty(&mut self) -> bool {
-        self.pending_dirty_mask |= self.subscribers_mask;
+        let mut any = false;
+        for entry in self.pool_subs.iter_mut() {
+            if entry.subscribers_mask != 0 {
+                entry.pending_dirty_mask |= entry.subscribers_mask;
+                any = true;
+            }
+        }
         {
-            for &pod_idx in &self.ext_subscribers {
-                if !self.ext_pending_dirty.contains(&pod_idx) {
-                    self.ext_pending_dirty.push(pod_idx);
+            for &key in &self.ext_subscribers {
+                if !self.ext_pending_dirty.contains(&key) {
+                    self.ext_pending_dirty.push(key);
                 }
             }
             if !self.ext_subscribers.is_empty() {
-                return true;
+                any = true;
             }
         }
-        self.subscribers_mask != 0
+        any
     }
 }
 
@@ -179,9 +327,9 @@ pub(super) struct ComputedSlot {
     pub(super) compute_fn: Option<unsafe fn(*const InlineFnStorage, *mut InlineValueStorage)>,
     pub(super) eq_fn: Option<unsafe fn(*const InlineValueStorage, *const InlineValueStorage) -> bool>,
     /// 上游依赖边链表头（`Signal` / `Computed`）
-    pub(super) first_dep: u32,
+    pub(super) first_dep: EdgeIdx,
     /// 下游订阅者边链表头（`Computed` / `Effect`）
-    pub(super) first_sub: u32,
+    pub(super) first_sub: EdgeIdx,
     pub(super) version: u32,
     pub(super) eval_count: u32,
     pub(super) generation: u16,
@@ -214,7 +362,7 @@ pub(super) struct EffectSlot {
     pub(super) fn_storage: InlineFnStorage,
     pub(super) run_fn: Option<unsafe fn(*const InlineFnStorage)>,
     /// 上游依赖边链表头（`Signal` / `Computed`）
-    pub(super) first_dep: u32,
+    pub(super) first_dep: EdgeIdx,
     pub(super) run_count: u32,
     pub(super) generation: u16,
     pub(super) occupied: bool,
@@ -239,8 +387,9 @@ pub(super) struct ReactiveGraphTable {
     pub(super) computeds: std::vec::Vec<ComputedSlot>,
     pub(super) effects: [EffectSlot; MAX_EFFECTS],
     pub(super) edges: std::vec::Vec<DepEdge>,
-    free_edge_head: u32,
+    free_edge_head: EdgeIdx,
     active_edge_count: usize,
+    pub(super) dropped_pool_subscriptions: u32,
     pub(super) recycle_cursor: usize,
     pub(super) computed_cursor: usize,
     pub(super) effect_cursor: usize,
@@ -248,7 +397,7 @@ pub(super) struct ReactiveGraphTable {
 
 impl ReactiveGraphTable {
     #[inline]
-    fn src_first_sub(&self, kind: NodeKind, idx: usize) -> Option<u32> {
+    fn src_first_sub(&self, kind: NodeKind, idx: usize) -> Option<EdgeIdx> {
         match kind {
             NodeKind::Signal => self.signals.get(idx).map(|s| s.first_sub),
             NodeKind::Computed => self.computeds.get(idx).map(|c| c.first_sub),
@@ -257,7 +406,7 @@ impl ReactiveGraphTable {
     }
 
     #[inline]
-    fn set_src_first_sub(&mut self, kind: NodeKind, idx: usize, head: u32) {
+    fn set_src_first_sub(&mut self, kind: NodeKind, idx: usize, head: EdgeIdx) {
         match kind {
             NodeKind::Signal => {
                 if let Some(s) = self.signals.get_mut(idx) {
@@ -274,7 +423,7 @@ impl ReactiveGraphTable {
     }
 
     #[inline]
-    fn dst_first_dep(&self, kind: NodeKind, idx: usize) -> Option<u32> {
+    fn dst_first_dep(&self, kind: NodeKind, idx: usize) -> Option<EdgeIdx> {
         match kind {
             NodeKind::Computed => self.computeds.get(idx).map(|c| c.first_dep),
             NodeKind::Effect => self.effects.get(idx).map(|e| e.first_dep),
@@ -283,7 +432,7 @@ impl ReactiveGraphTable {
     }
 
     #[inline]
-    fn set_dst_first_dep(&mut self, kind: NodeKind, idx: usize, head: u32) {
+    fn set_dst_first_dep(&mut self, kind: NodeKind, idx: usize, head: EdgeIdx) {
         match kind {
             NodeKind::Computed => {
                 if let Some(c) = self.computeds.get_mut(idx) {
@@ -299,7 +448,7 @@ impl ReactiveGraphTable {
         }
     }
 
-    fn alloc_edge(&mut self) -> Option<u32> {
+    fn alloc_edge(&mut self) -> Option<EdgeIdx> {
         if self.free_edge_head != NO_EDGE {
             let idx = self.free_edge_head;
             self.free_edge_head = self.edges[idx as usize].next_dep;
@@ -310,14 +459,14 @@ impl ReactiveGraphTable {
             if self.edges.len() >= (u32::MAX as usize - 1) {
                 return None;
             }
-            let idx = self.edges.len() as u32;
+            let idx = self.edges.len() as EdgeIdx;
             self.edges.push(DepEdge::EMPTY);
             Some(idx)
         }
     }
 
     #[inline]
-    fn unlink_edge(&mut self, edge_idx: u32) {
+    fn unlink_edge(&mut self, edge_idx: EdgeIdx) {
         let Some(e) = self.edges.get(edge_idx as usize).copied() else {
             return;
         };
@@ -593,12 +742,12 @@ impl ReactiveGraphTable {
                 match e.src_kind {
                     NodeKind::Signal => {
                         if let Some(sig) = self.signals.get_mut(e.src_idx as usize) {
-                            if sig.occupied && sig.generation == e.src_gen {
-                                if sig.owner_pool != active_pool && sig.owner_pool != 0 {
-                                    sig.clear_all_subscribers();
-                                }
-                                sig.owner_pool = active_pool;
-                                sig.add_subscriber(active_pod);
+                            if sig.occupied
+                                && sig.generation == e.src_gen
+                                && !sig.add_subscriber(active_pool, active_pod)
+                            {
+                                self.dropped_pool_subscriptions =
+                                    self.dropped_pool_subscriptions.saturating_add(1);
                             }
                         }
                     }
@@ -639,6 +788,7 @@ std::thread_local! {
         edges: std::vec::Vec::new(),
         free_edge_head: NO_EDGE,
         active_edge_count: 0,
+        dropped_pool_subscriptions: 0,
         recycle_cursor: 0,
         computed_cursor: 0,
         effect_cursor: 0,
@@ -666,4 +816,16 @@ pub(super) fn with_table<R>(f: impl FnOnce(&mut ReactiveGraphTable) -> R) -> R {
 #[inline]
 pub fn active_dep_edge_count() -> usize {
     with_table(|tbl| tbl.active_edge_count)
+}
+
+/// 返回因超出单信号订阅容量上限而未能注册的订阅次数（桌面 `std` 模式动态扩容，常规恒为 `0`）。
+#[inline]
+pub fn dropped_pool_subscriptions() -> u32 {
+    with_table(|tbl| tbl.dropped_pool_subscriptions)
+}
+
+/// 清零 [`dropped_pool_subscriptions`] 溢出诊断计数器（用于诊断分段统计与测试隔离）。
+#[inline]
+pub fn reset_dropped_pool_subscriptions() {
+    with_table(|tbl| tbl.dropped_pool_subscriptions = 0);
 }

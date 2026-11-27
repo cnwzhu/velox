@@ -393,19 +393,20 @@ impl GalleryApp {
                     .child(
                         cx,
                         Accordion::new(2434, MOTION_FAQ, self.motion_accordion_mask)
-                            .width(340)
+                            .width(440)
                             .on_toggle_item(on_acc_raw),
                     ),
             );
 
+        let cur_cfg = cur_preset.spring_config();
         let carousel_roller_card = SpringCard::new(2440)
             .preset(cur_preset)
-            .w(360)
+            .w(440)
             .child(
                 cx,
                 div()
                     .flex_col()
-                    .gap(12)
+                    .gap(14)
                     .child(
                         cx,
                         text("Carousel & Roller (velox-component)")
@@ -415,19 +416,19 @@ impl GalleryApp {
                     .child(
                         cx,
                         Carousel::new(2441, CAROUSEL_SLIDES, self.motion_carousel_idx)
-                            .size(330, 88)
+                            .size(412, 96)
                             .on_change(on_carousel),
                     )
                     .child(
                         cx,
                         div()
                             .flex_row()
-                            .gap(12)
+                            .gap(16)
                             .items_center()
                             .child(
                                 cx,
                                 Roller::new(2442, ROLLER_OPTIONS, self.motion_roller_idx)
-                                    .w(180)
+                                    .w(210)
                                     .visible_rows(3)
                                     .on_change(on_roller),
                             )
@@ -435,22 +436,325 @@ impl GalleryApp {
                                 cx,
                                 div()
                                     .flex_col()
+                                    .flex_grow(1)
                                     .gap(6)
-                                    .child(cx, text("Active Roller").size(11).color(theme.muted_foreground))
+                                    .child(cx, text("Spring Physics").size(12).color(theme.foreground))
                                     .child(
                                         cx,
-                                        Badge::new(ROLLER_OPTIONS[self.motion_roller_idx.min(ROLLER_OPTIONS.len() - 1)])
-                                            .info(),
+                                        text(fmt!(
+                                            cx,
+                                            "k = {:.0}  •  c = {:.0}",
+                                            cur_cfg.stiffness,
+                                            cur_cfg.damping
+                                        ))
+                                        .size(12)
+                                        .color(theme.primary),
                                     )
                                     .child(
                                         cx,
-                                        text("Click rows to sync preset")
+                                        text("Scroll wheel or click rows to switch preset")
                                             .size(11)
                                             .color(theme.muted_foreground),
                                     ),
                             ),
                     ),
             );
+
+        // 3. Engine Native Motion 2.0 交互展台（AutoAnimate 零配置列表 + Stagger + FLIP 合成层圆角逆缩放 + 二阶弹簧速度继承 + 橡皮筋阻尼）
+        let on_add_auto = cx.listener(|this, _: ClickEvent, _acx| {
+            if this.motion_auto_items.len() < 7 {
+                let id = this.motion_next_item_id;
+                this.motion_next_item_id = this.motion_next_item_id.saturating_add(1);
+                this.motion_auto_items.insert(0, id);
+                this.event_count = this.event_count.saturating_add(1);
+            }
+        });
+        let on_shuffle_auto = cx.listener(|this, _: ClickEvent, _acx| {
+            if this.motion_auto_items.len() >= 2 {
+                let first = this.motion_auto_items.remove(0);
+                this.motion_auto_items.push(first);
+                this.motion_auto_items.reverse();
+                this.event_count = this.event_count.saturating_add(1);
+            }
+        });
+        let on_remove_auto = cx.listener(|this, _: ClickEvent, _acx| {
+            if !this.motion_auto_items.is_empty() {
+                this.motion_auto_items.remove(0);
+                this.event_count = this.event_count.saturating_add(1);
+            }
+        });
+        let on_reset_auto = cx.listener(|this, _: ClickEvent, _acx| {
+            this.motion_auto_items = vec![1, 2, 3, 4];
+            this.motion_next_item_id = 5;
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_toggle_flip = cx.listener(|this, _: ClickEvent, _acx| {
+            this.motion_flip_expanded = !this.motion_flip_expanded;
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let spring_stop_btn = |idx: usize, label: &'static str| -> Element<'a> {
+            let on_click = cx.listener(move |this, _: ClickEvent, _acx| {
+                this.motion_spring_stop = idx;
+                this.event_count = this.event_count.saturating_add(1);
+            });
+            let b = Button::new(2470 + idx as u32, label).small().on_click(on_click);
+            if self.motion_spring_stop == idx {
+                b.primary().into_element(cx)
+            } else {
+                b.outline().into_element(cx)
+            }
+        };
+        let on_pull_left = cx.listener(|this, _: ClickEvent, _acx| {
+            this.motion_rubber_pull = (this.motion_rubber_pull - 90).max(-360);
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_pull_right = cx.listener(|this, _: ClickEvent, _acx| {
+            this.motion_rubber_pull = (this.motion_rubber_pull + 90).min(360);
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_pull_release = cx.listener(|this, _: ClickEvent, _acx| {
+            this.motion_rubber_pull = 0;
+            this.event_count = this.event_count.saturating_add(1);
+        });
+
+        let mut auto_list = div()
+            .id(2450)
+            .flex_row()
+            .flex_wrap()
+            .w_full()
+            .gap(10)
+            .auto_animate_with(Duration::from_millis(240))
+            .stagger(Duration::from_millis(30));
+
+        let card_colors = [
+            theme.primary,
+            theme.success,
+            theme.info,
+            theme.warning,
+            Color::rgb(139, 92, 246),
+            Color::rgb(236, 72, 153),
+        ];
+        for &item_id in &self.motion_auto_items {
+            let accent = card_colors[(item_id as usize) % card_colors.len()];
+            let on_del_item = cx.listener(move |this, _: ClickEvent, _acx| {
+                this.motion_auto_items.retain(|&x| x != item_id);
+                this.event_count = this.event_count.saturating_add(1);
+            });
+            auto_list = auto_list.child(
+                cx,
+                div()
+                    .id(2500 + item_id)
+                    .w(118)
+                    .h(54)
+                    .p(10)
+                    .rounded(8)
+                    .bg(theme.secondary)
+                    .hover_bg(theme.muted)
+                    .border(1, accent)
+                    .animate_color(Duration::from_millis(160))
+                    .flex_col()
+                    .justify_between()
+                    .on_click(cx, on_del_item)
+                    .child(
+                        cx,
+                        text(fmt!(cx, "Task #{item_id}"))
+                            .size(12)
+                            .color(theme.foreground),
+                    )
+                    .child(
+                        cx,
+                        text("Click to ghost-exit")
+                            .size(10)
+                            .color(theme.muted_foreground),
+                    ),
+            );
+        }
+
+        let (flip_w, flip_h) = if self.motion_flip_expanded {
+            (320, 108)
+        } else {
+            (176, 66)
+        };
+        let flip_card = div()
+            .id(2460)
+            .w(flip_w)
+            .h(flip_h)
+            .p(12)
+            .rounded(14)
+            .bg(if self.motion_flip_expanded {
+                theme.primary
+            } else {
+                theme.secondary
+            })
+            .border(1, theme.primary)
+            .flip_layout(Duration::from_millis(260))
+            .animate_color(Duration::from_millis(220))
+            .flex_col()
+            .justify_between()
+            .on_click(cx, on_toggle_flip)
+            .child(
+                cx,
+                text(if self.motion_flip_expanded {
+                    "FLIP Expanded (xform + inverse radii)"
+                } else {
+                    "Click to FLIP Expand"
+                })
+                .size(12)
+                .color(if self.motion_flip_expanded {
+                    theme.primary_foreground
+                } else {
+                    theme.foreground
+                }),
+            )
+            .child(
+                cx,
+                text("Compositor Transform2D • zero text reflow jitter")
+                    .size(10)
+                    .color(if self.motion_flip_expanded {
+                        theme.primary_foreground
+                    } else {
+                        theme.muted_foreground
+                    }),
+            );
+
+        let spring_stops_x = [6i16, 136, 266];
+        let spring_x = spring_stops_x[self.motion_spring_stop.min(2)];
+        let damped_pull = rubberband_i16(self.motion_rubber_pull, 120, 140);
+        let rubber_x = (130i16 + damped_pull).clamp(8, 252);
+
+        let native_motion_section = story_section(
+            cx,
+            theme,
+            "Engine Native Motion 2.0 (AutoAnimate • Ghost Exit • FLIP • Spring Velocity • Rubberband)",
+            "All powered directly by velox_engine::MotionCache — zero manual Presence fields in View",
+        )
+        .child(
+            cx,
+            div()
+                .flex_col()
+                .w_full()
+                .gap(10)
+                .child(
+                    cx,
+                    div()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(8)
+                        .items_center()
+                        .child(cx, text("AutoAnimate + Stagger:").size(12).color(theme.foreground))
+                        .child(cx, Button::new(2451, "+ Add Card").primary().small().on_click(on_add_auto))
+                        .child(cx, Button::new(2452, "Shuffle").info().small().on_click(on_shuffle_auto))
+                        .child(cx, Button::new(2453, "Remove First").danger().small().on_click(on_remove_auto))
+                        .child(cx, Button::new(2454, "Reset").outline().small().on_click(on_reset_auto))
+                        .child(
+                            cx,
+                            state_pill(cx, theme, fmt!(cx, "{} Cards (click any card to ghost-exit)", self.motion_auto_items.len())),
+                        ),
+                )
+                .child(cx, auto_list),
+        )
+        .child(cx, div().w_full().h(1).bg(theme.border))
+        .child(
+            cx,
+            div()
+                .flex_row()
+                .w_full()
+                .gap(16)
+                .items_start()
+                .child(
+                    cx,
+                    div()
+                        .flex_col()
+                        .w(340)
+                        .gap(8)
+                        .child(
+                            cx,
+                            text("Compositor FLIP Layout (.flip_layout)")
+                                .size(12)
+                                .color(theme.foreground),
+                        )
+                        .child(cx, flip_card),
+                )
+                .child(
+                    cx,
+                    div()
+                        .flex_col()
+                        .flex_grow(1)
+                        .gap(10)
+                        .child(
+                            cx,
+                            div()
+                                .flex_row()
+                                .gap(6)
+                                .items_center()
+                                .child(cx, text("Interruptible .spring_bounds():").size(11).color(theme.muted_foreground))
+                                .child(cx, spring_stop_btn(0, "Left"))
+                                .child(cx, spring_stop_btn(1, "Center"))
+                                .child(cx, spring_stop_btn(2, "Right")),
+                        )
+                        .child(
+                            cx,
+                            div()
+                                .w(316)
+                                .h(28)
+                                .p(4)
+                                .rounded(14)
+                                .bg(theme.muted)
+                                .border(1, theme.border)
+                                .child(
+                                    cx,
+                                    div()
+                                        .id(2475)
+                                        .pos(spring_x, 0)
+                                        .w(42)
+                                        .h(20)
+                                        .rounded(10)
+                                        .bg(theme.success)
+                                        .spring_bounds(Duration::from_millis(260)),
+                                ),
+                        )
+                        .child(
+                            cx,
+                            div()
+                                .flex_row()
+                                .gap(6)
+                                .items_center()
+                                .child(cx, text("Rubberband:").size(11).color(theme.muted_foreground))
+                                .child(cx, Button::new(2480, "Pull -90").outline().small().on_click(on_pull_left))
+                                .child(cx, Button::new(2481, "Pull +90").outline().small().on_click(on_pull_right))
+                                .child(cx, Button::new(2482, "Release").warning().small().on_click(on_pull_release))
+                                .child(
+                                    cx,
+                                    state_pill(
+                                        cx,
+                                        theme,
+                                        fmt!(cx, "raw {} -> damped {}px", self.motion_rubber_pull, damped_pull),
+                                    ),
+                                ),
+                        )
+                        .child(
+                            cx,
+                            div()
+                                .w(316)
+                                .h(26)
+                                .p(3)
+                                .rounded(13)
+                                .bg(theme.muted)
+                                .border(1, theme.border)
+                                .child(
+                                    cx,
+                                    div()
+                                        .id(2485)
+                                        .pos(rubber_x, 0)
+                                        .w(56)
+                                        .h(20)
+                                        .rounded(10)
+                                        .bg(theme.warning)
+                                        .spring_bounds(Duration::from_millis(220)),
+                                ),
+                        ),
+                ),
+        );
 
         div()
             .flex_col()
@@ -462,10 +766,11 @@ impl GalleryApp {
                     cx,
                     theme,
                     "Motion & Physics",
-                    "std-enhanced velox-component spring physics, interruptible SpringAnimator & animated widgets",
-                    "velox_component::motion",
+                    "Engine-native spring velocity inheritance, AutoAnimate ghost exits, FLIP xform & Rubberband physics",
+                    "velox_engine::motion + velox_component::motion",
                 ),
             )
+            .child(cx, native_motion_section)
             .child(cx, spring_lab_section)
             .child(
                 cx,

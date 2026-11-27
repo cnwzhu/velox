@@ -91,6 +91,7 @@ pub struct Select<'a> {
     pub shadow: Option<(u8, i8, i8, Color)>,
     pub focus_ring: bool,
     pub rounded: u8,
+    pub animated: bool,
     pub on_toggle: Option<&'a dyn Fn(&mut ActionScope)>,
     pub on_select: Option<&'a dyn Fn(usize, &mut ActionScope)>,
     item_renderer: Option<SelectItemRenderer<'a>>,
@@ -144,6 +145,7 @@ impl<'a> Select<'a> {
             shadow: None,
             focus_ring: false,
             rounded: 0,
+            animated: false,
             on_toggle: None,
             on_select: None,
             item_renderer: None,
@@ -164,6 +166,13 @@ impl<'a> Select<'a> {
     #[inline(always)]
     pub const fn width(mut self, width: i16) -> Self {
         self.width = width;
+        self
+    }
+
+    /// 启用或禁用下拉菜单开关过渡动画。
+    #[inline(always)]
+    pub const fn animated(mut self, enabled: bool) -> Self {
+        self.animated = enabled;
         self
     }
 
@@ -379,6 +388,11 @@ impl<'a> Widget<'a> for Select<'a> {
             }
             if let Some((blur, ox, oy, col)) = self.shadow {
                 list = list.shadow(blur, ox, oy, col);
+            }
+            if self.animated {
+                list = list
+                    .slide_in(0, -6, Duration::from_millis(140))
+                    .slide_out(0, -6, Duration::from_millis(120));
             }
             if let Some(toggle_cb) = self.on_toggle {
                 list = list.on_navigate_back(toggle_cb);

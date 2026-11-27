@@ -113,15 +113,45 @@ impl<'a> Widget<'a> for Roller<'a> {
             .id(self.id)
             .flex_col()
             .w(width)
-            .h(total_h)
+            .h(total_h.saturating_add(8))
+            .p(4)
             .rounded(self.rounded)
-            .bg(self.bg);
+            .bg(self.bg)
+            .overflow_hidden();
         if self.border_color.a() > 0 {
             container = container.border(1, self.border_color);
         }
+        if let (Some(cb), true) = (self.on_change, n > 1) {
+            let wheel_cb = cx.arena().alloc(move |ev: WheelEvent, acx: &mut ActionScope| {
+                let next = if ev.delta_y > 0 {
+                    (sel + 1) % n
+                } else if ev.delta_y < 0 {
+                    (sel + n - 1) % n
+                } else {
+                    sel
+                };
+                if next != sel {
+                    cb(next, acx);
+                }
+            });
+            container = container.on_wheel(cx, wheel_cb);
+        }
 
+        let wrap_around = n >= (self.visible_rows as usize).max(3);
+        let hover_row_bg = active_fg.scale_alpha(18);
         for offset in -half..=half {
-            let target_idx = (sel as isize) + offset;
+            let resolved_idx = if n == 0 {
+                None
+            } else if wrap_around {
+                Some(((sel as isize + offset).rem_euclid(n as isize)) as usize)
+            } else {
+                let target_idx = (sel as isize) + offset;
+                if target_idx >= 0 && (target_idx as usize) < n {
+                    Some(target_idx as usize)
+                } else {
+                    None
+                }
+            };
             let is_center = offset == 0;
             let row_id = crate::scoped_child_id(self.id, 0x00F3_2429, ((offset + half + 1) as u32) * 17);
 
@@ -130,6 +160,7 @@ impl<'a> Widget<'a> for Roller<'a> {
                 .flex_row()
                 .w_full()
                 .h(self.row_height)
+                .px(8)
                 .items_center()
                 .justify_center();
 
@@ -145,17 +176,20 @@ impl<'a> Widget<'a> for Roller<'a> {
                 }
             }
 
-            if target_idx >= 0 && (target_idx as usize) < n {
-                let idx_usize = target_idx as usize;
+            if let Some(idx_usize) = resolved_idx {
                 let label = self.options[idx_usize];
                 let fg = if is_center {
                     active_fg
                 } else {
                     inactive_fg
                 };
-                let fsize = if is_center { 15 } else { 12 };
+                let fsize = if is_center { 14 } else { 12 };
 
                 if !is_center {
+                    row = row
+                        .rounded(self.rounded.saturating_sub(2))
+                        .hover_bg(hover_row_bg)
+                        .cursor(CursorShape::Pointer);
                     if let Some(cb) = self.on_change {
                         let raw_cb = cx.arena().alloc(move |acx: &mut ActionScope| {
                             cb(idx_usize, acx);
@@ -164,7 +198,7 @@ impl<'a> Widget<'a> for Roller<'a> {
                     }
                 }
 
-                row = row.child(cx, text(label).size(fsize).color(fg));
+                row = row.child(cx, text(label).size(fsize).color(fg).nowrap());
             }
 
             container = container.child(cx, row);

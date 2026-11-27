@@ -32,6 +32,9 @@ crate::define_themed_component! {
     variants: false,
     sizable: false,
     disableable: false,
+    init: |base| {
+        base.animated = true;
+    },
     apply_tw: |base, theme| {
         fill_color(&mut base.bg, theme.secondary);
         fill_color(&mut base.popup_bg, theme.popover);
@@ -41,6 +44,7 @@ crate::define_themed_component! {
         fill_rounded(&mut base.rounded, 6);
     },
     forward: [
+        animated(enabled: bool),
         on_toggle_open(handler: &'a dyn Fn(&mut ActionScope)),
         on_select_color(handler: &'a dyn Fn(Color, &mut ActionScope)),
     ],

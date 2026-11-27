@@ -162,7 +162,7 @@ impl WinitPlatform {
             // 首帧立即由软件渲染器承接，按真实物理尺寸在 `resumed()` 中分配；GPU 热升舱完成后立即收缩回 1x1 释放内存
             driver.resize(1, 1);
 
-            let mut app = WinitAppHandler {
+            let app = std::boxed::Box::new(WinitAppHandler {
                 title,
                 logical_w: width,
                 logical_h: height,
@@ -190,9 +190,9 @@ impl WinitPlatform {
                 last_tick: Instant::now() - Duration::from_secs(1),
                 last_ime_area: None,
                 last_cursor: CursorShape::Default,
-            };
+            });
 
-            let _ = event_loop.run_app(&mut app);
+            run_winit_event_loop(event_loop, app);
         }
         #[cfg(not(feature = "winit"))]
         {
@@ -235,6 +235,15 @@ impl WinitPlatform {
 }
 
 
+#[cfg(feature = "winit")]
+#[inline(never)]
+fn run_winit_event_loop(
+    event_loop: EventLoop<WinitUserEvent>,
+    mut app: std::boxed::Box<WinitAppHandler>,
+) {
+    let _ = event_loop.run_app(&mut *app);
+}
+
 impl PlatformSurface for WinitPlatform {
     #[inline(always)]
     fn surface_size(&self) -> (i16, i16) {
@@ -257,11 +266,7 @@ impl PlatformSurface for WinitPlatform {
                 .iter()
                 .map(|r| (r.w.max(0) as usize) * (r.h.max(0) as usize))
                 .sum();
-            FlushReport {
-                dirty_regions: rects,
-                strips_or_buffers: 1,
-                pixels_updated: px,
-            }
+            FlushReport::with_engine(rects, 1, px, engine)
         } else {
             FlushReport::default()
         }

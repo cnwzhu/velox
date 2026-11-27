@@ -14,7 +14,7 @@ impl GalleryApp {
     ) -> Div<'a> {
         // 每帧进入前同步暗/亮主题语法配色、软折行容器宽度并按需惰性重排
         self.editor_buf.sync_theme(&theme);
-        let content_wrap_w = if self.sidebar_collapsed { 868.0 } else { 700.0 };
+        let content_wrap_w = if self.sidebar_collapsed { 1080.0 } else { 910.0 };
         self.editor_buf
             .buffer_mut()
             .set_size(Some(content_wrap_w), None);
@@ -195,7 +195,7 @@ impl GalleryApp {
             .child(
                 cx,
                 CodeEditor::from_edit(cx, 320, &self.editor_buf, self.editor_focused)
-                    .size(0, 440)
+                    .size(0, 540)
                     .blink_epoch(self.editor_buf.blink_epoch_ms())
                     .on_focus(raw_focus_ed)
                     .on_key_input(on_ed_key)

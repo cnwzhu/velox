@@ -43,32 +43,85 @@ pub(crate) const FX_CLIP_SHAPES: [(&str, Option<&'static str>); 4] = [
     ("None", None),
 ];
 
+static AURORA_STOPS: [ColorStop; 4] = [
+    ColorStop::new(0.0, Color::rgb(244, 63, 94)),
+    ColorStop::new(0.35, Color::rgb(139, 92, 246)),
+    ColorStop::new(0.7, Color::rgb(14, 165, 233)),
+    ColorStop::new(1.0, Color::rgb(16, 185, 129)),
+];
+static RG_COMPARE_STOPS: [ColorStop; 2] = [
+    ColorStop::new(0.0, Color::rgb(255, 42, 42)),
+    ColorStop::new(1.0, Color::rgb(34, 211, 88)),
+];
+static SPHERE_STOPS: [ColorStop; 3] = [
+    ColorStop::new(0.0, Color::rgb(255, 255, 255)),
+    ColorStop::new(0.32, Color::rgb(56, 189, 248)),
+    ColorStop::new(1.0, Color::rgb(30, 27, 75)),
+];
+static CONIC_STOPS: [ColorStop; 7] = [
+    ColorStop::new(0.0, Color::rgb(239, 68, 68)),
+    ColorStop::new(0.17, Color::rgb(245, 158, 11)),
+    ColorStop::new(0.33, Color::rgb(34, 197, 94)),
+    ColorStop::new(0.50, Color::rgb(6, 182, 212)),
+    ColorStop::new(0.67, Color::rgb(59, 130, 246)),
+    ColorStop::new(0.83, Color::rgb(168, 85, 247)),
+    ColorStop::new(1.0, Color::rgb(239, 68, 68)),
+];
+
+#[inline]
+fn fx_mode_btn<'a>(
+    id: u32,
+    label: &'static str,
+    active: bool,
+    cb: &'a dyn Fn(ClickEvent, &mut ActionScope),
+) -> Button<'a> {
+    let b = Button::new(id, label)
+        .small()
+        .h(26)
+        .px(10)
+        .font_size(11)
+        .on_click(cb);
+    if active {
+        b.primary()
+    } else {
+        b.outline()
+    }
+}
+
 impl GalleryApp {
+    #[inline(never)]
     pub(crate) fn render_story_effects<'a>(
         &self,
         cx: &'a Scope<Self>,
         theme: CoreTheme,
     ) -> Div<'a> {
-        let is_dark = theme.background.r() < 128;
+        let gradient_section = self.render_fx_gradients_section(cx, theme);
+        let backdrop_section = self.render_fx_backdrop_section(cx, theme);
+        let blend_section = self.render_fx_blend_section(cx, theme);
+        let filters_section = self.render_fx_filters_section(cx, theme);
 
-        // 紧凑切换芯片按钮助手（使用 velox-component::Button 主题变体）
-        let mode_btn = |id: u32,
-                        label: &'static str,
-                        active: bool,
-                        cb: &'a dyn Fn(ClickEvent, &mut ActionScope)| {
-            let b = Button::new(id, label)
-                .small()
-                .h(26)
-                .px(10)
-                .font_size(11)
-                .on_click(cb);
-            if active {
-                b.primary()
-            } else {
-                b.outline()
-            }
-        };
+        div()
+            .flex_col()
+            .w_full()
+            .gap(16)
+            .child(
+                cx,
+                story_header(
+                    cx,
+                    theme,
+                    "Effects & Shaders Lab",
+                    "Interactive showcase of OKLab gradients, per-corner radii, backdrop acrylic, 27 blend modes, filters, Transform2D & SVG clip paths.",
+                    "velox_engine::paint",
+                ),
+            )
+            .child(cx, gradient_section)
+            .child(cx, backdrop_section)
+            .child(cx, blend_section)
+            .child(cx, filters_section)
+    }
 
+    #[inline(never)]
+    fn render_fx_gradients_section<'a>(&self, cx: &'a Scope<Self>, theme: CoreTheme) -> Div<'a> {
         // ── 1. Multi-Stop Gradients & Per-Corner Radii ────────────────────────
         let on_space_oklab = cx.listener(|this, _: ClickEvent, _acx| {
             this.fx_grad_space = GradientSpace::Oklab;
@@ -98,31 +151,6 @@ impl GalleryApp {
             this.fx_grad_angle = v.clamp(0, 360);
             this.event_count = this.event_count.saturating_add(1);
         });
-
-        static AURORA_STOPS: [ColorStop; 4] = [
-            ColorStop::new(0.0, Color::rgb(244, 63, 94)),
-            ColorStop::new(0.35, Color::rgb(139, 92, 246)),
-            ColorStop::new(0.7, Color::rgb(14, 165, 233)),
-            ColorStop::new(1.0, Color::rgb(16, 185, 129)),
-        ];
-        static RG_COMPARE_STOPS: [ColorStop; 2] = [
-            ColorStop::new(0.0, Color::rgb(255, 42, 42)),
-            ColorStop::new(1.0, Color::rgb(34, 211, 88)),
-        ];
-        static SPHERE_STOPS: [ColorStop; 3] = [
-            ColorStop::new(0.0, Color::rgb(255, 255, 255)),
-            ColorStop::new(0.32, Color::rgb(56, 189, 248)),
-            ColorStop::new(1.0, Color::rgb(30, 27, 75)),
-        ];
-        static CONIC_STOPS: [ColorStop; 7] = [
-            ColorStop::new(0.0, Color::rgb(239, 68, 68)),
-            ColorStop::new(0.17, Color::rgb(245, 158, 11)),
-            ColorStop::new(0.33, Color::rgb(34, 197, 94)),
-            ColorStop::new(0.50, Color::rgb(6, 182, 212)),
-            ColorStop::new(0.67, Color::rgb(59, 130, 246)),
-            ColorStop::new(0.83, Color::rgb(168, 85, 247)),
-            ColorStop::new(1.0, Color::rgb(239, 68, 68)),
-        ];
 
         // 当选择 Repeat / Reflect 时缩短渐变轴至 45% 跨度，使重复/镜像条纹一目了然
         let linear_card_paint = if self.fx_grad_extend == ExtendMode::Pad {
@@ -226,6 +254,12 @@ impl GalleryApp {
                     .color(theme.muted_foreground),
             );
 
+        let (radial_r, radial_focal) = if self.fx_grad_extend == ExtendMode::Pad {
+            (0.62, [0.30, 0.26])
+        } else {
+            // Repeat / Reflect 缩小半径时同步收束焦点偏移，确保焦点严格保持在主圆内部，呈现完整同心波纹而非切线锥面
+            (0.28, [0.42, 0.40])
+        };
         let radial_card = div()
             .flex_col()
             .flex_grow(1)
@@ -242,12 +276,8 @@ impl GalleryApp {
                     .bg_radial_focal_gradient(
                         cx,
                         [0.5, 0.5],
-                        if self.fx_grad_extend == ExtendMode::Pad {
-                            0.62
-                        } else {
-                            0.28
-                        },
-                        [0.30, 0.26],
+                        radial_r,
+                        radial_focal,
                         0.02,
                         &SPHERE_STOPS,
                     )
@@ -290,7 +320,7 @@ impl GalleryApp {
                     .color(theme.muted_foreground),
             );
 
-        let gradient_section = story_section(
+        story_section(
             cx,
             theme,
             "1. Multi-Stop Gradients (Linear / Focal Radial / Conic) & Per-Corner Radii",
@@ -313,7 +343,7 @@ impl GalleryApp {
                         .child(cx, text("Space:").size(11).color(theme.muted_foreground))
                         .child(
                             cx,
-                            mode_btn(
+                            fx_mode_btn(
                                 2101,
                                 "OKLab",
                                 self.fx_grad_space == GradientSpace::Oklab,
@@ -322,7 +352,7 @@ impl GalleryApp {
                         )
                         .child(
                             cx,
-                            mode_btn(
+                            fx_mode_btn(
                                 2102,
                                 "LinearRGB",
                                 self.fx_grad_space == GradientSpace::LinearRgb,
@@ -331,7 +361,7 @@ impl GalleryApp {
                         )
                         .child(
                             cx,
-                            mode_btn(
+                            fx_mode_btn(
                                 2103,
                                 "sRGB",
                                 self.fx_grad_space == GradientSpace::Srgb,
@@ -348,7 +378,7 @@ impl GalleryApp {
                         .child(cx, text("Extend:").size(11).color(theme.muted_foreground))
                         .child(
                             cx,
-                            mode_btn(
+                            fx_mode_btn(
                                 2104,
                                 "Pad",
                                 self.fx_grad_extend == ExtendMode::Pad,
@@ -357,7 +387,7 @@ impl GalleryApp {
                         )
                         .child(
                             cx,
-                            mode_btn(
+                            fx_mode_btn(
                                 2105,
                                 "Repeat",
                                 self.fx_grad_extend == ExtendMode::Repeat,
@@ -366,7 +396,7 @@ impl GalleryApp {
                         )
                         .child(
                             cx,
-                            mode_btn(
+                            fx_mode_btn(
                                 2106,
                                 "Reflect",
                                 self.fx_grad_extend == ExtendMode::Reflect,
@@ -402,8 +432,12 @@ impl GalleryApp {
                 .child(cx, oklab_compare_card)
                 .child(cx, radial_card)
                 .child(cx, conic_card),
-        );
+        )
+    }
 
+    #[inline(never)]
+    fn render_fx_backdrop_section<'a>(&self, cx: &'a Scope<Self>, theme: CoreTheme) -> Div<'a> {
+        let is_dark = theme.background.r() < 128;
         // ── 2. Real-Time Backdrop Filter (Frosted Glass & Acrylic) ────────────
         let on_blur_change = cx.listener(|this, v: i32, _acx| {
             this.fx_backdrop_blur = v.clamp(0, 20);
@@ -592,7 +626,7 @@ impl GalleryApp {
                     .color(theme.muted_foreground),
             );
 
-        let backdrop_section = story_section(
+        story_section(
             cx,
             theme,
             "2. Real-Time Backdrop Filter (Frosted Glass & Acrylic Material)",
@@ -607,8 +641,11 @@ impl GalleryApp {
                 .items_center()
                 .child(cx, backdrop_stage)
                 .child(cx, backdrop_controls),
-        );
+        )
+    }
 
+    #[inline(never)]
+    fn render_fx_blend_section<'a>(&self, cx: &'a Scope<Self>, theme: CoreTheme) -> Div<'a> {
         // ── 3. 27 Blend Modes & Group Opacity Isolation ───────────────────────
         let active_blend_idx = self.fx_blend_idx.min(FX_BLEND_MODES.len() - 1);
         let (blend_name, active_blend) = FX_BLEND_MODES[active_blend_idx];
@@ -705,14 +742,14 @@ impl GalleryApp {
                     .flex_row()
                     .flex_wrap()
                     .gap(6)
-                    .child(cx, mode_btn(2120, FX_BLEND_MODES[0].0, active_blend_idx == 0, on_blend_0))
-                    .child(cx, mode_btn(2121, FX_BLEND_MODES[1].0, active_blend_idx == 1, on_blend_1))
-                    .child(cx, mode_btn(2122, FX_BLEND_MODES[2].0, active_blend_idx == 2, on_blend_2))
-                    .child(cx, mode_btn(2123, FX_BLEND_MODES[3].0, active_blend_idx == 3, on_blend_3))
-                    .child(cx, mode_btn(2124, FX_BLEND_MODES[4].0, active_blend_idx == 4, on_blend_4))
-                    .child(cx, mode_btn(2125, FX_BLEND_MODES[5].0, active_blend_idx == 5, on_blend_5))
-                    .child(cx, mode_btn(2126, FX_BLEND_MODES[6].0, active_blend_idx == 6, on_blend_6))
-                    .child(cx, mode_btn(2127, FX_BLEND_MODES[7].0, active_blend_idx == 7, on_blend_7)),
+                    .child(cx, fx_mode_btn(2120, FX_BLEND_MODES[0].0, active_blend_idx == 0, on_blend_0))
+                    .child(cx, fx_mode_btn(2121, FX_BLEND_MODES[1].0, active_blend_idx == 1, on_blend_1))
+                    .child(cx, fx_mode_btn(2122, FX_BLEND_MODES[2].0, active_blend_idx == 2, on_blend_2))
+                    .child(cx, fx_mode_btn(2123, FX_BLEND_MODES[3].0, active_blend_idx == 3, on_blend_3))
+                    .child(cx, fx_mode_btn(2124, FX_BLEND_MODES[4].0, active_blend_idx == 4, on_blend_4))
+                    .child(cx, fx_mode_btn(2125, FX_BLEND_MODES[5].0, active_blend_idx == 5, on_blend_5))
+                    .child(cx, fx_mode_btn(2126, FX_BLEND_MODES[6].0, active_blend_idx == 6, on_blend_6))
+                    .child(cx, fx_mode_btn(2127, FX_BLEND_MODES[7].0, active_blend_idx == 7, on_blend_7)),
             );
 
         let make_opacity_demo = |id: u32, isolate: bool, title: &'static str, note: &'static str| {
@@ -797,7 +834,7 @@ impl GalleryApp {
                     ),
             );
 
-        let blend_section = story_section(
+        story_section(
             cx,
             theme,
             "3. Blend Modes (27 Porter-Duff & W3C) & Group Opacity Isolation",
@@ -811,8 +848,12 @@ impl GalleryApp {
                 .gap(20)
                 .child(cx, blend_stage)
                 .child(cx, opacity_compare),
-        );
+        )
+    }
 
+    #[inline(never)]
+    fn render_fx_filters_section<'a>(&self, cx: &'a Scope<Self>, theme: CoreTheme) -> Div<'a> {
+        let is_dark = theme.background.r() < 128;
         // ── 4. Layer Filters (Blur / ColorMatrix / DropShadow), Transform2D & SVG ClipPath ──
         let on_flt_0 = cx.listener(|t, _: ClickEvent, _| {
             t.fx_filter_preset = 0;
@@ -919,12 +960,12 @@ impl GalleryApp {
                     .flex_row()
                     .flex_wrap()
                     .gap(6)
-                    .child(cx, mode_btn(2130, FX_FILTER_PRESETS[0], active_flt == 0, on_flt_0))
-                    .child(cx, mode_btn(2131, FX_FILTER_PRESETS[1], active_flt == 1, on_flt_1))
-                    .child(cx, mode_btn(2132, FX_FILTER_PRESETS[2], active_flt == 2, on_flt_2))
-                    .child(cx, mode_btn(2133, FX_FILTER_PRESETS[3], active_flt == 3, on_flt_3))
-                    .child(cx, mode_btn(2134, FX_FILTER_PRESETS[4], active_flt == 4, on_flt_4))
-                    .child(cx, mode_btn(2135, FX_FILTER_PRESETS[5], active_flt == 5, on_flt_5)),
+                    .child(cx, fx_mode_btn(2130, FX_FILTER_PRESETS[0], active_flt == 0, on_flt_0))
+                    .child(cx, fx_mode_btn(2131, FX_FILTER_PRESETS[1], active_flt == 1, on_flt_1))
+                    .child(cx, fx_mode_btn(2132, FX_FILTER_PRESETS[2], active_flt == 2, on_flt_2))
+                    .child(cx, fx_mode_btn(2133, FX_FILTER_PRESETS[3], active_flt == 3, on_flt_3))
+                    .child(cx, fx_mode_btn(2134, FX_FILTER_PRESETS[4], active_flt == 4, on_flt_4))
+                    .child(cx, fx_mode_btn(2135, FX_FILTER_PRESETS[5], active_flt == 5, on_flt_5)),
             )
             .child(
                 cx,
@@ -979,10 +1020,10 @@ impl GalleryApp {
                     .flex_wrap()
                     .gap(6)
                     .items_center()
-                    .child(cx, mode_btn(2141, FX_CLIP_SHAPES[0].0, active_clip == 0, on_clip_0))
-                    .child(cx, mode_btn(2142, FX_CLIP_SHAPES[1].0, active_clip == 1, on_clip_1))
-                    .child(cx, mode_btn(2143, FX_CLIP_SHAPES[2].0, active_clip == 2, on_clip_2))
-                    .child(cx, mode_btn(2144, FX_CLIP_SHAPES[3].0, active_clip == 3, on_clip_3))
+                    .child(cx, fx_mode_btn(2141, FX_CLIP_SHAPES[0].0, active_clip == 0, on_clip_0))
+                    .child(cx, fx_mode_btn(2142, FX_CLIP_SHAPES[1].0, active_clip == 1, on_clip_1))
+                    .child(cx, fx_mode_btn(2143, FX_CLIP_SHAPES[2].0, active_clip == 2, on_clip_2))
+                    .child(cx, fx_mode_btn(2144, FX_CLIP_SHAPES[3].0, active_clip == 3, on_clip_3))
                     .child(
                         cx,
                         Slider::new(2140, self.fx_rotation_deg)
@@ -1024,7 +1065,7 @@ impl GalleryApp {
                     .child(cx, clipped_badge),
             );
 
-        let filters_section = story_section(
+        story_section(
             cx,
             theme,
             "4. Layer Filters (ColorMatrix / Blur / DropShadow), Transform2D & SVG ClipPath",
@@ -1038,25 +1079,6 @@ impl GalleryApp {
                 .gap(18)
                 .child(cx, filter_col)
                 .child(cx, transform_col),
-        );
-
-        div()
-            .flex_col()
-            .w_full()
-            .gap(16)
-            .child(
-                cx,
-                story_header(
-                    cx,
-                    theme,
-                    "Effects & Shaders Lab",
-                    "Interactive showcase of OKLab gradients, per-corner radii, backdrop acrylic, 27 blend modes, filters, Transform2D & SVG clip paths.",
-                    "velox_engine::paint",
-                ),
-            )
-            .child(cx, gradient_section)
-            .child(cx, backdrop_section)
-            .child(cx, blend_section)
-            .child(cx, filters_section)
+        )
     }
 }

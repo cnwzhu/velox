@@ -14,7 +14,7 @@ use crate::element::Element;
 use crate::motion::{DrawOp, MotionCache};
 use crate::style::Length;
 
-use flatten::{node_baseline_offset, pass4_vertical_assign_and_flatten};
+use flatten::{node_baseline_offset, pass4_vertical_assign_and_flatten, Pass4Ctx, Pass4Inherit};
 use layout::{
     build_layout_tree, build_layout_tree_with_pool, pass1_horizontal_measure,
     pass1_horizontal_measure_with_pool, pass2_horizontal_assign,
@@ -414,68 +414,45 @@ pub(crate) fn reflatten_pass4_only<'a, 'b, const MAX_OPS: usize, const MAX_HITS:
         },
         _ => viewport.h,
     };
-    let mut focus_counter: u16 = 0;
-    let mut has_overlays = false;
-    let mut dropped_ops: u32 = 0;
     let root_owner = if (root_node.subview_flags & (SUBVIEW_FLAG_ROOT | SUBVIEW_FLAG_OWNER)) != 0 {
         root_node.subview_pod
     } else {
         u16::MAX
     };
     motion.begin_frame();
-    pass4_vertical_assign_and_flatten(
+    let mut ctx = Pass4Ctx {
         arena,
-        root_node,
-        root_owner,
-        0x811c_9dc5,
-        (0, 0),
         viewport,
-        viewport,
-        0,
-        None,
-        255,
-        (0, 0),
-        None,
-        None,
         interaction,
-        false,
-        false,
-        &mut has_overlays,
-        &mut focus_counter,
-        &mut dropped_ops,
+        overlay_pass: false,
+        has_overlays: false,
+        focus_counter: 0,
+        dropped_ops: 0,
         motion,
         out_ops,
         out_hits,
-    );
+    };
+    let root_inherit = Pass4Inherit {
+        owner_pod: root_owner,
+        path_hash: 0x811c_9dc5,
+        parent_origin: (0, 0),
+        parent_clip: viewport,
+        parent_clip_radius: 0,
+        opacity: 255,
+        offset: (0, 0),
+        text_size: None,
+        text_color: None,
+        in_overlay: false,
+    };
+    pass4_vertical_assign_and_flatten(&mut ctx, root_node, root_inherit, None);
     // 若树中存在标记了 `.overlay()` 的顶层浮层/弹窗节点，在第二遍扫描中将其统一拍平至 Z-Order 最顶层
-    if has_overlays {
-        pass4_vertical_assign_and_flatten(
-            arena,
-            root_node,
-            root_owner,
-            0x811c_9dc5,
-            (0, 0),
-            viewport,
-            viewport,
-            0,
-            None,
-            255,
-            (0, 0),
-            None,
-            None,
-            interaction,
-            true,
-            false,
-            &mut has_overlays,
-            &mut focus_counter,
-            &mut dropped_ops,
-            motion,
-            out_ops,
-            out_hits,
-        );
+    if ctx.has_overlays {
+        ctx.overlay_pass = true;
+        pass4_vertical_assign_and_flatten(&mut ctx, root_node, root_inherit, None);
     }
-    // 回收本帧已从元素树中消失的过渡动画槽位
-    motion.end_frame();
+    let mut dropped_ops = ctx.dropped_ops;
+    // 回收本帧已从元素树中消失的过渡动画槽位，并发射正在执行零配置退场动画的幽灵 DrawOp 快照
+    motion.end_frame_with_ghosts(arena, out_ops, &mut dropped_ops);
     dropped_ops
 }
 

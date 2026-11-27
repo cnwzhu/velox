@@ -31,7 +31,7 @@ pub use crate::devtools::{
 pub use crate::display::{DisplaySurface, PixelFormat, Rgb565, Rgba8888, SpriteFormat, Xrgb8888};
 pub use crate::element::{
     div, img, img_arc, img_rotated_rgb565, img_shader, svg, svg_a4, svg_icon, svg_path, svg_str,
-    text, Div, DivInteractivity, DivNode, DivVisual, Element, ElementNode, EnterFrom, Img,
+    text, Div, DivInteractivity, DivNode, DivVisual, Element, ElementNode, EnterFrom, ExitTo, Img,
     IntoElement, SpriteSource, Text, TransitionSpec, View, Widget,
 };
 pub use crate::engine::{GestureConfig, VeloxEngine, MAX_DRAW_OPS, MAX_HIT_REGIONS};
@@ -47,7 +47,8 @@ pub use crate::media::{
     WebViewHostRegion, WebViewHostSync, WebViewHostUpdate,
 };
 pub use crate::motion::{
-    DrawOp, DrawPayload, MotionCache, MotionState, Presence, Spring, SpringConfig, Tween,
+    rubberband, rubberband_i16, DrawOp, DrawPayload, MotionCache, MotionState, Presence, Spring,
+    SpringConfig, Tween,
 };
 pub use crate::paint::{
     BackdropFilter, BlendMode, ColorMatrix, ColorStop, CornerRadii, DropShadow, ExtendMode,
@@ -103,12 +104,15 @@ pub use crate::image_pipeline::{
     ImageAssetId, NineSliceInsets, ObjectFit,
 };
 pub use crate::image_pipeline::{
-    decode_image_bytes, detect_image_format, get_cached_image, image_load_state,
+    async_decode_worker_count, clear_global_image_cache, decode_image_bytes, detect_image_format,
+    get_cached_image, global_image_cache_stats, image_load_state, image_metadata, image_revision,
     load_image_bytes, load_image_bytes_async, register_custom_image_decoder, register_image_rgba,
-    set_global_image_cache_budget, DecodedPixels, ImageFormat, ImageLoadState, LruImageCache,
+    release_cached_image, set_async_decode_in_flight_budget, set_global_image_cache_budget,
+    unload_image, DecodedPixels, ImageFormat, ImageLoadState, ImageMetadata, LruImageCache,
 };
 pub use crate::display::{
-    register_font_bytes, register_font_vec, registered_custom_font_count,
+    register_font_bytes, register_font_vec, registered_custom_font_bytes,
+    registered_custom_font_count, unregister_font,
 };
 pub use crate::vector_canvas::{
     rasterize_vector_spec, vector_canvas, VecPoint, VectorCanvas, VectorDrawSpec, VectorPrimitive,

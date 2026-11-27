@@ -535,11 +535,7 @@ impl AsyncPlatformSurface for HeadlessAsyncPlatform {
                 .iter()
                 .map(|r| (r.w.max(0) as usize) * (r.h.max(0) as usize))
                 .sum();
-            FlushReport {
-                dirty_regions: rects,
-                strips_or_buffers: 1,
-                pixels_updated: px,
-            }
+            FlushReport::with_engine(rects, 1, px, engine)
         } else {
             FlushReport::default()
         }

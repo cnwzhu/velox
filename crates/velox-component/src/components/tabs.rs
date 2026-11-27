@@ -28,12 +28,23 @@ crate::define_themed_component! {
         if !base.has_custom_appearance() {
             match base.variant {
                 TabsVariant::Segmented => {
-                    fill_color(&mut base.bar_bg, theme.muted);
+                    let is_dark = theme.background.r() < 128;
+                    let track_bg = if is_dark {
+                        theme.background.lerp(theme.muted, 96)
+                    } else {
+                        theme.muted
+                    };
+                    let pill_active_bg = if is_dark {
+                        theme.secondary.lerp(theme.foreground, 22)
+                    } else {
+                        theme.card
+                    };
+                    fill_color(&mut base.bar_bg, track_bg);
                     fill_color(&mut base.bar_border_color, theme.border);
                     if base.bar_pad == 0 {
                         base.bar_pad = 3;
                     }
-                    fill_color(&mut base.active_bg, theme.card);
+                    fill_color(&mut base.active_bg, pill_active_bg);
                     fill_color(&mut base.active_fg, theme.foreground);
                     fill_color(&mut base.inactive_fg, theme.muted_foreground);
                     fill_rounded(&mut base.bar_rounded, 8);

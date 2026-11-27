@@ -154,36 +154,377 @@ pub fn opaque_core_rect(op: &DrawOp<'_>) -> Region {
     }
 }
 
+/// 用单个不透明遮挡矩形 `occ` 对 `clip` 执行单边剥离或全覆盖裁剪。
+#[inline(always)]
+fn apply_single_occluder(mut clip: Region, occ: Region) -> Region {
+    let spans_x = occ.x <= clip.x && occ.right() >= clip.right();
+    let spans_y = occ.y <= clip.y && occ.bottom() >= clip.bottom();
+    if spans_x && spans_y {
+        return Region::EMPTY;
+    }
+    if spans_x {
+        if occ.y <= clip.y && occ.bottom() > clip.y {
+            let new_y = occ.bottom();
+            clip.h = clip.bottom().saturating_sub(new_y);
+            clip.y = new_y;
+        } else if occ.bottom() >= clip.bottom() && occ.y < clip.bottom() {
+            clip.h = occ.y.saturating_sub(clip.y);
+        }
+    }
+    if spans_y {
+        if occ.x <= clip.x && occ.right() > clip.x {
+            let new_x = occ.right();
+            clip.w = clip.right().saturating_sub(new_x);
+            clip.x = new_x;
+        } else if occ.right() >= clip.right() && occ.x < clip.right() {
+            clip.w = occ.x.saturating_sub(clip.x);
+        }
+    }
+    clip
+}
+
+mod spatial_occlusion {
+    use core::cell::RefCell;
+    use std::vec::Vec;
+
+    use super::{apply_single_occluder, clip_against_opaque_rects, opaque_core_rect};
+    use crate::motion::{DrawOp, DrawPayload};
+    use crate::solver::Region;
+
+    /// 小图元阈值：遮挡体数不超过此值时直接线性扫描，零建桶开销。
+    const SMALL_OCCLUDER_THRESHOLD: usize = 16;
+    /// 单个常规遮挡体最多写入的桶数；超过则归入 `large_occluders` 避免大背景矩形污染几十上百个桶。
+    const LARGE_OCCLUDER_MAX_CELLS: usize = 16;
+    /// 最大网格桶数上限，极端大坐标场景通过倍增单元尺寸自动适配，避免内存膨胀。
+    const MAX_GRID_CELLS: usize = 16_384;
+
+    /// 线程本地复用的 64×64 空间分桶遮挡网格（CSR 扁平存储，零每帧堆抖动）。
+    ///
+    /// 正确性定理（与全量升序遍历 100% 逐像素等价）：
+    /// 任意能改变当前矩形 `clip` 的遮挡体 `occ`（满足全覆盖或覆盖整条上/下/左/右边），
+    /// 必然包含 `clip` 的左上角 `TL = (clip.x, clip.y)` 或右下角 `BR = (clip.right()-1, clip.bottom()-1)`。
+    /// 因此每次仅需检查 `bucket(TL) ∪ bucket(BR) ∪ large_occluders` 中 `op_idx > min_idx` 的有序候选，
+    /// 选出实际改变 `clip` 且 `op_idx` 最小的遮挡体应用并推进 `min_idx`，数学上必然命中原升序算法的下一个有效遮挡体。
+    struct SpatialOcclusionGrid {
+        occluders: Vec<(usize, Region)>,
+        large_occluders: Vec<u32>,
+        bucket_counts: Vec<u32>,
+        bucket_offsets: Vec<u32>,
+        bucket_cursors: Vec<u32>,
+        bucket_entries: Vec<u32>,
+        origin_x: i32,
+        origin_y: i32,
+        cols: usize,
+        rows: usize,
+        cell_shift: u32,
+    }
+
+    impl SpatialOcclusionGrid {
+        fn new() -> Self {
+            Self {
+                occluders: Vec::with_capacity(256),
+                large_occluders: Vec::with_capacity(16),
+                bucket_counts: Vec::new(),
+                bucket_offsets: Vec::new(),
+                bucket_cursors: Vec::new(),
+                bucket_entries: Vec::new(),
+                origin_x: 0,
+                origin_y: 0,
+                cols: 0,
+                rows: 0,
+                cell_shift: 6,
+            }
+        }
+
+        fn build(&mut self, ops: &[DrawOp<'_>]) {
+            self.occluders.clear();
+            self.large_occluders.clear();
+
+            let mut min_x = i32::MAX;
+            let mut min_y = i32::MAX;
+            let mut max_x = i32::MIN;
+            let mut max_y = i32::MIN;
+
+            for (idx, op) in ops.iter().enumerate() {
+                let occ = opaque_core_rect(op);
+                if !occ.is_empty() {
+                    let x0 = occ.x as i32;
+                    let y0 = occ.y as i32;
+                    let x1 = occ.right() as i32;
+                    let y1 = occ.bottom() as i32;
+                    min_x = min_x.min(x0);
+                    min_y = min_y.min(y0);
+                    max_x = max_x.max(x1);
+                    max_y = max_y.max(y1);
+                    self.occluders.push((idx, occ));
+                }
+            }
+
+            if self.occluders.len() <= SMALL_OCCLUDER_THRESHOLD {
+                self.cols = 0;
+                self.rows = 0;
+                return;
+            }
+
+            // 默认 64×64 (`1 << 6`) 空间桶；若场景跨度极大则自动加倍单元边长保证总桶数 <= MAX_GRID_CELLS。
+            let mut shift: u32 = 6;
+            let span_x = (max_x - min_x).max(1) as usize;
+            let span_y = (max_y - min_y).max(1) as usize;
+            let (cols, rows) = loop {
+                let step = 1usize << shift;
+                let c = span_x.div_ceil(step).max(1);
+                let r = span_y.div_ceil(step).max(1);
+                if c.saturating_mul(r) <= MAX_GRID_CELLS || shift >= 15 {
+                    break (c, r);
+                }
+                shift += 1;
+            };
+
+            self.origin_x = min_x;
+            self.origin_y = min_y;
+            self.cols = cols;
+            self.rows = rows;
+            self.cell_shift = shift;
+
+            let total_cells = cols * rows;
+            self.bucket_counts.clear();
+            self.bucket_counts.resize(total_cells, 0);
+
+            // 第一趟：统计每个桶的元素数（大遮挡体直接进入 `large_occluders`）
+            let mut total_entries = 0usize;
+            for (occ_id, &(_, occ)) in self.occluders.iter().enumerate() {
+                let (cx0, cy0, cx1, cy1) = self.rect_cell_range(occ);
+                let cell_count = (cx1 - cx0 + 1) * (cy1 - cy0 + 1);
+                if cell_count > LARGE_OCCLUDER_MAX_CELLS {
+                    self.large_occluders.push(occ_id as u32);
+                } else {
+                    for cy in cy0..=cy1 {
+                        let row_base = cy * cols;
+                        for cx in cx0..=cx1 {
+                            self.bucket_counts[row_base + cx] += 1;
+                        }
+                    }
+                    total_entries += cell_count;
+                }
+            }
+
+            // 构建 CSR 前缀偏移
+            self.bucket_offsets.clear();
+            self.bucket_offsets.reserve(total_cells + 1);
+            let mut acc = 0u32;
+            for &cnt in &self.bucket_counts {
+                self.bucket_offsets.push(acc);
+                acc += cnt;
+            }
+            self.bucket_offsets.push(acc);
+
+            self.bucket_cursors.clear();
+            self.bucket_cursors
+                .extend_from_slice(&self.bucket_offsets[..total_cells]);
+            self.bucket_entries.clear();
+            self.bucket_entries.resize(total_entries, 0);
+
+            // 第二趟：按 `occ_id` 严格升序写入扁平桶数组（确保每桶天然按 `op_idx` 升序，支持二分跳过底层图元）
+            for (occ_id, &(_, occ)) in self.occluders.iter().enumerate() {
+                let (cx0, cy0, cx1, cy1) = self.rect_cell_range(occ);
+                let cell_count = (cx1 - cx0 + 1) * (cy1 - cy0 + 1);
+                if cell_count <= LARGE_OCCLUDER_MAX_CELLS {
+                    for cy in cy0..=cy1 {
+                        let row_base = cy * cols;
+                        for cx in cx0..=cx1 {
+                            let b = row_base + cx;
+                            let pos = self.bucket_cursors[b] as usize;
+                            self.bucket_entries[pos] = occ_id as u32;
+                            self.bucket_cursors[b] = (pos + 1) as u32;
+                        }
+                    }
+                }
+            }
+        }
+
+        #[inline(always)]
+        fn rect_cell_range(&self, r: Region) -> (usize, usize, usize, usize) {
+            let max_cx = self.cols - 1;
+            let max_cy = self.rows - 1;
+            let cx0 = (((r.x as i32 - self.origin_x).max(0) as usize) >> self.cell_shift).min(max_cx);
+            let cy0 = (((r.y as i32 - self.origin_y).max(0) as usize) >> self.cell_shift).min(max_cy);
+            let rx1 = (r.right() as i32 - 1 - self.origin_x).max(0) as usize;
+            let ry1 = (r.bottom() as i32 - 1 - self.origin_y).max(0) as usize;
+            let cx1 = (rx1 >> self.cell_shift).min(max_cx);
+            let cy1 = (ry1 >> self.cell_shift).min(max_cy);
+            (cx0, cy0, cx1.max(cx0), cy1.max(cy0))
+        }
+
+        #[inline(always)]
+        fn point_bucket(&self, px: i32, py: i32) -> Option<usize> {
+            let dx = px - self.origin_x;
+            let dy = py - self.origin_y;
+            if dx < 0 || dy < 0 {
+                return None;
+            }
+            let cx = (dx as usize) >> self.cell_shift;
+            let cy = (dy as usize) >> self.cell_shift;
+            if cx >= self.cols || cy >= self.rows {
+                return None;
+            }
+            Some(cy * self.cols + cx)
+        }
+
+        #[inline(always)]
+        fn bucket_slice(&self, b: usize) -> &[u32] {
+            let s = self.bucket_offsets[b] as usize;
+            let e = self.bucket_offsets[b + 1] as usize;
+            &self.bucket_entries[s..e]
+        }
+
+        /// 在有序 `occ_id` 列表 `list` 中查找 `op_idx > min_idx` 且 `< best_op_idx` 的首个真正改变 `clip` 的遮挡体。
+        #[inline(always)]
+        fn scan_sorted_candidates(
+            &self,
+            list: &[u32],
+            clip: Region,
+            min_idx: usize,
+            best_op_idx: &mut usize,
+            best_clip: &mut Region,
+        ) {
+            if list.is_empty() {
+                return;
+            }
+            // 快速剔除：若整桶最后一个元素的 `op_idx <= min_idx`，零二分直接跳过！
+            let last_op_idx = self.occluders[*list.last().unwrap() as usize].0;
+            if last_op_idx <= min_idx {
+                return;
+            }
+            let start = if list.len() <= 8 {
+                0
+            } else {
+                list.partition_point(|&id| self.occluders[id as usize].0 <= min_idx)
+            };
+            for &id in &list[start..] {
+                let (op_idx, occ) = self.occluders[id as usize];
+                if op_idx <= min_idx {
+                    continue;
+                }
+                if op_idx >= *best_op_idx {
+                    break;
+                }
+                let next = apply_single_occluder(clip, occ);
+                if next != clip {
+                    *best_op_idx = op_idx;
+                    *best_clip = next;
+                    break;
+                }
+            }
+        }
+
+        /// 精确等价于 `compute_unoccluded_clip(clip, &ops[(idx + 1)..])`。
+        #[inline]
+        fn clip_region(&self, mut clip: Region, mut min_idx: usize) -> Region {
+            if self.occluders.is_empty() || clip.is_empty() {
+                return clip;
+            }
+            if self.cols == 0 {
+                return clip_against_opaque_rects(clip, &self.occluders, min_idx);
+            }
+
+            loop {
+                if clip.is_empty() {
+                    return Region::EMPTY;
+                }
+                let tl_b = self.point_bucket(clip.x as i32, clip.y as i32);
+                let br_b = self.point_bucket(clip.right() as i32 - 1, clip.bottom() as i32 - 1);
+
+                let mut best_op_idx = usize::MAX;
+                let mut best_clip = clip;
+
+                if let Some(b0) = tl_b {
+                    self.scan_sorted_candidates(
+                        self.bucket_slice(b0),
+                        clip,
+                        min_idx,
+                        &mut best_op_idx,
+                        &mut best_clip,
+                    );
+                }
+                if let Some(b1) = br_b {
+                    if Some(b1) != tl_b {
+                        self.scan_sorted_candidates(
+                            self.bucket_slice(b1),
+                            clip,
+                            min_idx,
+                            &mut best_op_idx,
+                            &mut best_clip,
+                        );
+                    }
+                }
+                if !self.large_occluders.is_empty() {
+                    self.scan_sorted_candidates(
+                        &self.large_occluders,
+                        clip,
+                        min_idx,
+                        &mut best_op_idx,
+                        &mut best_clip,
+                    );
+                }
+
+                if best_op_idx == usize::MAX {
+                    return clip;
+                }
+                clip = best_clip;
+                min_idx = best_op_idx;
+            }
+        }
+    }
+
+    std::thread_local! {
+        static TL_OCCLUSION_GRID: RefCell<SpatialOcclusionGrid> =
+            RefCell::new(SpatialOcclusionGrid::new());
+    }
+
+    pub(super) fn precompute_spatial(ops: &mut [DrawOp<'_>]) {
+        TL_OCCLUSION_GRID.with(|cell| {
+            let mut grid = cell.borrow_mut();
+            grid.build(ops);
+
+            let len = ops.len();
+            for idx in 0..len {
+                let base_clip = ops[idx].clip.intersect(ops[idx].bounds);
+                if base_clip.is_empty() {
+                    ops[idx].clip = Region::EMPTY;
+                    continue;
+                }
+                let unoccluded = grid.clip_region(base_clip, idx);
+                if unoccluded.is_empty() {
+                    ops[idx].clip = Region::EMPTY;
+                    continue;
+                }
+                let keep_parent_clip = matches!(ops[idx].payload, DrawPayload::TextRun { .. })
+                    || matches!(ops[idx].payload, DrawPayload::StyledQuad(sq) if sq.transform.is_some())
+                    || ops[idx].clip_radius > 0;
+                if keep_parent_clip {
+                    ops[idx].clip = grid.clip_region(ops[idx].clip, idx);
+                } else {
+                    ops[idx].clip = unoccluded;
+                }
+            }
+        });
+    }
+}
+
 /// 在 Pass 4 末尾预先对全帧 `DrawOp` 执行一次前向遮挡裁剪，收缩或清空被上层全覆盖的不透明图层裁剪框。
+///
+/// 在 `std` 下自动启用 64×64 CSR 空间分桶 + 对角点升序精确查询，将 2,048 图元场景的遮挡计算从 `O(N²)` 降至近似 `O(N)`，
+/// 并与原始全量升序裁剪保持 100% 逐像素等价。
 pub fn precompute_occlusion_clips(ops: &mut [DrawOp<'_>]) {
     // 若本帧包含隔离合成图层、毛玻璃或可编程混合模式，则保留各节点原始裁剪框，避免误裁剪毛玻璃/混合模式依赖的下层像素。
     if super::effects::ops_have_layers_or_blend(ops) {
         return;
     }
-    let len = ops.len();
-    for idx in 0..len {
-        let base_clip = ops[idx].clip.intersect(ops[idx].bounds);
-        if base_clip.is_empty() {
-            ops[idx].clip = Region::EMPTY;
-            continue;
-        }
-        let unoccluded = compute_unoccluded_clip(base_clip, &ops[(idx + 1)..]);
-        if unoccluded.is_empty() {
-            ops[idx].clip = Region::EMPTY;
-            continue;
-        }
-        // `TextRun` 需保留父级裁剪盒（仅裁剪上层遮挡）以便在 1.25x/1.50x/1.75x 分数 DPI 下
-        // 按实际物理字号自由扩展单行宽而不被 1x 逻辑 `bounds` 切掉末尾字符；
-        // 带圆角裁切（`clip_radius > 0`）或 2D 变换的节点亦保留原父级裁剪盒。
-        let keep_parent_clip = matches!(ops[idx].payload, DrawPayload::TextRun { .. })
-            || matches!(ops[idx].payload, DrawPayload::StyledQuad(sq) if sq.transform.is_some())
-            || ops[idx].clip_radius > 0;
-        if keep_parent_clip {
-            ops[idx].clip = compute_unoccluded_clip(ops[idx].clip, &ops[(idx + 1)..]);
-        } else {
-            ops[idx].clip = unoccluded;
-        }
+    {
+        spatial_occlusion::precompute_spatial(ops);
+        return;
     }
+
 }
 
 #[inline]
@@ -195,29 +536,7 @@ pub(super) fn clip_against_opaque_rects(mut clip: Region, occluders: &[(usize, R
         if clip.is_empty() {
             return Region::EMPTY;
         }
-        let spans_x = occ.x <= clip.x && occ.right() >= clip.right();
-        let spans_y = occ.y <= clip.y && occ.bottom() >= clip.bottom();
-        if spans_x && spans_y {
-            return Region::EMPTY;
-        }
-        if spans_x {
-            if occ.y <= clip.y && occ.bottom() > clip.y {
-                let new_y = occ.bottom();
-                clip.h = clip.bottom().saturating_sub(new_y);
-                clip.y = new_y;
-            } else if occ.bottom() >= clip.bottom() && occ.y < clip.bottom() {
-                clip.h = occ.y.saturating_sub(clip.y);
-            }
-        }
-        if spans_y {
-            if occ.x <= clip.x && occ.right() > clip.x {
-                let new_x = occ.right();
-                clip.w = clip.right().saturating_sub(new_x);
-                clip.x = new_x;
-            } else if occ.right() >= clip.right() && occ.x < clip.right() {
-                clip.w = occ.x.saturating_sub(clip.x);
-            }
-        }
+        clip = apply_single_occluder(clip, occ);
     }
     clip
 }
@@ -233,30 +552,7 @@ pub fn compute_unoccluded_clip(mut clip: Region, ops_above: &[DrawOp<'_>]) -> Re
         if occ.is_empty() {
             continue;
         }
-        let spans_x = occ.x <= clip.x && occ.right() >= clip.right();
-        let spans_y = occ.y <= clip.y && occ.bottom() >= clip.bottom();
-
-        if spans_x && spans_y {
-            return Region::EMPTY;
-        }
-        if spans_x {
-            if occ.y <= clip.y && occ.bottom() > clip.y {
-                let new_y = occ.bottom();
-                clip.h = clip.bottom().saturating_sub(new_y);
-                clip.y = new_y;
-            } else if occ.bottom() >= clip.bottom() && occ.y < clip.bottom() {
-                clip.h = occ.y.saturating_sub(clip.y);
-            }
-        }
-        if spans_y {
-            if occ.x <= clip.x && occ.right() > clip.x {
-                let new_x = occ.right();
-                clip.w = clip.right().saturating_sub(new_x);
-                clip.x = new_x;
-            } else if occ.right() >= clip.right() && occ.x < clip.right() {
-                clip.w = occ.x.saturating_sub(clip.x);
-            }
-        }
+        clip = apply_single_occluder(clip, occ);
     }
     clip
 }

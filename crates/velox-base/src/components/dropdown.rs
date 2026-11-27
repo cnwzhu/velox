@@ -340,7 +340,9 @@ impl<'a> Widget<'a> for Dropdown<'a> {
             popup = popup.shadow(12, 0, 4, Color::rgba(0, 0, 0, self.shadow_alpha.min(100)));
         }
         if self.animated {
-            popup = popup.enter_from(0, 0, -6, core::time::Duration::from_millis(140));
+            popup = popup
+                .enter_from(0, 0, -6, core::time::Duration::from_millis(140))
+                .exit_to(0, 0, -6, core::time::Duration::from_millis(130));
         }
 
         for (idx, &opt) in self.options.iter().enumerate() {

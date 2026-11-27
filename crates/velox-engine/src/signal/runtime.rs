@@ -5,9 +5,9 @@ use crate::pod::PodId;
 use super::storage::{
     dec_batch_depth, get_active_dep_tracker, get_active_render_context, get_batch_depth,
     get_has_pending_dirty, inc_batch_depth, push_batch_effects, set_has_pending_dirty,
-    swap_active_dep_tracker, swap_active_render_context, take_batch_effects, InlineFnStorage,
-    InlineValueStorage, NO_ACTIVE_POD, NO_ACTIVE_TRACKER, NO_EDGE, TRACKER_INDEX_MASK,
-    TRACKER_KIND_COMPUTED, TRACKER_KIND_EFFECT,
+    swap_active_dep_tracker, swap_active_render_context, take_batch_effects, EdgeIdx,
+    InlineFnStorage, InlineValueStorage, NO_ACTIVE_POD, NO_ACTIVE_TRACKER, NO_EDGE,
+    TRACKER_INDEX_MASK, TRACKER_KIND_COMPUTED, TRACKER_KIND_EFFECT,
 };
 use super::table::{with_table, NodeKind, NodeState};
 
@@ -32,8 +32,8 @@ pub(crate) fn begin_pod_tracking(pool_id: u16, pod_id: PodId) -> (u16, u16) {
     if idx != NO_ACTIVE_POD {
         with_table(|tbl| {
             for s in tbl.signals.iter_mut() {
-                if s.occupied && s.owner_pool == pool_id {
-                    s.clear_subscriber_on_render(idx);
+                if s.occupied {
+                    s.clear_subscriber_on_render(pool_id, idx);
                 }
             }
         });
@@ -54,8 +54,22 @@ pub(crate) fn remove_pod_subscriptions(pool_id: u16, pod_id: PodId) {
     if idx != NO_ACTIVE_POD && pool_id != 0 {
         with_table(|tbl| {
             for s in tbl.signals.iter_mut() {
-                if s.occupied && s.owner_pool == pool_id {
-                    s.remove_subscriber(idx);
+                if s.occupied {
+                    s.remove_subscriber(pool_id, idx);
+                }
+            }
+        });
+    }
+}
+
+/// 当整个 `PodPool` 实例被销毁时，一次性回收其在全部信号槽位上的订阅与待处理脏位。
+#[inline]
+pub(crate) fn remove_pool_subscriptions(pool_id: u16) {
+    if pool_id != 0 {
+        with_table(|tbl| {
+            for s in tbl.signals.iter_mut() {
+                if s.occupied {
+                    s.remove_pool(pool_id);
                 }
             }
         });
@@ -68,7 +82,7 @@ pub fn has_pending_dirty_pods() -> bool {
     get_has_pending_dirty()
 }
 
-/// 取出并清零所属 `pool_id` 下所有由信号变更触发的脏 `PodId`（同时覆盖 `< 64` 位掩码与 `std` 下 `>= 64` 扩展槽位）。
+/// 取出并清零所属 `pool_id` 下所有由信号变更触发的脏 `PodId`（支持多实例引擎并发共享同一信号，互不覆盖）。
 #[inline]
 pub(crate) fn drain_pending_dirty_pods(pool_id: u16, mut mark_fn: impl FnMut(PodId)) {
     if !get_has_pending_dirty() {
@@ -81,17 +95,12 @@ pub(crate) fn drain_pending_dirty_pods(pool_id: u16, mut mark_fn: impl FnMut(Pod
     with_table(|tbl| {
         for s in tbl.signals.iter_mut() {
             if s.occupied && s.has_any_pending_dirty() {
-                if s.owner_pool == pool_id || s.owner_pool == 0 {
-                    out_mask |= s.pending_dirty_mask;
-                    s.pending_dirty_mask = 0;
-                    if !s.ext_pending_dirty.is_empty() {
-                        for pod_idx in s.ext_pending_dirty.drain(..) {
-                            if !ext_out.contains(&pod_idx) {
-                                ext_out.push(pod_idx);
-                            }
-                        }
-                    }
-                } else {
+                let (mask, other_rem) = s.drain_pending_dirty_for_pool(
+                    pool_id,
+                    &mut ext_out,
+                );
+                out_mask |= mask;
+                if other_rem {
                     any_remaining = true;
                 }
             }
@@ -123,12 +132,12 @@ pub(super) fn record_signal_read(sig_idx: u16, sig_gen: u16, sig_version: u32) {
     with_table(|tbl| {
         if active_pod != NO_ACTIVE_POD {
             if let Some(slot) = tbl.signals.get_mut(sig_idx as usize) {
-                if slot.occupied && slot.generation == sig_gen {
-                    if slot.owner_pool != active_pool && slot.owner_pool != 0 {
-                        slot.clear_all_subscribers();
-                    }
-                    slot.owner_pool = active_pool;
-                    slot.add_subscriber(active_pod);
+                if slot.occupied
+                    && slot.generation == sig_gen
+                    && !slot.add_subscriber(active_pool, active_pod)
+                {
+                    tbl.dropped_pool_subscriptions =
+                        tbl.dropped_pool_subscriptions.saturating_add(1);
                 }
             }
         }
@@ -239,7 +248,7 @@ pub(super) fn record_computed_read(comp_idx: u16, comp_gen: u16, comp_version: u
 pub(super) fn ensure_computed_fresh(idx: usize, expected_gen: u16) -> Option<u32> {
     enum PullAction {
         Ready(u32),
-        Check(u32, u32), // (first_dep, cur_version)
+        Check(EdgeIdx, u32), // (first_dep, cur_version)
         Recompute {
             compute_fn: unsafe fn(*const InlineFnStorage, *mut InlineValueStorage),
             fn_storage: InlineFnStorage,

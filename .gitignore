@@ -1,3 +1,9 @@
 **/target
+target-verify
 *.log
+*.log.*
+*.exe
+*.pdb
+*.apk
+*.wasm
 .idea

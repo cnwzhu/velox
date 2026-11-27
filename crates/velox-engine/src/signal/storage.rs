@@ -9,7 +9,9 @@ pub(super) const NO_ACTIVE_TRACKER: u16 = u16::MAX;
 pub(super) const TRACKER_KIND_COMPUTED: u16 = 0x4000;
 pub(super) const TRACKER_KIND_EFFECT: u16 = 0x8000;
 pub(super) const TRACKER_INDEX_MASK: u16 = 0x3FFF;
-pub(super) const NO_EDGE: u32 = u32::MAX;
+/// 侵入式依赖边池索引类型（`std` 下动态扩容，使用 `u32`）。
+pub(super) type EdgeIdx = u32;
+pub(super) const NO_EDGE: EdgeIdx = u32::MAX;
 
 static NEXT_POOL_ID: AtomicU16 = AtomicU16::new(1);
 

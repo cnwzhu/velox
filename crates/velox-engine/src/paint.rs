@@ -140,6 +140,49 @@ impl CornerRadii {
     pub const fn as_array(self) -> [u8; 4] {
         [self.tl, self.tr, self.br, self.bl]
     }
+
+    /// 按 FLIP 合成缩放系数 `(scale_x, scale_y)` 逆缩放修正四角圆角半径，避免卡片伸缩时圆角被拉扁失真。
+    #[inline]
+    pub fn inverse_scaled(self, scale_x: f32, scale_y: f32) -> Self {
+        let eff_scale = scale_x.abs().min(scale_y.abs()).clamp(0.15, 8.0);
+        let inv = 1.0 / eff_scale;
+        let map = |r: u8| -> u8 { ((r as f32 * inv + 0.5) as i32).clamp(0, u8::MAX as i32) as u8 };
+        Self {
+            tl: map(self.tl),
+            tr: map(self.tr),
+            br: map(self.br),
+            bl: map(self.bl),
+        }
+    }
+}
+
+/// 根据终点布局框 `layout_bounds` 与当前 FLIP 视觉插值框 `visual_bounds`，计算相对于终点布局框中心的合成层 2D 仿射变换矩阵
+/// 与对应的缩放因子 `(Transform2D, scale_x, scale_y)`（若两者完全一致返回 `None`）。
+#[inline]
+pub fn compute_flip_transform(
+    layout_bounds: Region,
+    visual_bounds: Region,
+) -> Option<(Transform2D, f32, f32)> {
+    if layout_bounds == visual_bounds || layout_bounds.w <= 0 || layout_bounds.h <= 0 {
+        return None;
+    }
+    let lw = layout_bounds.w as f32;
+    let lh = layout_bounds.h as f32;
+    let vw = (visual_bounds.w.max(1)) as f32;
+    let vh = (visual_bounds.h.max(1)) as f32;
+    let sx = (vw / lw).clamp(0.05, 16.0);
+    let sy = (vh / lh).clamp(0.05, 16.0);
+    let lcx = (layout_bounds.x as f32) + lw * 0.5;
+    let lcy = (layout_bounds.y as f32) + lh * 0.5;
+    let vcx = (visual_bounds.x as f32) + vw * 0.5;
+    let vcy = (visual_bounds.y as f32) + vh * 0.5;
+    let tx = vcx - lcx;
+    let ty = vcy - lcy;
+    Some((
+        Transform2D::new(sx, 0.0, 0.0, sy, tx, ty),
+        sx,
+        sy,
+    ))
 }
 
 // ============================================================================
@@ -556,8 +599,9 @@ impl<'a> Paint<'a> {
                         return None;
                     }
                     let sd = sqrt_f32(disc);
-                    let t_hi = (-b + sd) / (2.0 * a);
-                    let t_lo = (-b - sd) / (2.0 * a);
+                    let r_a = (-b + sd) / (2.0 * a);
+                    let r_b = (-b - sd) / (2.0 * a);
+                    let (t_hi, t_lo) = if r_a >= r_b { (r_a, r_b) } else { (r_b, r_a) };
                     if r0 + t_hi * dr >= 0.0 {
                         t_hi
                     } else if r0 + t_lo * dr >= 0.0 {

@@ -13,6 +13,8 @@ pub const SCRATCH_CAPACITY: usize = 4992;
 pub struct ScratchArena<const CAP: usize = SCRATCH_CAPACITY> {
     inner: bumpalo::Bump,
     used: Cell<usize>,
+    peak_used: Cell<usize>,
+    truncation_count: Cell<u32>,
 }
 
 impl<const CAP: usize> Default for ScratchArena<CAP> {
@@ -28,6 +30,16 @@ impl<const CAP: usize> ScratchArena<CAP> {
         Self {
             inner: bumpalo::Bump::with_capacity(CAP),
             used: Cell::new(0),
+            peak_used: Cell::new(0),
+            truncation_count: Cell::new(0),
+        }
+    }
+
+    #[inline(always)]
+    fn set_used_std(&self, next: usize) {
+        self.used.set(next);
+        if next > self.peak_used.get() {
+            self.peak_used.set(next);
         }
     }
 
@@ -37,7 +49,7 @@ impl<const CAP: usize> ScratchArena<CAP> {
         let align = align_of::<T>().max(1);
         let size = size_of::<T>();
         let cur = (self.used.get() + align - 1) & !(align - 1);
-        self.used.set(cur + size);
+        self.set_used_std(cur + size);
         Some(self.inner.alloc(val))
     }
 
@@ -104,7 +116,7 @@ impl<const CAP: usize> ScratchArena<CAP> {
         if len == 0 {
             return &mut [];
         }
-        self.used.set(self.used.get() + len);
+        self.set_used_std(self.used.get() + len);
         self.inner.alloc_slice_fill_copy(len, 0u8)
     }
 
@@ -122,7 +134,7 @@ impl<const CAP: usize> ScratchArena<CAP> {
             if count == 0 || size == 0 {
                 return &mut [];
             }
-            self.used.set(self.used.get() + count.saturating_mul(size));
+            self.set_used_std(self.used.get() + count.saturating_mul(size));
             return self.inner.alloc_slice_fill_with(count, |_| {
                 iter.next().expect("Exact size_hint mismatch")
             });
@@ -131,7 +143,7 @@ impl<const CAP: usize> ScratchArena<CAP> {
         for item in iter {
             vec.push(item);
         }
-        self.used.set(self.used.get() + vec.len().saturating_mul(size));
+        self.set_used_std(self.used.get() + vec.len().saturating_mul(size));
         vec.into_bump_slice_mut()
     }
 
@@ -142,7 +154,7 @@ impl<const CAP: usize> ScratchArena<CAP> {
             return StrRef::Static("");
         }
         let copied = self.inner.alloc_str(s);
-        self.used.set(self.used.get() + copied.len());
+        self.set_used_std(self.used.get() + copied.len());
         StrRef::Scratch(copied)
     }
 
@@ -153,14 +165,16 @@ impl<const CAP: usize> ScratchArena<CAP> {
         }
         let mut s = bumpalo::collections::String::new_in(&self.inner);
         let _ = fmt::write(&mut s, args);
-        self.used.set(self.used.get() + s.len());
+        self.set_used_std(self.used.get() + s.len());
         StrRef::Scratch(s.into_bump_str())
     }
 
-    /// 重置帧内存池游标，实现零分配跨帧复用。
+    /// 重置帧内存池游标与本帧水位遥测，实现零分配跨帧复用。
     #[inline(always)]
     pub fn rewind(&mut self) {
         self.used.set(0);
+        self.peak_used.set(0);
+        self.truncation_count.set(0);
         self.inner.reset();
     }
 
@@ -182,6 +196,30 @@ impl<const CAP: usize> ScratchArena<CAP> {
     #[inline(always)]
     pub fn used_bytes(&self) -> usize {
         self.used.get()
+    }
+
+    /// 返回当前周期内瞬态内存池触及的真实峰值字节数（`#![no_std]` 双端池计入 `cursor + (CAP - temp_cursor)`）。
+    #[inline(always)]
+    pub fn peak_used_bytes(&self) -> usize {
+        self.peak_used.get()
+    }
+
+    /// 返回当前周期内发生静默字符串截断（`alloc_str` / `alloc_fmt`）或临时切片空降级（`alloc_temp_iter_exact`）的累计次数。
+    #[inline(always)]
+    pub fn truncation_count(&self) -> u32 {
+        self.truncation_count.get()
+    }
+
+    /// 取出并清零当前周期内累计的静默截断次数（供 `VeloxEngine` 帧末汇总并透传至 `FlushReport`）。
+    #[inline(always)]
+    pub(crate) fn take_truncation_count(&self) -> u32 {
+        self.truncation_count.replace(0)
+    }
+
+    /// 将峰值水位基线重置为当前实时占用字节数（用于保留子树未调用 `rewind()` 的增量帧统计单帧真实高水位）。
+    #[inline(always)]
+    pub(crate) fn reset_peak_to_current(&self) {
+        self.peak_used.set(self.used.get());
     }
 
     /// 返回底层实际驻留字节数（`bumpalo::Bump::allocated_bytes()`，用于真实水位上限回收）。

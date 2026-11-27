@@ -13,6 +13,7 @@ crate::define_themed_component! {
     disableable: false,
     init: |base| {
         base.focus_ring = true;
+        base.animated = true;
     },
     apply_tw: |base, theme| {
         fill_color(&mut base.bg, theme.primary);
@@ -28,6 +29,7 @@ crate::define_themed_component! {
         }
     },
     forward: [
+        animated(enabled: bool),
         on_click(handler: &'a dyn Fn(&mut ActionScope)),
         on_toggle_menu(handler: &'a dyn Fn(&mut ActionScope)),
         on_select(handler: &'a dyn Fn(usize, &mut ActionScope)),

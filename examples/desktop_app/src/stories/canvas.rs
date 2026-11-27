@@ -53,8 +53,8 @@ impl CanvasPreset {
     }
 }
 
-pub const CANVAS_VIEW_W: i16 = 780;
-pub const CANVAS_VIEW_H: i16 = 440;
+pub const CANVAS_VIEW_W: i16 = 960;
+pub const CANVAS_VIEW_H: i16 = 500;
 
 #[cfg(feature = "custom-shader")]
 mod gpu_spotlight_safe {
@@ -549,6 +549,7 @@ impl CanvasDemoState {
 }
 
 impl GalleryApp {
+    #[inline(never)]
     pub(crate) fn render_story_canvas<'a>(
         &mut self,
         cx: &'a Scope<Self>,
@@ -571,6 +572,103 @@ impl GalleryApp {
             cx.request_frame();
         }
 
+        if self.canvas_demo.suite_mode == CanvasSuiteMode::RealtimePlot
+            && self.canvas_demo.plot_live_stream
+        {
+            self.canvas_demo.plot_stream_tick = self.canvas_demo.plot_stream_tick.wrapping_add(1);
+            let seed = self.canvas_demo.plot_stream_tick;
+            self.canvas_demo.plot_state.push_live_batch(seed);
+            cx.request_frame();
+        }
+
+        let suite_tabs = self.render_canvas_suite_tabs(cx);
+        let main_viewport_el: Element<'a> = match self.canvas_demo.suite_mode {
+            CanvasSuiteMode::Scene2D => self.render_canvas_scene2d_section(cx, theme),
+            CanvasSuiteMode::NodeGraph => self.render_canvas_node_graph_section(cx, theme),
+            CanvasSuiteMode::SheetGrid => self.render_canvas_sheet_grid_section(cx, theme),
+            CanvasSuiteMode::RealtimePlot => self.render_canvas_realtime_plot_section(cx, theme),
+        };
+        let glass_inline_bar = self.render_canvas_glass_bar(cx, theme);
+
+        div()
+            .flex_col()
+            .w_full()
+            .gap(12)
+            .child(
+                cx,
+                story_header(
+                    cx,
+                    theme,
+                    "Pro 2D Canvas Suite (OBB SDF · NodeGraph · 1M Sheet · 100k Plot)",
+                    "Hilbert RTree, AI DAG NodeGraph, 1,000,000-row virtual spreadsheet, 100k LTTB plot, LiquidGlass & InlineFlow.",
+                    "velox_kit::canvas::{InteractiveCanvas, SceneStore, FlatRTree, Minimap}",
+                ),
+            )
+            .child(cx, suite_tabs)
+            .child(cx, main_viewport_el)
+            .child(cx, glass_inline_bar)
+    }
+
+    #[inline(never)]
+    fn render_canvas_suite_tabs<'a>(&self, cx: &'a Scope<Self>) -> Div<'a> {
+        let on_suite_scene = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.suite_mode = CanvasSuiteMode::Scene2D;
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_suite_graph = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.suite_mode = CanvasSuiteMode::NodeGraph;
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_suite_sheet = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.suite_mode = CanvasSuiteMode::SheetGrid;
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_suite_plot = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.suite_mode = CanvasSuiteMode::RealtimePlot;
+            this.event_count = this.event_count.saturating_add(1);
+        });
+
+        div()
+            .flex_row()
+            .flex_wrap()
+            .gap(8)
+            .items_center()
+            .child(
+                cx,
+                Button::new(7120, "2D Scene (OBB)")
+                    .small()
+                    .selected(self.canvas_demo.suite_mode == CanvasSuiteMode::Scene2D)
+                    .on_click(on_suite_scene),
+            )
+            .child(
+                cx,
+                Button::new(7121, "AI NodeGraph")
+                    .small()
+                    .selected(self.canvas_demo.suite_mode == CanvasSuiteMode::NodeGraph)
+                    .on_click(on_suite_graph),
+            )
+            .child(
+                cx,
+                Button::new(7122, "1M SheetGrid")
+                    .small()
+                    .selected(self.canvas_demo.suite_mode == CanvasSuiteMode::SheetGrid)
+                    .on_click(on_suite_sheet),
+            )
+            .child(
+                cx,
+                Button::new(7123, "100k LTTB Plot")
+                    .small()
+                    .selected(self.canvas_demo.suite_mode == CanvasSuiteMode::RealtimePlot)
+                    .on_click(on_suite_plot),
+            )
+    }
+
+    #[inline(never)]
+    fn render_canvas_scene2d_section<'a>(
+        &mut self,
+        cx: &'a Scope<Self>,
+        theme: CoreTheme,
+    ) -> Element<'a> {
         let on_preset_stadium = cx.listener(|this, _: ClickEvent, _acx| {
             this.canvas_demo.load_preset(CanvasPreset::Stadium);
             this.event_count = this.event_count.saturating_add(1);
@@ -624,306 +722,6 @@ impl GalleryApp {
             this.canvas_demo.store.states.clear_all_flag(CANVAS_STATE_SELECTED);
             this.canvas_demo.last_picked_label = String::from("Selection cleared");
             this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_suite_scene = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.suite_mode = CanvasSuiteMode::Scene2D;
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_suite_graph = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.suite_mode = CanvasSuiteMode::NodeGraph;
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_suite_sheet = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.suite_mode = CanvasSuiteMode::SheetGrid;
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_suite_plot = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.suite_mode = CanvasSuiteMode::RealtimePlot;
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_graph_auto_layout = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.node_graph.auto_layout_layered(56.0, 26.0);
-            let wb = this.canvas_demo.node_graph.world_bounds();
-            this.canvas_demo.graph_controller.fit_bounds(
-                wb,
-                CANVAS_VIEW_W as f32,
-                (CANVAS_VIEW_H - 36) as f32,
-                24.0,
-            );
-            this.canvas_demo.graph_status = String::from("Auto-laid out DAG layers");
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_graph_add_node = cx.listener(|this, _: ClickEvent, _| {
-            let n = this.canvas_demo.node_graph.nodes.len() as f32;
-            let nid = this
-                .canvas_demo
-                .node_graph
-                .spawn_tool_node(160.0 + (n % 4.0) * 140.0, 290.0 + (n / 4.0).floor() * 48.0);
-            this.canvas_demo.graph_status = format!("Spawned node #{} — drag it or wire ports!", nid.0);
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_graph_undo = cx.listener(|this, _: ClickEvent, _| {
-            if this.canvas_demo.node_graph.undo() {
-                this.canvas_demo.graph_status = String::from("Undid last graph command");
-                this.event_count = this.event_count.saturating_add(1);
-            }
-        });
-        let on_graph_redo = cx.listener(|this, _: ClickEvent, _| {
-            if this.canvas_demo.node_graph.redo() {
-                this.canvas_demo.graph_status = String::from("Redid graph command");
-                this.event_count = this.event_count.saturating_add(1);
-            }
-        });
-        let on_graph_collapse = cx.listener(|this, _: ClickEvent, _| {
-            let target = this
-                .canvas_demo
-                .node_graph
-                .selected_node()
-                .or_else(|| this.canvas_demo.node_graph.nodes.first().map(|n| n.id));
-            if let Some(nid) = target {
-                this.canvas_demo.node_graph.toggle_collapse(nid);
-                this.canvas_demo.graph_status = format!("Toggled collapse on node #{}", nid.0);
-                this.event_count = this.event_count.saturating_add(1);
-            }
-        });
-        let on_graph_del_edge = cx.listener(|this, _: ClickEvent, _| {
-            let eid = this
-                .canvas_demo
-                .node_graph
-                .selected_edge
-                .or(this.canvas_demo.node_graph.hovered_edge)
-                .or_else(|| this.canvas_demo.node_graph.edges.last().map(|e| e.id));
-            if let Some(id) = eid {
-                if this.canvas_demo.node_graph.disconnect(id) {
-                    this.canvas_demo.node_graph.selected_edge = None;
-                    this.canvas_demo.graph_status = format!("Deleted Bezier edge #{id} (Undo supported)");
-                    this.event_count = this.event_count.saturating_add(1);
-                }
-            }
-        });
-        let on_graph_fit = cx.listener(|this, _: ClickEvent, _| {
-            let wb = this.canvas_demo.node_graph.world_bounds();
-            this.canvas_demo.graph_controller.fit_bounds(
-                wb,
-                CANVAS_VIEW_W as f32,
-                (CANVAS_VIEW_H - 36) as f32,
-                24.0,
-            );
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_sheet_jump_500k = cx.listener(|this, _: ClickEvent, _| {
-            let _ = this.canvas_demo.sheet_model.commit_edit();
-            this.canvas_demo.sheet_model.jump_to_row(500_000);
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_sheet_jump_top = cx.listener(|this, _: ClickEvent, _| {
-            let _ = this.canvas_demo.sheet_model.commit_edit();
-            this.canvas_demo.sheet_model.jump_to_row(0);
-            this.canvas_demo.sheet_model.scroll_x = 0.0;
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_sheet_fill_down = cx.listener(|this, _: ClickEvent, _| {
-            let _ = this.canvas_demo.sheet_model.commit_edit();
-            let n = this.canvas_demo.sheet_model.fill_selection_down();
-            this.canvas_demo.suite_feedback = if n > 0 {
-                format!("Sheet Fill-Down populated {n} cell(s) & recalculated formulas")
-            } else {
-                String::from("Drag across >=2 rows first, then click Fill Down")
-            };
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_sheet_bump_val = cx.listener(|this, _: ClickEvent, _| {
-            let _ = this.canvas_demo.sheet_model.commit_edit();
-            let f = this.canvas_demo.sheet_model.selection.focus;
-            let cur = this.canvas_demo.sheet_model.eval_number(f.row, f.col).unwrap_or(0.0);
-            this.canvas_demo.sheet_model.set_number(f.row, f.col, cur + 10.0);
-            this.canvas_demo.suite_feedback = format!(
-                "Updated {}{} = {:.2} (dependent =SUM/=AVG updated live)",
-                col_index_to_label(f.col),
-                f.row + 1,
-                cur + 10.0
-            );
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_sheet_scroll_left = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.sheet_model.scroll_by(-192.0, 0.0);
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_sheet_scroll_right = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.sheet_model.scroll_by(192.0, 0.0);
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_plot_toggle_candles = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.plot_candles = !this.canvas_demo.plot_candles;
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_plot_toggle_live = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.plot_live_stream = !this.canvas_demo.plot_live_stream;
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_plot_spike = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.plot_state.inject_spike_burst();
-            this.canvas_demo.suite_feedback =
-                String::from("Injected +512 high-frequency spikes into 100k RingSeries (LTTB preserved)");
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_plot_reset_zoom = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.plot_state.reset_zoom();
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_inline_cite = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.inline_cite_clicks = this.canvas_demo.inline_cite_clicks.saturating_add(1);
-            this.canvas_demo.suite_feedback = format!(
-                "InlineFlow interactive widget triggered #{}",
-                this.canvas_demo.inline_cite_clicks
-            );
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_mcp_ping = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.suite_feedback = format!(
-                "MCP JSON-RPC 2.0 Ready: 6 tools (snapshot/click/fill/scroll/wait_idle) · {} events",
-                this.event_count + 1
-            );
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_hot_style_reload = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.hot_style_preset = (this.canvas_demo.hot_style_preset + 1) % 3;
-            let sheet = match this.canvas_demo.hot_style_preset {
-                1 => "7165: pad=14 rounded=16 bg=#0F2942 border=#38BDF8\n",
-                2 => "7165: pad=16 rounded=8 bg=#2B124C border=#C084FC\n",
-                _ => "7165: pad=12 rounded=12 bg=#111827 border=#3B82F6\n",
-            };
-            let n = this.canvas_demo.live_overrides.load_hot_reload_sheet(sheet);
-            this.canvas_demo.suite_feedback = format!(
-                "Hot Style Reload applied ({n} rule, rev #{}) — 0ms recompile, PodPool state intact!",
-                this.canvas_demo.live_overrides.revision()
-            );
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_vlxrec_snap = cx.listener(|this, _: ClickEvent, _| {
-            let mut rec = EventRecorder::new();
-            rec.steps.push(RecordedStep {
-                dt_ms: 16,
-                event: RecordedEvent::Tick,
-                state_checksum: 0x564C_5831u64 ^ (this.event_count as u64),
-            });
-            let txt = rec.to_vlxrec_text();
-            let first_len = txt.len();
-            this.canvas_demo.suite_feedback = format!(
-                ".vlxrec deterministic snapshot exported ({first_len} bytes, checksum verified)"
-            );
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_graph_wheel = cx.listener(|this, ev: WheelEvent, acx| {
-            let _ = this.canvas_demo.graph_controller.handle_wheel(
-                ev.local_x,
-                ev.local_y,
-                ev.delta_y,
-                acx.now_ms(),
-            );
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_graph_drag = cx.listener(|this, ev: DragEvent, _| {
-            let msg = this
-                .canvas_demo
-                .node_graph
-                .handle_drag(ev, &mut this.canvas_demo.graph_controller);
-            this.canvas_demo.graph_status = String::from(msg);
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_graph_move = cx.listener(|this, ev: DragEvent, acx| {
-            let vp = this.canvas_demo.graph_controller.viewport;
-            if !this
-                .canvas_demo
-                .node_graph
-                .handle_pointer_move(ev.local_x, ev.local_y, vp)
-            {
-                acx.skip_notify();
-            }
-        });
-        let on_graph_click = cx.listener(|this, _: ClickEvent, _| {
-            this.canvas_demo.node_graph.finish_pointer_interaction();
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_graph_rclick = cx.listener(|this, ev: ClickEvent, _| {
-            // 右键用当前悬停坐标（cursor_world）执行折叠或删线
-            let vp = this.canvas_demo.graph_controller.viewport;
-            let (lx, ly) = vp.world_to_local(
-                this.canvas_demo.node_graph.cursor_world.0,
-                this.canvas_demo.node_graph.cursor_world.1,
-            );
-            let _ = ev;
-            let msg = this
-                .canvas_demo
-                .node_graph
-                .handle_secondary_click(lx.round() as i16, ly.round() as i16, vp);
-            this.canvas_demo.graph_status = String::from(msg);
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_sheet_wheel = cx.listener(|this, ev: WheelEvent, acx| {
-            if acx.modifiers().shift() {
-                this.canvas_demo
-                    .sheet_model
-                    .scroll_by(ev.delta_y as f32 * 4.0, 0.0);
-            } else {
-                this.canvas_demo
-                    .sheet_model
-                    .scroll_by(ev.delta_x as f32 * 3.0, ev.delta_y as f32 * 4.0);
-            }
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_sheet_drag = cx.listener(|this, ev: DragEvent, acx| {
-            let _ = this.canvas_demo.sheet_model.commit_edit();
-            if let Some(cell) = this
-                .canvas_demo
-                .sheet_model
-                .hit_test_cell(ev.local_x, ev.local_y)
-            {
-                let is_down = ev.delta_x == 0 && ev.delta_y == 0;
-                if is_down && !acx.modifiers().shift() {
-                    this.canvas_demo.sheet_model.selection = CellRange::single(cell);
-                } else {
-                    this.canvas_demo.sheet_model.selection.focus = cell;
-                }
-            }
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_sheet_key_nav = cx.listener(|this, key: KeyCode, acx| {
-            let extend = acx.modifiers().shift();
-            match key {
-                KeyCode::Up => this.canvas_demo.sheet_model.move_focus(-1, 0, extend),
-                KeyCode::Down => this.canvas_demo.sheet_model.move_focus(1, 0, extend),
-                KeyCode::Enter => {
-                    let _ = this.canvas_demo.sheet_model.commit_edit();
-                    this.canvas_demo.sheet_model.move_focus(1, 0, false);
-                }
-                KeyCode::Left => this.canvas_demo.sheet_model.move_focus(0, -1, extend),
-                KeyCode::Right => this.canvas_demo.sheet_model.move_focus(0, 1, extend),
-                _ => return,
-            }
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_sheet_key_input = cx.listener(|this, key: KeyCode, _| {
-            if this.canvas_demo.sheet_model.handle_key_input(key) {
-                this.event_count = this.event_count.saturating_add(1);
-            }
-        });
-        let on_plot_wheel = cx.listener(|this, ev: WheelEvent, _| {
-            let frac = (ev.local_x as f64 / ev.width.max(1) as f64).clamp(0.0, 1.0);
-            this.canvas_demo.plot_state.zoom_x(frac, ev.delta_y);
-            this.event_count = this.event_count.saturating_add(1);
-        });
-        let on_plot_drag = cx.listener(|this, ev: DragEvent, _| {
-            this.canvas_demo.plot_state.crosshair_local = Some((ev.local_x, ev.local_y));
-            if ev.delta_x != 0 {
-                this.canvas_demo
-                    .plot_state
-                    .pan_x(ev.delta_x as f32, ev.width as f32);
-                this.event_count = this.event_count.saturating_add(1);
-            }
-        });
-        let on_plot_move = cx.listener(|this, ev: DragEvent, _| {
-            this.canvas_demo.plot_state.crosshair_local = Some((ev.local_x, ev.local_y));
         });
 
         // 画布核心手势事件
@@ -1007,7 +805,6 @@ impl GalleryApp {
         });
         let on_click = cx.listener(|this, ev: ClickEvent, _acx| {
             let _ = ev;
-            // 若刚刚结束框选则清除橡皮筋框
             if this.canvas_demo.controller.marquee.is_some() {
                 this.canvas_demo.controller.marquee = None;
                 return;
@@ -1103,7 +900,6 @@ impl GalleryApp {
             .evaluate(self.canvas_demo.controller.viewport);
         let zoom_pct = (self.canvas_demo.controller.viewport.zoom * 100.0).round() as i32;
 
-        // 局部精确脏区投射（相机未动且单点改状态时仅重绘几十像素）
         let approx_bounds = Region::new(0, 0, CANVAS_VIEW_W, CANVAS_VIEW_H);
         let dirty_rects = self.canvas_demo.store.take_dirty_screen_rects(
             self.canvas_demo.controller.viewport,
@@ -1125,7 +921,6 @@ impl GalleryApp {
             &[]
         };
 
-        // 软件后端自定义着色器降级回调（淡蓝同心声波背景）
         let sw_fallback = cx.arena().alloc(move |painter: &mut dyn SurfacePainter, _vp: Viewport2D| {
             let b = painter.bounds();
             let c = painter.clip();
@@ -1166,7 +961,6 @@ impl GalleryApp {
         .on_click(on_click)
         .on_key_nav(on_key_nav);
 
-        // 世界坐标锚定悬浮 Tooltip（吸附在当前悬停或焦点座位/集装箱上方）
         if let Some(active_idx) = self
             .canvas_demo
             .store
@@ -1222,7 +1016,6 @@ impl GalleryApp {
             }
         }
 
-        // 右下角共享同一个 SceneStore 的全景 Minimap 鹰眼
         let minimap = div()
             .pos(CANVAS_VIEW_W - 156, CANVAS_VIEW_H - 102)
             .child(
@@ -1326,322 +1119,507 @@ impl GalleryApp {
                 ),
             );
 
-        let suite_tabs = div()
-            .flex_row()
-            .flex_wrap()
-            .gap(8)
-            .items_center()
-            .child(
-                cx,
-                Button::new(7120, "2D Scene (OBB)")
-                    .small()
-                    .selected(self.canvas_demo.suite_mode == CanvasSuiteMode::Scene2D)
-                    .on_click(on_suite_scene),
-            )
-            .child(
-                cx,
-                Button::new(7121, "AI NodeGraph")
-                    .small()
-                    .selected(self.canvas_demo.suite_mode == CanvasSuiteMode::NodeGraph)
-                    .on_click(on_suite_graph),
-            )
-            .child(
-                cx,
-                Button::new(7122, "1M SheetGrid")
-                    .small()
-                    .selected(self.canvas_demo.suite_mode == CanvasSuiteMode::SheetGrid)
-                    .on_click(on_suite_sheet),
-            )
-            .child(
-                cx,
-                Button::new(7123, "100k LTTB Plot")
-                    .small()
-                    .selected(self.canvas_demo.suite_mode == CanvasSuiteMode::RealtimePlot)
-                    .on_click(on_suite_plot),
+        div()
+            .flex_col()
+            .gap(12)
+            .child(cx, toolbar)
+            .child(cx, canvas_widget)
+            .child(cx, status_row)
+            .into_element(cx)
+    }
+
+    #[inline(never)]
+    fn render_canvas_node_graph_section<'a>(
+        &self,
+        cx: &'a Scope<Self>,
+        theme: CoreTheme,
+    ) -> Element<'a> {
+        let on_graph_auto_layout = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.node_graph.auto_layout_layered(56.0, 26.0);
+            let wb = this.canvas_demo.node_graph.world_bounds();
+            this.canvas_demo.graph_controller.fit_bounds(
+                wb,
+                CANVAS_VIEW_W as f32,
+                (CANVAS_VIEW_H - 36) as f32,
+                24.0,
             );
+            this.canvas_demo.graph_status = String::from("Auto-laid out DAG layers");
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_graph_add_node = cx.listener(|this, _: ClickEvent, _| {
+            let n = this.canvas_demo.node_graph.nodes.len() as f32;
+            let nid = this
+                .canvas_demo
+                .node_graph
+                .spawn_tool_node(160.0 + (n % 4.0) * 140.0, 290.0 + (n / 4.0).floor() * 48.0);
+            this.canvas_demo.graph_status = format!("Spawned node #{} — drag it or wire ports!", nid.0);
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_graph_undo = cx.listener(|this, _: ClickEvent, _| {
+            if this.canvas_demo.node_graph.undo() {
+                this.canvas_demo.graph_status = String::from("Undid last graph command");
+                this.event_count = this.event_count.saturating_add(1);
+            }
+        });
+        let on_graph_redo = cx.listener(|this, _: ClickEvent, _| {
+            if this.canvas_demo.node_graph.redo() {
+                this.canvas_demo.graph_status = String::from("Redid graph command");
+                this.event_count = this.event_count.saturating_add(1);
+            }
+        });
+        let on_graph_collapse = cx.listener(|this, _: ClickEvent, _| {
+            let target = this
+                .canvas_demo
+                .node_graph
+                .selected_node()
+                .or_else(|| this.canvas_demo.node_graph.nodes.first().map(|n| n.id));
+            if let Some(nid) = target {
+                this.canvas_demo.node_graph.toggle_collapse(nid);
+                this.canvas_demo.graph_status = format!("Toggled collapse on node #{}", nid.0);
+                this.event_count = this.event_count.saturating_add(1);
+            }
+        });
+        let on_graph_del_edge = cx.listener(|this, _: ClickEvent, _| {
+            let eid = this
+                .canvas_demo
+                .node_graph
+                .selected_edge
+                .or(this.canvas_demo.node_graph.hovered_edge)
+                .or_else(|| this.canvas_demo.node_graph.edges.last().map(|e| e.id));
+            if let Some(id) = eid {
+                if this.canvas_demo.node_graph.disconnect(id) {
+                    this.canvas_demo.node_graph.selected_edge = None;
+                    this.canvas_demo.graph_status = format!("Deleted Bezier edge #{id} (Undo supported)");
+                    this.event_count = this.event_count.saturating_add(1);
+                }
+            }
+        });
+        let on_graph_fit = cx.listener(|this, _: ClickEvent, _| {
+            let wb = this.canvas_demo.node_graph.world_bounds();
+            this.canvas_demo.graph_controller.fit_bounds(
+                wb,
+                CANVAS_VIEW_W as f32,
+                (CANVAS_VIEW_H - 36) as f32,
+                24.0,
+            );
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_graph_wheel = cx.listener(|this, ev: WheelEvent, acx| {
+            let _ = this.canvas_demo.graph_controller.handle_wheel(
+                ev.local_x,
+                ev.local_y,
+                ev.delta_y,
+                acx.now_ms(),
+            );
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_graph_drag = cx.listener(|this, ev: DragEvent, _| {
+            let msg = this
+                .canvas_demo
+                .node_graph
+                .handle_drag(ev, &mut this.canvas_demo.graph_controller);
+            this.canvas_demo.graph_status = String::from(msg);
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_graph_move = cx.listener(|this, ev: DragEvent, acx| {
+            let vp = this.canvas_demo.graph_controller.viewport;
+            if !this
+                .canvas_demo
+                .node_graph
+                .handle_pointer_move(ev.local_x, ev.local_y, vp)
+            {
+                acx.skip_notify();
+            }
+        });
+        let on_graph_click = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.node_graph.finish_pointer_interaction();
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_graph_rclick = cx.listener(|this, ev: ClickEvent, _| {
+            let vp = this.canvas_demo.graph_controller.viewport;
+            let (lx, ly) = vp.world_to_local(
+                this.canvas_demo.node_graph.cursor_world.0,
+                this.canvas_demo.node_graph.cursor_world.1,
+            );
+            let _ = ev;
+            let msg = this
+                .canvas_demo
+                .node_graph
+                .handle_secondary_click(lx.round() as i16, ly.round() as i16, vp);
+            this.canvas_demo.graph_status = String::from(msg);
+            this.event_count = this.event_count.saturating_add(1);
+        });
 
-        if self.canvas_demo.suite_mode == CanvasSuiteMode::RealtimePlot
-            && self.canvas_demo.plot_live_stream
-        {
-            self.canvas_demo.plot_stream_tick = self.canvas_demo.plot_stream_tick.wrapping_add(1);
-            let seed = self.canvas_demo.plot_stream_tick;
-            self.canvas_demo.plot_state.push_live_batch(seed);
-            cx.request_frame();
-        }
-
-        let main_viewport_el: Element<'a> = match self.canvas_demo.suite_mode {
-            CanvasSuiteMode::Scene2D => canvas_widget.into_element(cx),
-            CanvasSuiteMode::NodeGraph => {
-                let pulse = ((cx.now_ms() % 2400) as f32) / 2400.0;
+        let pulse = ((cx.now_ms() % 2400) as f32) / 2400.0;
+        div()
+            .flex_col()
+            .gap(8)
+            .child(
+                cx,
                 div()
-                    .flex_col()
-                    .gap(8)
-                    .child(
-                        cx,
-                        div()
-                            .flex_row()
-                            .flex_wrap()
-                            .gap(6)
-                            .items_center()
-                            .child(
-                                cx,
-                                Button::new(7132, "+ Add Node")
-                                    .small()
-                                    .on_click(on_graph_add_node),
-                            )
-                            .child(
-                                cx,
-                                Button::new(7130, "Auto Layout")
-                                    .small()
-                                    .on_click(on_graph_auto_layout),
-                            )
-                            .child(
-                                cx,
-                                Button::new(7133, "Undo")
-                                    .small()
-                                    .ghost()
-                                    .on_click(on_graph_undo),
-                            )
-                            .child(
-                                cx,
-                                Button::new(7134, "Redo")
-                                    .small()
-                                    .ghost()
-                                    .on_click(on_graph_redo),
-                            )
-                            .child(
-                                cx,
-                                Button::new(7135, "Collapse")
-                                    .small()
-                                    .ghost()
-                                    .on_click(on_graph_collapse),
-                            )
-                            .child(
-                                cx,
-                                Button::new(7136, "Delete Edge")
-                                    .small()
-                                    .ghost()
-                                    .on_click(on_graph_del_edge),
-                            )
-                            .child(
-                                cx,
-                                Button::new(7137, "Fit")
-                                    .small()
-                                    .ghost()
-                                    .on_click(on_graph_fit),
-                            )
-                            .child(
-                                cx,
-                                state_pill(
-                                    cx,
-                                    theme,
-                                    fmt!(
-                                        cx,
-                                        "Nodes: {} | Edges: {}",
-                                        self.canvas_demo.node_graph.nodes.len(),
-                                        self.canvas_demo.node_graph.edges.len()
-                                    ),
-                                ),
-                            ),
-                    )
-                    .child(
-                        cx,
-                        NodeGraphView::new(
-                            7131,
-                            CANVAS_VIEW_W,
-                            CANVAS_VIEW_H - 58,
-                            &self.canvas_demo.node_graph,
-                            &self.canvas_demo.graph_controller,
-                        )
-                        .pulse_phase(pulse)
-                        .on_wheel(on_graph_wheel)
-                        .on_drag(on_graph_drag)
-                        .on_pointer_move(on_graph_move)
-                        .on_click(on_graph_click)
-                        .on_secondary_click(on_graph_rclick),
-                    )
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(6)
+                    .items_center()
+                    .child(cx, Button::new(7132, "+ Add Node").small().on_click(on_graph_add_node))
+                    .child(cx, Button::new(7130, "Auto Layout").small().on_click(on_graph_auto_layout))
+                    .child(cx, Button::new(7133, "Undo").small().ghost().on_click(on_graph_undo))
+                    .child(cx, Button::new(7134, "Redo").small().ghost().on_click(on_graph_redo))
+                    .child(cx, Button::new(7135, "Collapse").small().ghost().on_click(on_graph_collapse))
+                    .child(cx, Button::new(7136, "Delete Edge").small().ghost().on_click(on_graph_del_edge))
+                    .child(cx, Button::new(7137, "Fit").small().ghost().on_click(on_graph_fit))
                     .child(
                         cx,
                         state_pill(
                             cx,
                             theme,
-                            cx.arena().alloc_str(&self.canvas_demo.graph_status).as_str(),
-                        ),
-                    )
-                    .into_element(cx)
-            }
-            CanvasSuiteMode::SheetGrid => {
-                let focus = self.canvas_demo.sheet_model.selection.focus;
-                let fx_raw = self
-                    .canvas_demo
-                    .sheet_model
-                    .raw_formula_or_text(focus.row, focus.col);
-                let fx_label = fmt!(
-                    cx,
-                    "fx {}{}: {}",
-                    col_index_to_label(focus.col),
-                    focus.row + 1,
-                    fx_raw
-                );
-                div()
-                    .flex_col()
-                    .gap(8)
-                    .child(
-                        cx,
-                        div()
-                            .flex_row()
-                            .flex_wrap()
-                            .gap(6)
-                            .items_center()
-                            .child(
+                            fmt!(
                                 cx,
-                                Button::new(7140, "Jump #500k")
-                                    .small()
-                                    .on_click(on_sheet_jump_500k),
-                            )
-                            .child(
-                                cx,
-                                Button::new(7141, "Formulas (Row 1)")
-                                    .small()
-                                    .ghost()
-                                    .on_click(on_sheet_jump_top),
-                            )
-                            .child(
-                                cx,
-                                Button::new(7143, "Fill Down")
-                                    .small()
-                                    .on_click(on_sheet_fill_down),
-                            )
-                            .child(
-                                cx,
-                                Button::new(7144, "+10 Value")
-                                    .small()
-                                    .on_click(on_sheet_bump_val),
-                            )
-                            .child(
-                                cx,
-                                Button::new(7145, "Cols <")
-                                    .small()
-                                    .ghost()
-                                    .on_click(on_sheet_scroll_left),
-                            )
-                            .child(
-                                cx,
-                                Button::new(7146, "Cols >")
-                                    .small()
-                                    .ghost()
-                                    .on_click(on_sheet_scroll_right),
-                            )
-                            .child(cx, state_pill(cx, theme, fx_label)),
-                    )
-                    .child(
-                        cx,
-                        SheetGrid::new(
-                            7142,
-                            CANVAS_VIEW_W,
-                            CANVAS_VIEW_H - 36,
-                            &self.canvas_demo.sheet_model,
-                        )
-                        .on_wheel(on_sheet_wheel)
-                        .on_drag(on_sheet_drag)
-                        .on_key_nav(on_sheet_key_nav)
-                        .on_key_input(on_sheet_key_input),
-                    )
-                    .into_element(cx)
-            }
-            CanvasSuiteMode::RealtimePlot => div()
-                .flex_col()
-                .gap(8)
-                .child(
-                    cx,
-                    div()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap(6)
-                        .items_center()
-                        .child(
-                            cx,
-                            Button::new(
-                                7150,
-                                if self.canvas_demo.plot_candles {
-                                    "100k LTTB Wave"
-                                } else {
-                                    "OHLC Candles"
-                                },
-                            )
-                            .small()
-                            .on_click(on_plot_toggle_candles),
-                        )
-                        .child(
-                            cx,
-                            Button::new(
-                                7152,
-                                if self.canvas_demo.plot_live_stream {
-                                    "Stop Live Stream"
-                                } else {
-                                    "Live Stream"
-                                },
-                            )
-                            .small()
-                            .selected(self.canvas_demo.plot_live_stream)
-                            .on_click(on_plot_toggle_live),
-                        )
-                        .child(
-                            cx,
-                            Button::new(7153, "+Spike Burst")
-                                .small()
-                                .ghost()
-                                .on_click(on_plot_spike),
-                        )
-                        .child(
-                            cx,
-                            Button::new(7154, "Reset Zoom")
-                                .small()
-                                .ghost()
-                                .on_click(on_plot_reset_zoom),
-                        )
-                        .child(
-                            cx,
-                            state_pill(
-                                cx,
-                                theme,
-                                fmt!(
-                                    cx,
-                                    "Pts: {} | Window: {:.0}%..{:.0}% (Wheel Zoom · Drag Pan)",
-                                    self.canvas_demo.plot_state.total_points(),
-                                    self.canvas_demo.plot_state.x_window.0 * 100.0,
-                                    self.canvas_demo.plot_state.x_window.1 * 100.0
-                                ),
+                                "Nodes: {} | Edges: {}",
+                                self.canvas_demo.node_graph.nodes.len(),
+                                self.canvas_demo.node_graph.edges.len()
                             ),
                         ),
+                    ),
+            )
+            .child(
+                cx,
+                NodeGraphView::new(
+                    7131,
+                    CANVAS_VIEW_W,
+                    CANVAS_VIEW_H - 58,
+                    &self.canvas_demo.node_graph,
+                    &self.canvas_demo.graph_controller,
                 )
-                .child(
+                .pulse_phase(pulse)
+                .on_wheel(on_graph_wheel)
+                .on_drag(on_graph_drag)
+                .on_pointer_move(on_graph_move)
+                .on_click(on_graph_click)
+                .on_secondary_click(on_graph_rclick),
+            )
+            .child(
+                cx,
+                state_pill(
                     cx,
-                    RealtimePlot::new(
-                        7151,
-                        CANVAS_VIEW_W,
-                        CANVAS_VIEW_H - 36,
-                        &self.canvas_demo.plot_state,
-                    )
-                    .show_candles(self.canvas_demo.plot_candles)
-                    .on_wheel(on_plot_wheel)
-                    .on_drag(on_plot_drag)
-                    .on_pointer_move(on_plot_move),
+                    theme,
+                    cx.arena().alloc_str(&self.canvas_demo.graph_status).as_str(),
+                ),
+            )
+            .into_element(cx)
+    }
+
+    #[inline(never)]
+    fn render_canvas_sheet_grid_section<'a>(
+        &self,
+        cx: &'a Scope<Self>,
+        theme: CoreTheme,
+    ) -> Element<'a> {
+        let on_sheet_jump_500k = cx.listener(|this, _: ClickEvent, _| {
+            let _ = this.canvas_demo.sheet_model.commit_edit();
+            this.canvas_demo.sheet_model.jump_to_row(500_000);
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_sheet_jump_top = cx.listener(|this, _: ClickEvent, _| {
+            let _ = this.canvas_demo.sheet_model.commit_edit();
+            this.canvas_demo.sheet_model.jump_to_row(0);
+            this.canvas_demo.sheet_model.scroll_x = 0.0;
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_sheet_fill_down = cx.listener(|this, _: ClickEvent, _| {
+            let _ = this.canvas_demo.sheet_model.commit_edit();
+            let n = this.canvas_demo.sheet_model.fill_selection_down();
+            this.canvas_demo.suite_feedback = if n > 0 {
+                format!("Sheet Fill-Down populated {n} cell(s) & recalculated formulas")
+            } else {
+                String::from("Drag across >=2 rows first, then click Fill Down")
+            };
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_sheet_bump_val = cx.listener(|this, _: ClickEvent, _| {
+            let _ = this.canvas_demo.sheet_model.commit_edit();
+            let f = this.canvas_demo.sheet_model.selection.focus;
+            let cur = this.canvas_demo.sheet_model.eval_number(f.row, f.col).unwrap_or(0.0);
+            this.canvas_demo.sheet_model.set_number(f.row, f.col, cur + 10.0);
+            this.canvas_demo.suite_feedback = format!(
+                "Updated {}{} = {:.2} (dependent =SUM/=AVG updated live)",
+                col_index_to_label(f.col),
+                f.row + 1,
+                cur + 10.0
+            );
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_sheet_scroll_left = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.sheet_model.scroll_by(-192.0, 0.0);
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_sheet_scroll_right = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.sheet_model.scroll_by(192.0, 0.0);
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_sheet_wheel = cx.listener(|this, ev: WheelEvent, acx| {
+            if acx.modifiers().shift() {
+                this.canvas_demo
+                    .sheet_model
+                    .scroll_by(ev.delta_y as f32 * 4.0, 0.0);
+            } else {
+                this.canvas_demo
+                    .sheet_model
+                    .scroll_by(ev.delta_x as f32 * 3.0, ev.delta_y as f32 * 4.0);
+            }
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_sheet_drag = cx.listener(|this, ev: DragEvent, acx| {
+            let _ = this.canvas_demo.sheet_model.commit_edit();
+            if let Some(cell) = this
+                .canvas_demo
+                .sheet_model
+                .hit_test_cell(ev.local_x, ev.local_y)
+            {
+                let is_down = ev.delta_x == 0 && ev.delta_y == 0;
+                if is_down && !acx.modifiers().shift() {
+                    this.canvas_demo.sheet_model.selection = CellRange::single(cell);
+                } else {
+                    this.canvas_demo.sheet_model.selection.focus = cell;
+                }
+            }
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_sheet_key_nav = cx.listener(|this, key: KeyCode, acx| {
+            let extend = acx.modifiers().shift();
+            match key {
+                KeyCode::Up => this.canvas_demo.sheet_model.move_focus(-1, 0, extend),
+                KeyCode::Down => this.canvas_demo.sheet_model.move_focus(1, 0, extend),
+                KeyCode::Enter => {
+                    let _ = this.canvas_demo.sheet_model.commit_edit();
+                    this.canvas_demo.sheet_model.move_focus(1, 0, false);
+                }
+                KeyCode::Left => this.canvas_demo.sheet_model.move_focus(0, -1, extend),
+                KeyCode::Right => this.canvas_demo.sheet_model.move_focus(0, 1, extend),
+                _ => return,
+            }
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_sheet_key_input = cx.listener(|this, key: KeyCode, _| {
+            if this.canvas_demo.sheet_model.handle_key_input(key) {
+                this.event_count = this.event_count.saturating_add(1);
+            }
+        });
+
+        let focus = self.canvas_demo.sheet_model.selection.focus;
+        let fx_raw = self
+            .canvas_demo
+            .sheet_model
+            .raw_formula_or_text(focus.row, focus.col);
+        let fx_label = fmt!(
+            cx,
+            "fx {}{}: {}",
+            col_index_to_label(focus.col),
+            focus.row + 1,
+            fx_raw
+        );
+        div()
+            .flex_col()
+            .gap(8)
+            .child(
+                cx,
+                div()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(6)
+                    .items_center()
+                    .child(cx, Button::new(7140, "Jump #500k").small().on_click(on_sheet_jump_500k))
+                    .child(cx, Button::new(7141, "Formulas (Row 1)").small().ghost().on_click(on_sheet_jump_top))
+                    .child(cx, Button::new(7143, "Fill Down").small().on_click(on_sheet_fill_down))
+                    .child(cx, Button::new(7144, "+10 Value").small().on_click(on_sheet_bump_val))
+                    .child(cx, Button::new(7145, "Cols <").small().ghost().on_click(on_sheet_scroll_left))
+                    .child(cx, Button::new(7146, "Cols >").small().ghost().on_click(on_sheet_scroll_right))
+                    .child(cx, state_pill(cx, theme, fx_label)),
+            )
+            .child(
+                cx,
+                SheetGrid::new(
+                    7142,
+                    CANVAS_VIEW_W,
+                    CANVAS_VIEW_H - 36,
+                    &self.canvas_demo.sheet_model,
                 )
-                .into_element(cx),
-        };
+                .on_wheel(on_sheet_wheel)
+                .on_drag(on_sheet_drag)
+                .on_key_nav(on_sheet_key_nav)
+                .on_key_input(on_sheet_key_input),
+            )
+            .into_element(cx)
+    }
+
+    #[inline(never)]
+    fn render_canvas_realtime_plot_section<'a>(
+        &self,
+        cx: &'a Scope<Self>,
+        theme: CoreTheme,
+    ) -> Element<'a> {
+        let on_plot_toggle_candles = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.plot_candles = !this.canvas_demo.plot_candles;
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_plot_toggle_live = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.plot_live_stream = !this.canvas_demo.plot_live_stream;
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_plot_spike = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.plot_state.inject_spike_burst();
+            this.canvas_demo.suite_feedback =
+                String::from("Injected +512 high-frequency spikes into 100k RingSeries (LTTB preserved)");
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_plot_reset_zoom = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.plot_state.reset_zoom();
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_plot_wheel = cx.listener(|this, ev: WheelEvent, _| {
+            let frac = (ev.local_x as f64 / ev.width.max(1) as f64).clamp(0.0, 1.0);
+            this.canvas_demo.plot_state.zoom_x(frac, ev.delta_y);
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_plot_drag = cx.listener(|this, ev: DragEvent, _| {
+            this.canvas_demo.plot_state.crosshair_local = Some((ev.local_x, ev.local_y));
+            if ev.delta_x != 0 {
+                this.canvas_demo
+                    .plot_state
+                    .pan_x(ev.delta_x as f32, ev.width as f32);
+                this.event_count = this.event_count.saturating_add(1);
+            }
+        });
+        let on_plot_move = cx.listener(|this, ev: DragEvent, _| {
+            this.canvas_demo.plot_state.crosshair_local = Some((ev.local_x, ev.local_y));
+        });
+
+        div()
+            .flex_col()
+            .gap(8)
+            .child(
+                cx,
+                div()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(6)
+                    .items_center()
+                    .child(
+                        cx,
+                        Button::new(
+                            7150,
+                            if self.canvas_demo.plot_candles {
+                                "100k LTTB Wave"
+                            } else {
+                                "OHLC Candles"
+                            },
+                        )
+                        .small()
+                        .on_click(on_plot_toggle_candles),
+                    )
+                    .child(
+                        cx,
+                        Button::new(
+                            7152,
+                            if self.canvas_demo.plot_live_stream {
+                                "Stop Live Stream"
+                            } else {
+                                "Live Stream"
+                            },
+                        )
+                        .small()
+                        .selected(self.canvas_demo.plot_live_stream)
+                        .on_click(on_plot_toggle_live),
+                    )
+                    .child(cx, Button::new(7153, "+Spike Burst").small().ghost().on_click(on_plot_spike))
+                    .child(cx, Button::new(7154, "Reset Zoom").small().ghost().on_click(on_plot_reset_zoom))
+                    .child(
+                        cx,
+                        state_pill(
+                            cx,
+                            theme,
+                            fmt!(
+                                cx,
+                                "Pts: {} | Window: {:.0}%..{:.0}% (Wheel Zoom · Drag Pan)",
+                                self.canvas_demo.plot_state.total_points(),
+                                self.canvas_demo.plot_state.x_window.0 * 100.0,
+                                self.canvas_demo.plot_state.x_window.1 * 100.0
+                            ),
+                        ),
+                    ),
+            )
+            .child(
+                cx,
+                RealtimePlot::new(
+                    7151,
+                    CANVAS_VIEW_W,
+                    CANVAS_VIEW_H - 36,
+                    &self.canvas_demo.plot_state,
+                )
+                .show_candles(self.canvas_demo.plot_candles)
+                .on_wheel(on_plot_wheel)
+                .on_drag(on_plot_drag)
+                .on_pointer_move(on_plot_move),
+            )
+            .into_element(cx)
+    }
+
+    #[inline(never)]
+    fn render_canvas_glass_bar<'a>(&self, cx: &'a Scope<Self>, theme: CoreTheme) -> Div<'a> {
+        let on_inline_cite = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.inline_cite_clicks = this.canvas_demo.inline_cite_clicks.saturating_add(1);
+            this.canvas_demo.suite_feedback = format!(
+                "InlineFlow interactive widget triggered #{}",
+                this.canvas_demo.inline_cite_clicks
+            );
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_mcp_ping = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.suite_feedback = format!(
+                "MCP JSON-RPC 2.0 Ready: 6 tools (snapshot/click/fill/scroll/wait_idle) · {} events",
+                this.event_count + 1
+            );
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_hot_style_reload = cx.listener(|this, _: ClickEvent, _| {
+            this.canvas_demo.hot_style_preset = (this.canvas_demo.hot_style_preset + 1) % 3;
+            let sheet = match this.canvas_demo.hot_style_preset {
+                1 => "7165: pad=14 rounded=16 bg=#0F2942 border=#38BDF8\n",
+                2 => "7165: pad=16 rounded=8 bg=#2B124C border=#C084FC\n",
+                _ => "7165: pad=12 rounded=12 bg=#111827 border=#3B82F6\n",
+            };
+            let n = this.canvas_demo.live_overrides.load_hot_reload_sheet(sheet);
+            this.canvas_demo.suite_feedback = format!(
+                "Hot Style Reload applied ({n} rule, rev #{}) — 0ms recompile, PodPool state intact!",
+                this.canvas_demo.live_overrides.revision()
+            );
+            this.event_count = this.event_count.saturating_add(1);
+        });
+        let on_vlxrec_snap = cx.listener(|this, _: ClickEvent, _| {
+            let mut rec = EventRecorder::new();
+            rec.steps.push(RecordedStep {
+                dt_ms: 16,
+                event: RecordedEvent::Tick,
+                state_checksum: 0x564C_5831u64 ^ (this.event_count as u64),
+            });
+            let txt = rec.to_vlxrec_text();
+            let first_len = txt.len();
+            this.canvas_demo.suite_feedback = format!(
+                ".vlxrec deterministic snapshot exported ({first_len} bytes, checksum verified)"
+            );
+            this.event_count = this.event_count.saturating_add(1);
+        });
 
         let mut glass_inline_bar = liquid_glass_panel(&theme, 12)
             .id(7165)
             .flex_col()
             .gap(6)
             .w(CANVAS_VIEW_W);
-        // 实时应用 LiveStyleOverrides 热重载样式表（点击 Hot Style Reload 零编译热生效！）
         let _ = self
             .canvas_demo
             .live_overrides
             .apply_to_style(7165, glass_inline_bar.style_mut());
-        glass_inline_bar = glass_inline_bar
+        glass_inline_bar
             .child(
                 cx,
                 inline_flow()
@@ -1686,30 +1664,6 @@ impl GalleryApp {
                 text(cx.arena().alloc_str(&self.canvas_demo.suite_feedback).as_str())
                     .size(11)
                     .color(theme.muted_foreground),
-            );
-
-        let mut page = div()
-            .flex_col()
-            .w_full()
-            .gap(12)
-            .child(
-                cx,
-                story_header(
-                    cx,
-                    theme,
-                    "Pro 2D Canvas Suite (OBB SDF · NodeGraph · 1M Sheet · 100k Plot)",
-                    "Hilbert RTree, AI DAG NodeGraph, 1,000,000-row virtual spreadsheet, 100k LTTB plot, LiquidGlass & InlineFlow.",
-                    "velox_kit::canvas::{InteractiveCanvas, SceneStore, FlatRTree, Minimap}",
-                ),
             )
-            .child(cx, suite_tabs);
-        if self.canvas_demo.suite_mode == CanvasSuiteMode::Scene2D {
-            page = page.child(cx, toolbar);
-        }
-        page = page.child(cx, main_viewport_el);
-        if self.canvas_demo.suite_mode == CanvasSuiteMode::Scene2D {
-            page = page.child(cx, status_row);
-        }
-        page.child(cx, glass_inline_bar)
     }
 }

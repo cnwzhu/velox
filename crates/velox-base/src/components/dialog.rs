@@ -219,12 +219,14 @@ impl<'a> Widget<'a> for Dialog<'a> {
         if self.animated {
             panel = panel
                 .enter_from(255, 0, 14, Duration::from_millis(220))
-                .ease(Easing::EaseOutBack);
+                .ease(Easing::EaseOutBack)
+                .exit_to(0, 0, 14, Duration::from_millis(160));
         }
 
         panel = self.style_ext.apply_to_div(panel, self.style);
         if let Some(renderer) = self.backdrop_renderer {
             let mut backdrop = div()
+                .id(crate::scoped_child_id(self.id, 0xD1A0_BACC, 1))
                 .pos(0, 0)
                 .size_full()
                 .overlay()
@@ -234,7 +236,9 @@ impl<'a> Widget<'a> for Dialog<'a> {
                 .justify_center()
                 .child(cx, panel);
             if self.animated {
-                backdrop = backdrop.fade_in(Duration::from_millis(150));
+                backdrop = backdrop
+                    .fade_in(Duration::from_millis(150))
+                    .fade_out(Duration::from_millis(150));
             }
             if let Some(cb) = self.on_close {
                 backdrop = backdrop.on_click_raw(cb).on_navigate_back(cb);

@@ -387,18 +387,21 @@ impl WinitAppHandler {
         }
     }
 
-    /// 将当前焦点/输入框的逻辑坐标同步给操作系统输入法（IME），使候选窗跟随光标精准定位。
+    /// 将当前文本光标（优先 `.ime_caret()` 精确坐标，回退焦点框）同步给操作系统输入法（IME），使候选窗紧贴光标实时跟随。
     fn sync_ime_cursor_area(&mut self) {
         let Some(win) = &self.window else {
             return;
         };
-        let area = self.core.focused_bounds();
+        let area = self.core.ime_cursor_bounds();
         if area != self.last_ime_area {
             self.last_ime_area = area;
             if let Some(r) = area {
                 win.set_ime_cursor_area(
                     LogicalPosition::new(r.x.max(0) as f64, r.y.max(0) as f64),
-                    LogicalSize::new(r.w.max(1) as f64, r.h.max(1) as f64),
+                    LogicalSize::new(
+                        r.w.max(2) as f64,
+                        r.h.saturating_add(4).max(16) as f64,
+                    ),
                 );
             }
         }
@@ -909,7 +912,10 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppHandler {
             }
             WindowEvent::Ime(ime) => {
                 let changed = match ime {
-                    Ime::Enabled => self.core.dispatch_event(InputEvent::ImeEnabled),
+                    Ime::Enabled => {
+                        self.last_ime_area = None;
+                        self.core.dispatch_event(InputEvent::ImeEnabled)
+                    }
                     Ime::Disabled => self.core.dispatch_event(InputEvent::ImeDisabled),
                     Ime::Preedit(text, cursor) => self.core.dispatch_ime_preedit(&text, cursor),
                     Ime::Commit(text) => self.core.dispatch_ime_commit(&text),

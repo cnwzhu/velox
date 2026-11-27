@@ -327,6 +327,18 @@ impl<'a> Widget<'a> for Tabs<'a> {
         }
         bar = self.style_ext.apply_ext_only(bar);
 
+        // Underline 变体先在底部铺设单根贯穿全宽的 1px 细灰底轨，使选中项的 2px 原生弹簧蓝条平滑叠于其上，绝无双线或遮挡
+        if self.item_renderer.is_none() && self.underline_inactive_color != Color::TRANSPARENT {
+            bar = bar.child(
+                cx,
+                div()
+                    .pos(0, height - 1)
+                    .w_full()
+                    .h(1)
+                    .bg(self.underline_inactive_color),
+            );
+        }
+
         for (idx, &raw_label) in self.labels.iter().enumerate() {
             let is_active = idx == self.active;
             let disp_label = match self.label_formatter {
@@ -409,21 +421,18 @@ impl<'a> Widget<'a> for Tabs<'a> {
                 text(disp_label).size(font_sz).color(tab_fg).text_center().nowrap(),
             );
 
-            let ind_col = if is_active {
-                self.underline_active_color
-            } else {
-                self.underline_inactive_color
-            };
-            if ind_col != Color::TRANSPARENT {
-                let indicator_h = if is_active { 2 } else { 1 };
-                item = item.child(
-                    cx,
-                    div()
-                        .pos(0, height - indicator_h)
-                        .w_full()
-                        .h(indicator_h)
-                        .bg(ind_col),
-                );
+            if is_active && self.underline_active_color != Color::TRANSPARENT {
+                let mut active_line = div()
+                    .id(crate::scoped_child_id(self.id, 0x0C1D_591D, 1))
+                    .pos(0, height - 2)
+                    .w_full()
+                    .h(2)
+                    .rounded(1)
+                    .bg(self.underline_active_color);
+                if self.animated {
+                    active_line = active_line.spring_bounds(Duration::from_millis(220));
+                }
+                item = item.child(cx, active_line);
             }
 
             bar = bar.child(cx, item);

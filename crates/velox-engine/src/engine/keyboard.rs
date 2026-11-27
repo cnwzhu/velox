@@ -230,6 +230,15 @@ impl VeloxEngine {
             .map(|h| h.bounds)
     }
 
+    /// 获取供操作系统输入法（IME）候选框精准跟随的光标逻辑屏幕矩形：
+    /// 优先返回本帧 Pass 4 捕获的 `.ime_caret()` 精确光标位置，无显式光标节点时回退至 [`Self::focused_bounds`]。
+    #[inline]
+    pub fn ime_cursor_bounds(&self) -> Option<Region> {
+        self.motion
+            .ime_caret_bounds()
+            .or_else(|| self.focused_bounds())
+    }
+
     /// 判断当前焦点节点（或活跃热区）是否接受键盘文本输入。
     pub fn has_focused_text_input(&self) -> bool {
         let hits = self.cached_hit_regions();

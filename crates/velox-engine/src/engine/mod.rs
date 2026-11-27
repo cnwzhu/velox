@@ -112,6 +112,9 @@ pub struct VeloxEngine {
     repeat_accum_ms: u16,
     last_drag_vy: i16,
     last_arena_used_bytes: u32,
+    last_arena_peak_bytes: u32,
+    last_arena_truncations: u32,
+    total_arena_truncations: u32,
     modifiers: KeyModifiers,
     active_pointer_kind: PointerKind,
     ime_preedit: ImePreedit,
@@ -171,6 +174,9 @@ impl VeloxEngine {
             repeat_accum_ms: 0,
             last_drag_vy: 0,
             last_arena_used_bytes: 0,
+            last_arena_peak_bytes: 0,
+            last_arena_truncations: 0,
+            total_arena_truncations: 0,
             modifiers: KeyModifiers::NONE,
             active_pointer_kind: PointerKind::Touch,
             ime_preedit: ImePreedit::empty(),
@@ -451,6 +457,24 @@ impl VeloxEngine {
         self.dropped_draw_ops
     }
 
+    /// 获取最近一帧 `ScratchArena` 触及的峰值占用字节数（`#![no_std]` 下计入双端底/顶水位之和）。
+    #[inline(always)]
+    pub const fn last_arena_peak_bytes(&self) -> usize {
+        self.last_arena_peak_bytes as usize
+    }
+
+    /// 获取最近一帧 `ScratchArena` 发生静默截断（`alloc_str`/`alloc_fmt`）或临时切片空降级（`alloc_temp_iter_exact`）的次数。
+    #[inline(always)]
+    pub const fn last_arena_truncations(&self) -> u32 {
+        self.last_arena_truncations
+    }
+
+    /// 获取自引擎启动以来 `ScratchArena` 累计发生静默截断/空降级的总次数。
+    #[inline(always)]
+    pub const fn total_arena_truncations(&self) -> u32 {
+        self.total_arena_truncations
+    }
+
     /// 获取累计执行的完整布局求解次数（Pass 1~4，用于性能剖析与单帧条带缓存验证）。
     #[inline(always)]
     pub const fn layout_solve_count(&self) -> u32 {
@@ -669,6 +693,31 @@ impl VeloxEngine {
     pub fn motion_mut(&mut self) -> &mut MotionCache {
         self.interaction_dirty = true;
         &mut self.motion
+    }
+
+    /// 获取跨帧动画与滚动缓存池只读引用。
+    #[inline(always)]
+    pub const fn motion(&self) -> &MotionCache {
+        &self.motion
+    }
+
+    /// 配置无障碍「减弱动态效果」（联动关闭几何位移、橡皮筋越界回弹与幽灵滑出）。
+    #[inline]
+    pub fn set_reduced_motion(&mut self, reduced: bool) {
+        self.motion.set_reduced_motion(reduced);
+        self.interaction_dirty = true;
+    }
+
+    /// 查询当前是否开启了无障碍「减弱动态效果」。
+    #[inline(always)]
+    pub const fn reduced_motion(&self) -> bool {
+        self.motion.reduced_motion()
+    }
+
+    /// 查询当前正在执行零配置退场动画的幽灵节点数量。
+    #[inline]
+    pub fn active_ghost_count(&self) -> usize {
+        self.motion.active_ghost_count()
     }
 
     /// 获取最近一帧 `ScratchArena` 的峰值使用字节数。

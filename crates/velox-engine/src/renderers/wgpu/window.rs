@@ -602,7 +602,7 @@ impl WgpuWindowRenderer {
         self.renderer.unregister_external_texture(id)
     }
 
-    /// 调整 Swapchain 表面物理像素尺寸。
+    /// 调整 Swapchain 表面物理像素尺寸（窗口缩小时自动回收大于新视口的空闲离屏纹理）。
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -613,6 +613,37 @@ impl WgpuWindowRenderer {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
+        self.renderer.on_viewport_resized(width, height);
+    }
+
+    /// 后台化或内存压力时主动释放全部空闲离屏纹理与 SVG 遮罩显存。
+    #[inline]
+    pub fn trim_gpu_memory(&mut self) {
+        self.renderer.trim_gpu_memory();
+    }
+
+    /// 返回当前离屏图层纹理池占用的估算显存字节数。
+    #[inline]
+    pub fn layer_pool_bytes(&self) -> usize {
+        self.renderer.layer_pool_bytes()
+    }
+
+    /// 返回最近一帧增量上传至 GPU 实例缓冲的实际字节数。
+    #[inline]
+    pub fn last_uploaded_instance_bytes(&self) -> usize {
+        self.renderer.last_uploaded_instance_bytes()
+    }
+
+    /// 显式移除并释放指定 `SceneCanvas` 场景的常驻 GPU 显存缓冲。
+    #[inline]
+    pub fn remove_canvas_scene(&mut self, scene_id: crate::canvas_scene::StaticSceneId) -> bool {
+        self.renderer.remove_canvas_scene(scene_id)
+    }
+
+    /// 返回 `CanvasGpuEngine` 当前缓存的场景显存总字节数。
+    #[inline]
+    pub fn canvas_cache_bytes(&self) -> usize {
+        self.renderer.canvas_cache_bytes()
     }
 
     fn acquire_surface_texture(&self) -> Option<wgpu::SurfaceTexture> {

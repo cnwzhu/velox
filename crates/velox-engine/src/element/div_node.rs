@@ -14,6 +14,7 @@ const VIS_FLAG_HAS_BG_GRAD: u8 = 1 << 2;
 const VIS_FLAG_BG_GRAD_HORIZ: u8 = 1 << 3;
 const VIS_FLAG_ITEMS_BASELINE: u8 = 1 << 4;
 const VIS_ALIGN_SHIFT: u8 = 5;
+const VIS_ALIGN_IME_CARET: u8 = 7;
 pub(super) const FOCUS_BORDER_NONE: u8 = u8::MAX;
 
 #[inline(always)]
@@ -24,6 +25,7 @@ pub(super) const fn pack_visual_flags(
     bg_grad_horiz: bool,
     items_baseline: bool,
     align_self: Option<AlignItems>,
+    is_ime_caret: bool,
 ) -> u8 {
     let mut f = 0u8;
     if has_pos {
@@ -41,12 +43,16 @@ pub(super) const fn pack_visual_flags(
     if items_baseline {
         f |= VIS_FLAG_ITEMS_BASELINE;
     }
-    let align_code: u8 = match align_self {
-        None => 0,
-        Some(AlignItems::Stretch) => 1,
-        Some(AlignItems::Center) => 2,
-        Some(AlignItems::Start) => 3,
-        Some(AlignItems::End) => 4,
+    let align_code: u8 = if is_ime_caret {
+        VIS_ALIGN_IME_CARET
+    } else {
+        match align_self {
+            None => 0,
+            Some(AlignItems::Stretch) => 1,
+            Some(AlignItems::Center) => 2,
+            Some(AlignItems::Start) => 3,
+            Some(AlignItems::End) => 4,
+        }
     };
     f | (align_code << VIS_ALIGN_SHIFT)
 }
@@ -261,6 +267,12 @@ impl<'a> DivVisual<'a> {
             4 => Some(AlignItems::End),
             _ => None,
         }
+    }
+
+    /// 是否被标记为系统输入法（IME）文本光标锚点节点（零字节膨胀编码于 `extra_flags` 保留值）。
+    #[inline(always)]
+    pub const fn is_ime_caret(&self) -> bool {
+        (self.extra_flags >> VIS_ALIGN_SHIFT) == VIS_ALIGN_IME_CARET
     }
 
     #[inline(always)]
@@ -542,20 +554,31 @@ pub struct EnterFrom {
     pub dy: i16,
 }
 
-/// 声明式过渡动画属性配置。
+/// 元素从视图树移除（卸载）时的幽灵退场目标状态（自动保留上一帧 `DrawOp` 快照继续插值至目标状态后回收）。
+pub type ExitTo = EnterFrom;
+
+/// 声明式过渡动画属性配置（分配在 `ScratchArena` 冷路径，对常规 `DivNode`/`DivVisual` 零体积膨胀）。
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct TransitionSpec {
     /// 过渡动画时长（毫秒）。
     pub duration_ms: u16,
+    /// 独立的幽灵退场动画时长（毫秒；`0` 表示沿用 `duration_ms`，确保同时配置入场与退场时互不覆盖时长）。
+    pub exit_duration_ms: u16,
     /// 动画开始前的延迟（毫秒，对入场与每次属性变更均生效；循环动画仅首轮生效）。
     pub delay_ms: u16,
+    /// 容器级子项交错延迟步长（毫秒，`child_index * stagger_ms` 自动叠加到子节点动画延迟，借鉴 Anime.js `stagger`）。
+    pub stagger_ms: u16,
     /// 是否插值背景色与边框/文本颜色。
     pub animate_color: bool,
     /// 是否插值几何位置与尺寸（子树随容器位移同步平移）。
     pub animate_bounds: bool,
     /// 是否插值容器整体不透明度（`.opacity(...)` 变化时淡入淡出，作用于整个子树）。
     pub animate_opacity: bool,
-    /// 缓动曲线类型。
+    /// 容器级零配置自动动画（借鉴 AutoAnimate：自动赋予直接子节点重排 FLIP、淡入与幽灵快照退场）。
+    pub auto_animate: bool,
+    /// 是否将 FLIP 几何缩放与位移下沉到合成层 `Transform2D` 并自动逆缩放修正圆角（避免卡片缩放时多行文本反复折行抖动）。
+    pub flip_transform: bool,
+    /// 缓动曲线类型（`Easing::Spring` 在 `LoopMode::Once` 下自动启用定点数二阶速度继承弹簧）。
     pub easing: Easing,
     /// 循环模式（单次、无限循环、往复呼吸）。
     pub loop_mode: LoopMode,
@@ -563,6 +586,8 @@ pub struct TransitionSpec {
     pub pulse_from_bg: Option<Color>,
     /// 入场动画起始状态（元素首次出现时从该状态过渡至目标状态）。
     pub enter: Option<EnterFrom>,
+    /// 退场动画目标状态（元素从树中移除时自动保留幽灵快照过渡至此状态后回收）。
+    pub exit: Option<ExitTo>,
 }
 
 impl Default for TransitionSpec {
@@ -570,14 +595,19 @@ impl Default for TransitionSpec {
     fn default() -> Self {
         Self {
             duration_ms: 180,
+            exit_duration_ms: 0,
             delay_ms: 0,
+            stagger_ms: 0,
             animate_color: false,
             animate_bounds: false,
             animate_opacity: false,
+            auto_animate: false,
+            flip_transform: false,
             easing: Easing::EaseOut,
             loop_mode: LoopMode::Once,
             pulse_from_bg: None,
             enter: None,
+            exit: None,
         }
     }
 }

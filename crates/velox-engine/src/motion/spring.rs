@@ -96,6 +96,30 @@ impl Spring {
         }
     }
 
+    /// 以手势松手瞬时位置与速度（像素/秒）直接初始化并启动弹簧向 `target` 收敛（适用于 BottomSheet / Carousel / 越界回弹）。
+    #[inline]
+    pub fn from_gesture_velocity(
+        initial: f32,
+        target: f32,
+        velocity_px_per_sec: f32,
+        config: SpringConfig,
+    ) -> Self {
+        let mut sp = Self {
+            value: initial,
+            velocity: velocity_px_per_sec,
+            target,
+            config,
+            settled: false,
+        };
+        let eps = config.rest_eps.max(1e-4);
+        if abs_f32(initial - target) <= eps && abs_f32(velocity_px_per_sec) <= eps * 10.0 {
+            sp.value = target;
+            sp.velocity = 0.0;
+            sp.settled = true;
+        }
+        sp
+    }
+
     /// 获取当前实时浮点值。
     #[inline(always)]
     pub const fn value(&self) -> f32 {
@@ -209,4 +233,37 @@ impl Spring {
         }
         self.value
     }
+}
+
+/// `@use-gesture` / iOS 风格双曲橡皮筋阻尼映射：
+/// `f(d, D, c) = (d * D * c) / (D + c * |d|)`。
+///
+/// - `distance`：越界原始拖拽距离（可正可负）；
+/// - `dimension`：视口/面板特征尺寸（如容器高度或宽度，px）；
+/// - `constant`：弹性系数（经典默认 `0.15` ~ `0.55`，越大越松软）。
+#[inline]
+pub fn rubberband(distance: f32, dimension: f32, constant: f32) -> f32 {
+    let dim = dimension.max(1.0);
+    let c = constant.clamp(0.0, 1.0);
+    if c == 0.0 || distance == 0.0 {
+        return 0.0;
+    }
+    let abs_d = abs_f32(distance);
+    (distance * dim * c) / (dim + c * abs_d)
+}
+
+/// 无浮点纯整数双曲橡皮筋阻尼（`constant_q8`: `0..=256`，默认 `0.55 ≈ 140` 或 `0.15 ≈ 38`），适合 `#![no_std]` 无 FPU 平台。
+#[inline]
+pub fn rubberband_i16(distance: i16, dimension: i16, constant_q8: u16) -> i16 {
+    let d = distance as i64;
+    let dim = (dimension.max(1)) as i64;
+    let c = (constant_q8.min(256)) as i64;
+    if d == 0 || c == 0 {
+        return 0;
+    }
+    let abs_d = d.abs();
+    // num = d * dim * c; den = (dim << 8) + c * abs_d
+    let num = d * dim * c;
+    let den = (dim << 8) + c * abs_d;
+    (num / den.max(1)).clamp(i16::MIN as i64, i16::MAX as i64) as i16
 }

@@ -311,6 +311,7 @@ pub struct ContextMenu<'a> {
     pub x: i16,
     pub y: i16,
     pub open: bool,
+    pub animated: bool,
     pub menu: Menu<'a>,
     pub on_dismiss: Option<&'a dyn Fn(&mut ActionScope)>,
 }
@@ -326,9 +327,17 @@ impl<'a> ContextMenu<'a> {
             x,
             y,
             open,
+            animated: false,
             menu,
             on_dismiss: None,
         }
+    }
+
+    /// 启用或禁用上下文菜单开关过渡动画。
+    #[inline(always)]
+    pub const fn animated(mut self, enabled: bool) -> Self {
+        self.animated = enabled;
+        self
     }
 
     /// 设置上下文菜单宽度。
@@ -384,10 +393,16 @@ impl<'a> Widget<'a> for ContextMenu<'a> {
             return div().id(self.id).w(0).h(0).into_element(cx);
         }
         if let Some(dismiss) = self.on_dismiss {
-            let menu_box = div()
+            let mut menu_box = div()
+                .id(crate::scoped_child_id(self.id, 0xC7E0_BD01, 2))
                 .pos(self.x.max(4), self.y.max(4))
-                .occlude_hit()
-                .child(cx, self.menu);
+                .occlude_hit();
+            if self.animated {
+                menu_box = menu_box
+                    .slide_in(0, -6, Duration::from_millis(130))
+                    .slide_out(0, -6, Duration::from_millis(110));
+            }
+            menu_box = menu_box.child(cx, self.menu);
             div()
                 .id(crate::scoped_child_id(self.id, 0xC7E0_BD01, 1))
                 .pos(0, 0)
@@ -402,12 +417,17 @@ impl<'a> Widget<'a> for ContextMenu<'a> {
                 .child(cx, menu_box)
                 .into_element(cx)
         } else {
-            div()
+            let mut menu_box = div()
+                .id(crate::scoped_child_id(self.id, 0xC7E0_BD01, 2))
                 .pos(self.x.max(4), self.y.max(4))
                 .overlay()
-                .occlude_hit()
-                .child(cx, self.menu)
-                .into_element(cx)
+                .occlude_hit();
+            if self.animated {
+                menu_box = menu_box
+                    .slide_in(0, -6, Duration::from_millis(130))
+                    .slide_out(0, -6, Duration::from_millis(110));
+            }
+            menu_box.child(cx, self.menu).into_element(cx)
         }
     }
 }

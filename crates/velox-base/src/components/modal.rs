@@ -184,14 +184,17 @@ impl<'a> Widget<'a> for Modal<'a> {
         if self.animated {
             card = card
                 .enter_from(0, 0, 20, Duration::from_millis(220))
-                .ease(Easing::EaseOutBack);
+                .ease(Easing::EaseOutBack)
+                .exit_to(0, 0, 18, Duration::from_millis(160));
         }
 
         card = self.style_ext.apply_to_div(card, self.style);
 
-        let mut backdrop = div();
+        let mut backdrop = div().id(crate::scoped_child_id(self.id, 0xD0DA_BACC, 1));
         if self.animated {
-            backdrop = backdrop.fade_in(Duration::from_millis(160));
+            backdrop = backdrop
+                .fade_in(Duration::from_millis(160))
+                .fade_out(Duration::from_millis(150));
         }
 
         backdrop = backdrop

@@ -371,8 +371,13 @@ impl<'a> Widget<'a> for Textarea<'a> {
                     );
                 }
 
-                if cursor_visible {
+                if self.focused {
                     if let Some(cx_px) = run.cursor_x {
+                        let caret_bg = if cursor_visible {
+                            cursor_color
+                        } else {
+                            Color::TRANSPARENT
+                        };
                         row_div = row_div.child(
                             cx,
                             div()
@@ -380,7 +385,8 @@ impl<'a> Widget<'a> for Textarea<'a> {
                                 .pos(cx_px, 2)
                                 .w(1)
                                 .h((lh - 4).max(10))
-                                .bg(cursor_color),
+                                .bg(caret_bg)
+                                .ime_caret(),
                         );
                     }
                 }
@@ -485,7 +491,8 @@ impl<'a> Widget<'a> for Textarea<'a> {
                         .pos(cx_px, 2)
                         .w(1)
                         .h((self.line_height - 4).max(10))
-                        .bg(cursor_color),
+                        .bg(cursor_color)
+                        .ime_caret(),
                 );
             }
 

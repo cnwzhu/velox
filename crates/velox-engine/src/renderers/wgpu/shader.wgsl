@@ -213,8 +213,10 @@ fn sample_gradient_ramp(prim: Primitive, lp: vec2<f32>, screen_p: vec2<f32>) -> 
                     valid = false;
                 } else {
                     let sd = sqrt(disc);
-                    let t_hi = (-b + sd) / (2.0 * a);
-                    let t_lo = (-b - sd) / (2.0 * a);
+                    let r_a = (-b + sd) / (2.0 * a);
+                    let r_b = (-b - sd) / (2.0 * a);
+                    let t_hi = max(r_a, r_b);
+                    let t_lo = min(r_a, r_b);
                     if (r0 + t_hi * dr >= 0.0) {
                         t_raw = t_hi;
                     } else if (r0 + t_lo * dr >= 0.0) {

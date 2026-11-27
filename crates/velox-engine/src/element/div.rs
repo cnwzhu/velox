@@ -48,6 +48,7 @@ impl<'a> IntoElement<'a> for Div<'a> {
                 bg_grad_horiz,
                 self.items_baseline,
                 self.align_self,
+                self.is_ime_caret,
             );
             &*cx.arena().alloc_temp(DivVisual {
                 extended,
@@ -284,6 +285,8 @@ pub struct Div<'a> {
     pub focus_style: Option<StyleRefinement>,
     /// 行容器内是否按子元素文本基线对齐（`items-baseline`）。
     pub items_baseline: bool,
+    /// 是否作为系统输入法（IME）候选窗精确跟随的文本光标锚点节点。
+    pub is_ime_caret: bool,
     /// 高级视觉特效包（多色标渐变、四角独立圆角、混合模式、模糊/色彩滤镜、毛玻璃、2D 变换与路径裁剪；未设置时零分配）。
     pub effects: PaintEffects<'a>,
     /// 外部零拷贝 GPU 纹理描述（仅在绑定时按需在帧内分配，对常规节点零内存开销）。
@@ -342,6 +345,7 @@ pub fn div<'a>() -> Div<'a> {
         active_style: None,
         focus_style: None,
         items_baseline: false,
+        is_ime_caret: false,
         effects: PaintEffects::EMPTY,
         external_texture: None,
         layout_ext: crate::paint::LayoutExtras::EMPTY,
@@ -356,6 +360,14 @@ impl<'a> Styled for Div<'a> {
 }
 
 impl<'a> Div<'a> {
+    /// 标记当前节点为文本输入光标锚点：Pass 4 求解完成后引擎自动向操作系统 IME 同步其精确屏幕逻辑坐标，
+    /// 使中文/日文/韩文输入法候选框始终紧贴光标移动（支持滚动容器、多行编辑器与单行输入框）。
+    #[inline(always)]
+    pub const fn ime_caret(mut self) -> Self {
+        self.is_ime_caret = true;
+        self
+    }
+
     #[inline(always)]
     fn has_non_focus_visual_extra(&self) -> bool {
         self.margin != Edges::all(0)
@@ -370,6 +382,7 @@ impl<'a> Div<'a> {
             || self.shadow.is_some()
             || self.transition.is_some()
             || self.align_self.is_some()
+            || self.is_ime_caret
             || self.cursor.is_some()
             || self.text_color.is_some()
             || self.text_size.is_some()
@@ -1044,6 +1057,97 @@ impl<'a> Div<'a> {
     #[inline(always)]
     pub fn slide_in(self, dx: i16, dy: i16, duration: Duration) -> Self {
         self.enter_from(0, dx, dy, duration)
+    }
+
+    /// 声明元素从视图树移除（卸载）时的零配置幽灵退场动画：自动保留上一帧 `DrawOp` 快照，
+    /// 向目标不透明度 `opacity` 与偏移 `(dx, dy)` 平滑过渡完成后回收（无需在 `View` 手写 `Presence` 字段）。
+    #[inline(always)]
+    pub fn exit_to(mut self, opacity: u8, dx: i16, dy: i16, duration: Duration) -> Self {
+        let mut spec = self.transition.unwrap_or_default();
+        let exit_ms = duration_to_ms(duration);
+        spec.exit_duration_ms = exit_ms;
+        if self.transition.is_none() {
+            spec.duration_ms = exit_ms;
+        }
+        spec.exit = Some(EnterFrom { opacity, dx, dy });
+        self.transition = Some(spec);
+        self
+    }
+
+    /// 从视图树移除时自动淡出（幽灵退场动画快捷方式）。
+    #[inline(always)]
+    pub fn fade_out(self, duration: Duration) -> Self {
+        self.exit_to(0, 0, 0, duration)
+    }
+
+    /// 从视图树移除时自动向 `(dx, dy)` 滑出并淡出（幽灵退场动画快捷方式）。
+    #[inline(always)]
+    pub fn slide_out(self, dx: i16, dy: i16, duration: Duration) -> Self {
+        self.exit_to(0, dx, dy, duration)
+    }
+
+    /// 容器级零配置自动列表/网格增删改移动画（借鉴 AutoAnimate）：
+    /// 一行代码自动接管所有直接子项的插入淡入、重排弹簧位移动画与移除幽灵淡出。
+    #[inline(always)]
+    pub fn auto_animate(self) -> Self {
+        self.auto_animate_with(Duration::from_millis(220))
+    }
+
+    /// 指定动画时长的容器级零配置自动动画（自动启用弹簧重排 + 淡入 + 幽灵淡出）。
+    #[inline(always)]
+    pub fn auto_animate_with(mut self, duration: Duration) -> Self {
+        let mut spec = self.transition.unwrap_or_default();
+        spec.duration_ms = duration_to_ms(duration);
+        spec.auto_animate = true;
+        spec.easing = Easing::Spring;
+        self.transition = Some(spec);
+        self
+    }
+
+    /// 为容器的直接子项按顺序自动编排交错延迟（`child_index * step`，借鉴 Anime.js `stagger`）。
+    #[inline(always)]
+    pub fn stagger(mut self, step: Duration) -> Self {
+        let mut spec = self.transition.unwrap_or_default();
+        spec.stagger_ms = duration_to_ms(step);
+        self.transition = Some(spec);
+        self
+    }
+
+    /// 使用二阶物理弹簧（速度继承、打断无折角）平滑过渡几何位置与尺寸。
+    #[inline(always)]
+    pub fn spring_bounds(mut self, duration: Duration) -> Self {
+        let mut spec = self.transition.unwrap_or_default();
+        spec.duration_ms = duration_to_ms(duration);
+        spec.animate_bounds = true;
+        spec.easing = Easing::Spring;
+        self.transition = Some(spec);
+        self
+    }
+
+    /// 使用二阶物理弹簧平滑过渡颜色、几何边界与不透明度。
+    #[inline(always)]
+    pub fn spring_all(mut self, duration: Duration) -> Self {
+        let mut spec = self.transition.unwrap_or_default();
+        spec.duration_ms = duration_to_ms(duration);
+        spec.animate_color = true;
+        spec.animate_bounds = true;
+        spec.animate_opacity = true;
+        spec.easing = Easing::Spring;
+        self.transition = Some(spec);
+        self
+    }
+
+    /// 开启合成层 FLIP 布局变换（借鉴 Motion Layout Animations）：
+    /// 保持终点布局尺寸不反复折行，将位置/尺寸差值转为合成层仿射矩阵 `Transform2D` 并自动逆缩放修正圆角。
+    #[inline(always)]
+    pub fn flip_layout(mut self, duration: Duration) -> Self {
+        let mut spec = self.transition.unwrap_or_default();
+        spec.duration_ms = duration_to_ms(duration);
+        spec.animate_bounds = true;
+        spec.flip_transform = true;
+        spec.easing = Easing::Spring;
+        self.transition = Some(spec);
+        self
     }
 
     /// 声明在 `from_bg` 与当前 `.bg(...)` 之间无限往复呼吸的循环动画（如呼吸指示灯）。

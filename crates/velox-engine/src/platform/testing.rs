@@ -236,11 +236,7 @@ impl<const W: usize, const H: usize, P: PixelFormat> PlatformSurface
             px_count += (reg.w.max(0) as usize) * (reg.h.max(0) as usize);
         }
         self.total_frames_rendered += 1;
-        FlushReport {
-            dirty_regions: self.last_dirty.len(),
-            strips_or_buffers: 1,
-            pixels_updated: px_count,
-        }
+        FlushReport::with_engine(self.last_dirty.len(), 1, px_count, engine)
     }
 }
 

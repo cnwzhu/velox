@@ -246,7 +246,8 @@ impl<'a> Widget<'a> for Notification<'a> {
         if self.animated {
             card = card
                 .enter_from(255, 0, -6, Duration::from_millis(210))
-                .ease(Easing::Spring);
+                .ease(Easing::Spring)
+                .exit_to(0, 28, 0, Duration::from_millis(160));
         }
 
         card = self.style_ext.apply_to_div(card, self.style);

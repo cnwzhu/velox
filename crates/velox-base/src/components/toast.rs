@@ -98,7 +98,9 @@ impl<'a> Widget<'a> for Toast<'a> {
         }
 
         if self.animated {
-            d = d.slide_in(0, -12, Duration::from_millis(220));
+            d = d
+                .slide_in(0, -12, Duration::from_millis(220))
+                .slide_out(0, -12, Duration::from_millis(160));
         }
 
         d = self.style_ext.apply_to_div(d, self.style);

@@ -6,7 +6,6 @@
 //! - **布局测宽零位图分配**：`measure_ttf_char_advance` 直接读取 `hmtx` 步进宽度并缓存，不再为测宽触发字形光栅化。
 
 use core::cell::RefCell;
-#[cfg(not(target_arch = "wasm32"))]
 use std::boxed::Box;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -532,15 +531,15 @@ impl OutlineBuilder for ScaledOutlineCollector {
 }
 
 /// 使用非零缠绕解析梯形有向面积积分光栅化单个字符轮廓为 `A8` 抗锯齿位图（支持 0.25px 亚像素精度字号）。
-fn rasterize_glyph_outline(font: &LoadedFont, gid: GlyphId, fs: f32) -> CachedGlyph {
+fn rasterize_glyph_outline(face: &Face<'_>, gid: GlyphId, fs: f32) -> CachedGlyph {
     let fs = fs.max(8.0);
-    let upem = font.face.units_per_em().max(1) as f32;
-    let raw_adv = font.face.glyph_hor_advance(gid).unwrap_or(0) as f32;
+    let upem = face.units_per_em().max(1) as f32;
+    let raw_adv = face.glyph_hor_advance(gid).unwrap_or(0) as f32;
     let adv = (((raw_adv * fs) / upem).max(1.0) + 0.5) as i16;
     let scale = fs / upem;
 
     let mut collector = ScaledOutlineCollector::new(scale);
-    let outlined = font.face.outline_glyph(gid, &mut collector).is_some();
+    let outlined = face.outline_glyph(gid, &mut collector).is_some();
     collector.finish_subpath();
 
     if !outlined || collector.edges.is_empty() || !collector.min_x.is_finite() {
@@ -737,9 +736,99 @@ static MONO_BOLD_FONT: OnceLock<Option<LoadedFont>> = OnceLock::new();
 #[cfg(not(target_arch = "wasm32"))]
 static SERIF_FONT: OnceLock<Option<LoadedFont>> = OnceLock::new();
 
-static CUSTOM_FONTS: OnceLock<RwLock<HashMap<u32, &'static LoadedFont>>> = OnceLock::new();
+enum FontBacking {
+    Static,
+    Owned(Box<[u8]>),
+}
+
+impl FontBacking {
+    #[inline]
+    fn owned_bytes(&self) -> usize {
+        match self {
+            Self::Static => 0,
+            Self::Owned(b) => b.len(),
+        }
+    }
+}
+
+/// 持有自身字体字节所有权的动态注册字体，替换或注销时由 `Arc` 自动释放底层堆内存（零 `Box::leak`）。
+struct OwnedCustomFont {
+    // 声明顺序保证 `face` 先于 `_backing` 结束生命周期（`Face` 为纯只读借用切片视图，无自定义 `Drop`）。
+    face: Face<'static>,
+    _backing: FontBacking,
+}
+
+// SAFETY: `Face<'static>` 与不可变只读 `FontBacking` 均无内部可变性，跨线程只读共享安全。
+unsafe impl Send for OwnedCustomFont {}
+unsafe impl Sync for OwnedCustomFont {}
+
+impl OwnedCustomFont {
+    fn from_static(bytes: &'static [u8]) -> Option<Self> {
+        let face = Face::parse(bytes, 0).ok()?;
+        Some(Self {
+            face,
+            _backing: FontBacking::Static,
+        })
+    }
+
+    fn from_vec(bytes: Vec<u8>) -> Option<Self> {
+        let boxed = bytes.into_boxed_slice();
+        let ptr = boxed.as_ptr();
+        let len = boxed.len();
+        // SAFETY: `boxed` 堆缓冲区地址稳定且由 `_backing` 与 `face` 绑定在同一对象生命周期内；
+        // 本结构仅对外暴露与 `&self` 绑定的 `&Face<'_>`，不会泄露 `'static` 引用。
+        let static_view: &'static [u8] = unsafe { core::slice::from_raw_parts(ptr, len) };
+        let face = Face::parse(static_view, 0).ok()?;
+        Some(Self {
+            face,
+            _backing: FontBacking::Owned(boxed),
+        })
+    }
+
+    #[inline]
+    fn face(&self) -> &Face<'_> {
+        &self.face
+    }
+
+    #[inline]
+    fn owned_bytes(&self) -> usize {
+        self._backing.owned_bytes()
+    }
+}
+
+enum SelectedFont {
+    Static(&'static LoadedFont),
+    Custom(Arc<OwnedCustomFont>),
+}
+
+impl SelectedFont {
+    #[inline]
+    fn face(&self) -> &Face<'_> {
+        match self {
+            Self::Static(f) => &f.face,
+            Self::Custom(f) => f.face(),
+        }
+    }
+}
+
+static CUSTOM_FONTS: OnceLock<RwLock<HashMap<u32, Arc<OwnedCustomFont>>>> = OnceLock::new();
 static STYLED_GLYPH_CACHE: OnceLock<RwLock<HashMap<(char, u16, u32), Arc<CachedGlyph>>>> =
     OnceLock::new();
+
+#[inline]
+fn font_spec_family_bits(packed_key: u32) -> u32 {
+    packed_key >> 16
+}
+
+fn invalidate_styled_glyphs_for_spec(spec: crate::text_rich::FontSpec) {
+    let target_family = font_spec_family_bits(spec.packed_key());
+    if let Some(cache) = STYLED_GLYPH_CACHE.get() {
+        if let Ok(mut c) = cache.write() {
+            // 仅淘汰同字族（含其粗体/斜体回退条目）的字形缓存，保留其他字族的热缓存。
+            c.retain(|&(_, _, key), _| font_spec_family_bits(key) != target_family);
+        }
+    }
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn load_static_candidate(candidates: &[&str]) -> Option<LoadedFont> {
@@ -753,28 +842,45 @@ fn load_static_candidate(candidates: &[&str]) -> Option<LoadedFont> {
 }
 
 /// 注册静态 TrueType/OpenType 字体字节流到指定 [`FontSpec`](crate::text_rich::FontSpec)（支持自定义字族、粗体、斜体与等宽字体）。
+///
+/// 重复注册同一 `FontSpec` 时会自动释放旧条目并仅失效对应字族的字形缓存（零 `Box::leak`）。
 pub fn register_font_bytes(spec: crate::text_rich::FontSpec, bytes: &'static [u8]) -> bool {
-    let Ok(face) = Face::parse(bytes, 0) else {
+    let Some(owned) = OwnedCustomFont::from_static(bytes) else {
         return false;
     };
-    let leaked: &'static LoadedFont = Box::leak(Box::new(LoadedFont { bytes, face }));
     let map = CUSTOM_FONTS.get_or_init(|| RwLock::new(HashMap::new()));
     if let Ok(mut w) = map.write() {
-        w.insert(spec.packed_key(), leaked);
+        w.insert(spec.packed_key(), Arc::new(owned));
     }
-    if let Ok(mut c) = STYLED_GLYPH_CACHE.get_or_init(|| RwLock::new(HashMap::new())).write() {
-        c.clear();
-    }
+    invalidate_styled_glyphs_for_spec(spec);
     true
 }
 
 /// 注册堆分配 TrueType/OpenType 字体字节向量到指定 [`FontSpec`](crate::text_rich::FontSpec)。
+///
+/// 字体字节由内部 `Arc` 真正拥有所有权：重复注册同一 `FontSpec` 或调用 [`unregister_font`] 时旧字节立即释放，零内存泄漏。
 pub fn register_font_vec(spec: crate::text_rich::FontSpec, bytes: Vec<u8>) -> bool {
-    if Face::parse(bytes.as_slice(), 0).is_err() {
+    let Some(owned) = OwnedCustomFont::from_vec(bytes) else {
         return false;
+    };
+    let map = CUSTOM_FONTS.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Ok(mut w) = map.write() {
+        w.insert(spec.packed_key(), Arc::new(owned));
     }
-    let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-    register_font_bytes(spec, leaked)
+    invalidate_styled_glyphs_for_spec(spec);
+    true
+}
+
+/// 注销指定 [`FontSpec`](crate::text_rich::FontSpec) 的自定义字体，释放其堆字体字节并清理对应字族字形缓存。
+pub fn unregister_font(spec: crate::text_rich::FontSpec) -> bool {
+    let removed = CUSTOM_FONTS
+        .get()
+        .and_then(|m| m.write().ok().map(|mut w| w.remove(&spec.packed_key()).is_some()))
+        .unwrap_or(false);
+    if removed {
+        invalidate_styled_glyphs_for_spec(spec);
+    }
+    removed
 }
 
 /// 查询当前已注册的自定义字体数量。
@@ -785,17 +891,29 @@ pub fn registered_custom_font_count() -> usize {
         .unwrap_or(0)
 }
 
+/// 查询当前所有通过 [`register_font_vec`] 注册的自定义字体在堆上持有的总字节数。
+pub fn registered_custom_font_bytes() -> usize {
+    CUSTOM_FONTS
+        .get()
+        .and_then(|m| {
+            m.read()
+                .ok()
+                .map(|r| r.values().map(|f| f.owned_bytes()).sum())
+        })
+        .unwrap_or(0)
+}
+
 fn select_styled_font_and_glyph(
     ch: char,
     spec: crate::text_rich::FontSpec,
-) -> Option<(&'static LoadedFont, GlyphId, bool, bool)> {
+) -> Option<(SelectedFont, GlyphId, bool, bool)> {
     use crate::text_rich::{FontFamily, FontStyle};
     // 返回 (font, gid, need_faux_bold, need_faux_italic)
     if let Some(map) = CUSTOM_FONTS.get() {
         if let Ok(r) = map.read() {
-            if let Some(&f) = r.get(&spec.packed_key()) {
-                if let Some(gid) = f.face.glyph_index(ch).filter(|g| g.0 != 0) {
-                    return Some((f, gid, false, false));
+            if let Some(f) = r.get(&spec.packed_key()) {
+                if let Some(gid) = f.face().glyph_index(ch).filter(|g| g.0 != 0) {
+                    return Some((SelectedFont::Custom(Arc::clone(f)), gid, false, false));
                 }
             }
             // 同字族常规体回退 + 合成粗/斜
@@ -805,9 +923,14 @@ fn select_styled_font_and_glyph(
                 style: FontStyle::Normal,
             }
             .packed_key();
-            if let Some(&f) = r.get(&base_key) {
-                if let Some(gid) = f.face.glyph_index(ch).filter(|g| g.0 != 0) {
-                    return Some((f, gid, spec.weight.is_bold(), spec.style == FontStyle::Italic));
+            if let Some(f) = r.get(&base_key) {
+                if let Some(gid) = f.face().glyph_index(ch).filter(|g| g.0 != 0) {
+                    return Some((
+                        SelectedFont::Custom(Arc::clone(f)),
+                        gid,
+                        spec.weight.is_bold(),
+                        spec.style == FontStyle::Italic,
+                    ));
                 }
             }
         }
@@ -876,7 +999,7 @@ fn select_styled_font_and_glyph(
         if let Some(f) = candidate {
             if let Some(gid) = f.face.glyph_index(ch).filter(|g| g.0 != 0) {
                 return Some((
-                    f,
+                    SelectedFont::Static(f),
                     gid,
                     spec.weight.is_bold() && !matched_bold,
                     spec.style == FontStyle::Italic && !matched_italic,
@@ -887,7 +1010,7 @@ fn select_styled_font_and_glyph(
 
     let (f, gid) = select_font_and_glyph(ch)?;
     Some((
-        f,
+        SelectedFont::Static(f),
         gid,
         spec.weight.is_bold(),
         spec.style == FontStyle::Italic,
@@ -1009,8 +1132,9 @@ pub fn measure_ttf_char_advance_styled_f32(
         return Some((font_size.max(8) as f32) * 1.05);
     }
     let (font, gid, faux_bold, _) = select_styled_font_and_glyph(ch, spec)?;
-    let upem = font.face.units_per_em().max(1) as f32;
-    let raw_adv = font.face.glyph_hor_advance(gid).unwrap_or(0) as f32;
+    let face = font.face();
+    let upem = face.units_per_em().max(1) as f32;
+    let raw_adv = face.glyph_hor_advance(gid).unwrap_or(0) as f32;
     let px = (raw_adv * (font_size.max(8) as f32)) / upem;
     Some((px + if faux_bold { 0.8 } else { 0.0 }).max(1.0))
 }
@@ -1037,7 +1161,7 @@ pub fn get_cached_glyph_styled_q4(
         synthesize_color_emoji_glyph(ch, fs)
     } else {
         let (font, gid, faux_bold, faux_italic) = select_styled_font_and_glyph(ch, spec)?;
-        let mut g = rasterize_glyph_outline(font, gid, fs);
+        let mut g = rasterize_glyph_outline(font.face(), gid, fs);
         if faux_bold {
             apply_faux_bold(&mut g);
         }
@@ -1094,7 +1218,7 @@ pub fn get_cached_glyph_q4(ch: char, font_size_q4: u16) -> Option<Arc<CachedGlyp
         if write_guard.len() >= MAX_GLYPH_CACHE_ENTRIES {
             write_guard.clear();
         }
-        let entry = Arc::new(rasterize_glyph_outline(font, gid, (q4 as f32) * 0.25));
+        let entry = Arc::new(rasterize_glyph_outline(&font.face, gid, (q4 as f32) * 0.25));
         write_guard.insert((ch, q4), Arc::clone(&entry));
         TLS_GLYPHS.with(|tls| {
             tls.borrow_mut()[slot_idx] = Some((ch, q4, Arc::clone(&entry)));

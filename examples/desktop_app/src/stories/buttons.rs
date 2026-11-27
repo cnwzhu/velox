@@ -252,6 +252,7 @@ impl GalleryApp {
             .flex_col()
             .w_full()
             .gap(16)
+            .stagger(Duration::from_millis(45))
             .child(
                 cx,
                 story_header(
@@ -262,8 +263,8 @@ impl GalleryApp {
                     "velox_component::{Button, Toggle, ToggleGroup}",
                 ),
             )
-            .child(cx, gpui_showcase_section)
-            .child(cx, sizes_states_section)
-            .child(cx, toggle_section)
+            .child(cx, gpui_showcase_section.id(1191).slide_in(0, 10, Duration::from_millis(200)).ease_spring())
+            .child(cx, sizes_states_section.id(1192).slide_in(0, 10, Duration::from_millis(200)).ease_spring())
+            .child(cx, toggle_section.id(1193).slide_in(0, 10, Duration::from_millis(200)).ease_spring())
     }
 }

@@ -1036,9 +1036,14 @@ impl<'a> Widget<'a> for CodeEditor<'a> {
                     content, cx, run, row_lh, font_size, text_color,
                 );
 
-                // Layer 5：0 抖动绝对定位闪烁叠层光标
-                if cursor_visible {
+                // Layer 5：0 抖动绝对定位闪烁叠层光标（聚焦态始终挂载 `.ime_caret()` 锚点供系统输入法实时跟随）
+                if self.focused {
                     if let Some(cx_px) = run.cursor_x {
+                        let caret_bg = if cursor_visible {
+                            cursor_color
+                        } else {
+                            Color::TRANSPARENT
+                        };
                         content = content.child(
                             cx,
                             div()
@@ -1046,7 +1051,8 @@ impl<'a> Widget<'a> for CodeEditor<'a> {
                                 .pos(cx_px, 2)
                                 .w(1)
                                 .h((row_lh - 4).max(10))
-                                .bg(cursor_color),
+                                .bg(caret_bg)
+                                .ime_caret(),
                         );
                     }
                 }

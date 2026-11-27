@@ -11,8 +11,9 @@ impl GalleryApp {
         cx: &'a Scope<Self>,
         theme: CoreTheme,
     ) -> Div<'a> {
-        let swatch = |name: &'a str, bg: Color, fg: Color| -> Div<'a> {
+        let swatch = |id: u32, name: &'a str, bg: Color, fg: Color| -> Div<'a> {
             div()
+                .id(id)
                 .flex_col()
                 .w(108)
                 .h(52)
@@ -20,6 +21,7 @@ impl GalleryApp {
                 .rounded(6)
                 .bg(bg)
                 .border(1, theme.border)
+                .animate_color(Duration::from_millis(220))
                 .justify_between()
                 .child(cx, text(name).size(11).color(fg))
                 .child(
@@ -34,7 +36,7 @@ impl GalleryApp {
             cx,
             theme,
             "Semantic Theme Palette (velox-component Shadcn Zinc + Blue)",
-            "Automatic Dark / Light semantic tokens shared across all 75+ velox-component widgets",
+            "Automatic Dark / Light semantic tokens with 220ms smooth color transitions",
         )
         .child(
             cx,
@@ -42,14 +44,14 @@ impl GalleryApp {
                 .flex_row()
                 .flex_wrap()
                 .gap(8)
-                .child(cx, swatch("background", theme.background, theme.foreground))
-                .child(cx, swatch("card", theme.card, theme.foreground))
-                .child(cx, swatch("primary", theme.primary, theme.primary_foreground))
-                .child(cx, swatch("secondary", theme.secondary, theme.secondary_foreground))
-                .child(cx, swatch("success", theme.success, theme.success_foreground))
-                .child(cx, swatch("warning", theme.warning, theme.warning_foreground))
-                .child(cx, swatch("danger", theme.danger, theme.danger_foreground))
-                .child(cx, swatch("info", theme.info, theme.info_foreground)),
+                .child(cx, swatch(320, "background", theme.background, theme.foreground))
+                .child(cx, swatch(321, "card", theme.card, theme.foreground))
+                .child(cx, swatch(322, "primary", theme.primary, theme.primary_foreground))
+                .child(cx, swatch(323, "secondary", theme.secondary, theme.secondary_foreground))
+                .child(cx, swatch(324, "success", theme.success, theme.success_foreground))
+                .child(cx, swatch(325, "warning", theme.warning, theme.warning_foreground))
+                .child(cx, swatch(326, "danger", theme.danger, theme.danger_foreground))
+                .child(cx, swatch(327, "info", theme.info, theme.info_foreground)),
         );
 
         let playground_elem: Element<'a> = if let Some(pg_handle) = self.overview_playground {

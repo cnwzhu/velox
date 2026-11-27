@@ -10,7 +10,9 @@ use super::runtime::{
 };
 use super::table::{with_table, NodeKind, NodeState};
 use super::table::{ComputedSlot, SignalSlot};
-use super::storage::{default_eq_fn, InlineFnStorage, InlineValueStorage, NO_EDGE};
+use super::storage::{
+    default_eq_fn, get_active_render_context, InlineFnStorage, InlineValueStorage, NO_EDGE,
+};
 use super::storage::TRACKER_INDEX_MASK;
 use super::MAX_EFFECTS;
 
@@ -165,7 +167,6 @@ impl<T: Copy + 'static> Signal<T> {
             slot.version = 1;
             slot.clear_all_subscribers();
             slot.first_sub = NO_EDGE;
-            slot.owner_pool = 0;
             slot.occupied = true;
             Self {
                 id: idx as u16,
@@ -198,6 +199,7 @@ impl<T: Copy + 'static> Signal<T> {
     #[inline]
     pub fn get_in(self, cx: &FrameScope) -> T {
         let pod_idx = cx.current_pod().0;
+        let (active_pool, _) = get_active_render_context();
         let (val, ver) = with_table(|tbl| {
             let slot = tbl
                 .signals
@@ -207,9 +209,13 @@ impl<T: Copy + 'static> Signal<T> {
                 slot.occupied && slot.generation == self.generation,
                 "Attempted to read a disposed Signal"
             );
-            slot.add_subscriber(pod_idx);
+            let added = slot.add_subscriber(active_pool, pod_idx);
             let v = unsafe { slot.storage.read::<T>() };
-            (v, slot.version)
+            let ver = slot.version;
+            if !added {
+                tbl.dropped_pool_subscriptions = tbl.dropped_pool_subscriptions.saturating_add(1);
+            }
+            (v, ver)
         });
         record_signal_read(self.id, self.generation, ver);
         val
@@ -329,7 +335,7 @@ impl<T: Copy + 'static> Signal<T> {
             tbl.signals
                 .get(self.id as usize)
                 .filter(|s| s.occupied && s.generation == self.generation)
-                .map(|s| s.subscribers_mask)
+                .map(|s| s.all_subscribers_mask())
                 .unwrap_or(0)
         })
     }

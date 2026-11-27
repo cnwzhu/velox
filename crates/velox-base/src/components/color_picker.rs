@@ -195,6 +195,7 @@ pub struct ColorPicker<'a> {
     pub text_color: Color,
     pub swatch_border_color: Color,
     pub rounded: u8,
+    pub animated: bool,
     pub on_toggle_open: Option<&'a dyn Fn(&mut ActionScope)>,
     pub on_select_color: Option<&'a dyn Fn(Color, &mut ActionScope)>,
     trigger_renderer: Option<ColorTriggerRenderer<'a>>,
@@ -227,11 +228,19 @@ impl<'a> ColorPicker<'a> {
             text_color: Color::TRANSPARENT,
             swatch_border_color: Color::TRANSPARENT,
             rounded: 0,
+            animated: false,
             on_toggle_open: None,
             on_select_color: None,
             trigger_renderer: None,
             swatch_renderer: None,
         }
+    }
+
+    /// 启用或禁用调色板弹层开关过渡动画。
+    #[inline(always)]
+    pub const fn animated(mut self, enabled: bool) -> Self {
+        self.animated = enabled;
+        self
     }
 
     /// 绑定点击触发按钮开关面板的回调。
@@ -359,6 +368,11 @@ impl<'a> Widget<'a> for ColorPicker<'a> {
             .occlude_hit();
         if border_color != Color::TRANSPARENT {
             panel = panel.border(1, border_color);
+        }
+        if self.animated {
+            panel = panel
+                .slide_in(0, -6, Duration::from_millis(140))
+                .slide_out(0, -6, Duration::from_millis(120));
         }
 
         let mut row = div().flex_row().gap(6).items_center();

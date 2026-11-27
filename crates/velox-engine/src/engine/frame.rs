@@ -18,10 +18,23 @@ impl VeloxEngine {
         self.step_frame_dt(16)
     }
 
+    #[inline]
+    fn record_frame_arena_telemetry(&mut self) {
+        let arena = self.frame_scope.arena();
+        let peak = arena
+            .peak_used_bytes()
+            .max(self.last_arena_used_bytes as usize);
+        let truncs = arena.take_truncation_count();
+        self.last_arena_peak_bytes = peak.min(u32::MAX as usize) as u32;
+        self.last_arena_truncations = truncs;
+        self.total_arena_truncations = self.total_arena_truncations.saturating_add(truncs);
+    }
+
     /// 按给定帧间隔 `dt_ms`（毫秒）执行一帧更新并返回合并后的脏矩形列表。
     #[inline(never)]
     pub fn step_frame_dt(&mut self, dt_ms: u16) -> &[Region] {
         self.damage.clear();
+        self.last_arena_truncations = 0;
         let now = self.frame_scope.now_ms.wrapping_add(dt_ms as u32);
         self.frame_scope.set_now_ms(now);
         let anim_running = self.motion.tick(dt_ms);
@@ -78,8 +91,8 @@ impl VeloxEngine {
         self.interaction.focus_ring_color = self.frame_scope.theme().ring;
         let interaction = self.interaction;
 
-        // Pass-4-Only 快径：拆分为 `#[inline(never)]` 子函数隔离局部 `SmallVec<DrawOp>`/`SmallVec<HitRegion>` 栈帧，
-        // 避免编译器将其与后续全量求解路径的双份大数组叠加在同一栈帧中（降低 `#![no_std]` MCU 峰值栈深约 8 KB）。
+        // Pass-4-Only 快径与完整布局慢径均拆分为独立 `#[inline(never)]` 子函数，
+        // 让外层调度函数 `step_frame_dt` 保持极小栈帧，彻底消除快路径上 ~10 KiB 的双份大栈帧叠加。
         if !self.first_frame
             && !self.pool.has_dirty()
             && !self.frame_scope.frame_requested.get()
@@ -89,6 +102,18 @@ impl VeloxEngine {
             return self.damage.regions();
         }
 
+        self.run_full_frame(root_id, interaction, record_diff);
+        self.damage.regions()
+    }
+
+    /// 独立隔离栈帧的完整布局与光栅指令生成路径（`#[inline(never)]` 避免将 `SmallVec<DrawOp>`/`SmallVec<HitRegion>` 提至 `step_frame_dt` 外层序言）。
+    #[inline(never)]
+    fn run_full_frame(
+        &mut self,
+        root_id: PodId,
+        interaction: crate::solver::InteractionState,
+        record_diff: bool,
+    ) {
         // 判断是否可在 ScratchArena 中增量保留未脏的 SubView Element 树与 LayoutNode 树：
         // `PodPool` 已按槽位精确追踪 `cx.request_frame()`（`STATE_FLAG_NEEDS_NEXT_FRAME`），
         // 因此只要脏视图已入队（`pool.has_dirty()`），即便子视图包含连续动画（如闪烁光标 / Spinner），
@@ -138,6 +163,9 @@ impl VeloxEngine {
         if !can_retain_subviews {
             self.frame_scope.arena_mut().rewind();
             self.pool.invalidate_all_cached_elements();
+        } else {
+            self.frame_scope.arena().reset_peak_to_current();
+            let _ = self.frame_scope.arena().take_truncation_count();
         }
         self.invalidate_frame_cache();
         self.cached_layout_ptr = core::ptr::null_mut();
@@ -231,14 +259,14 @@ impl VeloxEngine {
             );
         }
 
+        self.record_frame_arena_telemetry();
+
         if self.first_frame {
             self.damage.add_region(self.viewport);
             self.first_frame = false;
         }
         self.interaction_dirty = false;
         self.pool.clear_dirty();
-
-        self.damage.regions()
     }
 
     /// 独立隔离栈帧的 Pass-4-Only 快路径，避免与全量求解分支的 `SmallVec` 缓冲叠加导致 MCU 栈峰翻倍。
@@ -251,39 +279,47 @@ impl VeloxEngine {
         self.frame_scope
             .arena_mut()
             .restore_mark(self.ops_cursor_mark as usize);
-        let arena = self.frame_scope.arena();
-        let mut ops: SmallVec<DrawOp<'_>, MAX_DRAW_OPS> = SmallVec::new();
-        let mut hits: SmallVec<HitRegion<'_>, MAX_HIT_REGIONS> = SmallVec::new();
-        let dropped = unsafe {
-            reflatten_pass4_only(
-                arena,
-                &mut *(self.cached_layout_ptr as *mut LayoutNode<'_, '_>),
-                self.viewport,
-                interaction,
-                &mut self.motion,
-                &mut ops,
-                &mut hits,
-            )
-        };
-        self.dropped_draw_ops = self.dropped_draw_ops.saturating_add(dropped);
-        self.fast_paint_count = self.fast_paint_count.wrapping_add(1);
+        self.frame_scope.arena().reset_peak_to_current();
+        let _ = self.frame_scope.arena().take_truncation_count();
+        {
+            let arena = self.frame_scope.arena();
+            let mut ops: SmallVec<DrawOp<'_>, MAX_DRAW_OPS> = SmallVec::new();
+            let mut hits: SmallVec<HitRegion<'_>, MAX_HIT_REGIONS> = SmallVec::new();
+            let dropped = unsafe {
+                reflatten_pass4_only(
+                    arena,
+                    &mut *(self.cached_layout_ptr as *mut LayoutNode<'_, '_>),
+                    self.viewport,
+                    interaction,
+                    &mut self.motion,
+                    &mut ops,
+                    &mut hits,
+                )
+            };
+            self.dropped_draw_ops = self.dropped_draw_ops.saturating_add(dropped);
+            self.fast_paint_count = self.fast_paint_count.wrapping_add(1);
 
-        self.damage
-            .diff_and_update_in_place(&mut self.prev_snapshots, ops.as_slice(), record_diff);
-        Self::cache_ops_and_hits_into(
-            arena,
-            ops.as_mut_slice(),
-            hits.as_slice(),
-            &mut self.cached_ops_buf,
-            &mut self.cached_hits_buf,
-            &mut self.cached_ops_ptr,
-            &mut self.cached_ops_len,
-            &mut self.cached_hits_ptr,
-            &mut self.cached_hits_len,
-            &mut self.dropped_draw_ops,
-            &mut self.frame_cached,
-            &mut self.last_arena_used_bytes,
-        );
+            self.damage.diff_and_update_in_place(
+                &mut self.prev_snapshots,
+                ops.as_slice(),
+                record_diff,
+            );
+            Self::cache_ops_and_hits_into(
+                arena,
+                ops.as_mut_slice(),
+                hits.as_slice(),
+                &mut self.cached_ops_buf,
+                &mut self.cached_hits_buf,
+                &mut self.cached_ops_ptr,
+                &mut self.cached_ops_len,
+                &mut self.cached_hits_ptr,
+                &mut self.cached_hits_len,
+                &mut self.dropped_draw_ops,
+                &mut self.frame_cached,
+                &mut self.last_arena_used_bytes,
+            );
+        }
+        self.record_frame_arena_telemetry();
         self.interaction_dirty = false;
     }
 
@@ -301,6 +337,15 @@ impl VeloxEngine {
             return;
         }
 
+        self.run_full_frame_cached(root_id, interaction);
+    }
+
+    #[inline(never)]
+    fn run_full_frame_cached(
+        &mut self,
+        root_id: PodId,
+        interaction: crate::solver::InteractionState,
+    ) {
         const SUBVIEW_RETAIN_WATERMARK: usize = 512 * 1024;
 
         let can_retain_subviews = if !self.first_frame
@@ -559,6 +604,22 @@ impl VeloxEngine {
             self.ensure_frame_cached();
         }
 
+        self.rasterize_cached_strip(reg, origin_x, origin_y, stride, target);
+    }
+
+    /// 仅消费当前帧已冻结缓存的 `cached_draw_ops()` 光栅化指定条带区域，
+    /// **绝不**在刷屏中途触发 `ensure_frame_cached()` 或提前消费新到达的响应式信号脏位。
+    ///
+    /// 供异步/多条带刷屏流水线在「准备帧 → 刷屏 → 确认完成」阶段严格保持单帧画面一致，
+    /// 避免刷屏中途信号变更引起前后半屏混帧及下一帧漏刷。
+    pub fn rasterize_cached_strip<P: PixelFormat>(
+        &self,
+        reg: Region,
+        origin_x: i16,
+        origin_y: i16,
+        stride: usize,
+        target: &mut [P],
+    ) {
         if !self.frame_cached {
             return;
         }
@@ -573,5 +634,6 @@ impl VeloxEngine {
             );
         }
     }
+
 
 }

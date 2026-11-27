@@ -146,8 +146,12 @@ impl<'a> Widget<'a> for BottomSheet<'a> {
             .bg(self.backdrop_bg);
 
         if self.animated {
-            backdrop = backdrop.enter_from(24, 0, 0, Duration::from_millis(180));
-            sheet = sheet.enter_from(255, 0, eff_h, Duration::from_millis(260));
+            backdrop = backdrop
+                .enter_from(24, 0, 0, Duration::from_millis(180))
+                .fade_out(Duration::from_millis(160));
+            sheet = sheet
+                .enter_from(255, 0, eff_h, Duration::from_millis(260))
+                .exit_to(0, 0, eff_h.min(120), Duration::from_millis(200));
         }
 
         if let Some(dismiss_cb) = self.on_dismiss {
