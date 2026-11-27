@@ -10,6 +10,9 @@
 pub use ::wgpu;
 
 mod atlas;
+mod canvas_pipeline;
+#[cfg(feature = "custom-shader")]
+pub mod custom_shader;
 mod effects_pass;
 pub mod interop;
 mod layer_pool;
@@ -19,6 +22,10 @@ mod ramp;
 mod shared_exporter;
 mod window;
 
+#[cfg(feature = "custom-shader")]
+pub use custom_shader::{
+    register_custom_shader, unregister_custom_shader, CustomShaderPrimitive, CustomShaderViewport,
+};
 pub use interop::{ExportedHandle, ExternalSyncHandle};
 pub use offscreen::WgpuOffscreenRenderer;
 pub use pipeline::WgpuRenderer;
@@ -518,7 +525,8 @@ impl WgpuScene {
                     DrawPayload::ExternalTexture(_)
                     | DrawPayload::RichText(_)
                     | DrawPayload::DecodedImage(_)
-                    | DrawPayload::Vector(_) => {
+                    | DrawPayload::Vector(_)
+                    | DrawPayload::SceneCanvas(_) => {
                         self.sprite_count += 1;
                     }
                 }

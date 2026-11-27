@@ -111,6 +111,9 @@ pub(crate) struct GlyphAtlas {
     height: u32,
     packer: GuillotinePacker,
     entries: HashMap<(char, u16), GlyphAtlasEntry>,
+    /// ASCII `0x20..=0x7E`（95 字符）`O(1)` 快速查表缓存（16px 与 32px 两档离散基准字号，专供画布 Zoom Font Lock 通道）。
+    ascii_16: [Option<GlyphAtlasEntry>; 95],
+    ascii_32: [Option<GlyphAtlasEntry>; 95],
 }
 
 pub(crate) const GLYPH_ATLAS_INIT_SIZE: u32 = 512;
@@ -140,12 +143,16 @@ impl GlyphAtlas {
             height: size,
             packer: GuillotinePacker::new(size, size),
             entries: HashMap::with_capacity(256),
+            ascii_16: [None; 95],
+            ascii_32: [None; 95],
         }
     }
 
     pub(crate) fn reset_or_grow(&mut self, device: &wgpu::Device) -> bool {
         let next_size = (self.width * 2).min(GLYPH_ATLAS_MAX_SIZE);
         self.entries.clear();
+        self.ascii_16 = [None; 95];
+        self.ascii_32 = [None; 95];
         if next_size > self.width {
             *self = Self::new(device, next_size);
             true
@@ -153,6 +160,36 @@ impl GlyphAtlas {
             self.packer.reset(self.width, self.height);
             false
         }
+    }
+
+    /// 画布缩放防抖（Zoom Font Lock）与短 ASCII 编号（座位号/集装箱号）`O(1)` 数组查表通道：
+    /// `base_px` 锁定在 `16` 或 `32`，直接绕过 `HashMap` 查找与多行文本排版。
+    #[inline]
+    pub(crate) fn get_ascii_fast(
+        &mut self,
+        queue: &wgpu::Queue,
+        byte: u8,
+        large_32: bool,
+    ) -> Option<GlyphAtlasEntry> {
+        if !(0x20..=0x7E).contains(&byte) {
+            return None;
+        }
+        let idx = (byte - 0x20) as usize;
+        if let Some(hit) = if large_32 {
+            self.ascii_32[idx]
+        } else {
+            self.ascii_16[idx]
+        } {
+            return Some(hit);
+        }
+        let q4 = if large_32 { 32u16 * 4 } else { 16u16 * 4 };
+        let entry = self.get_or_insert(queue, byte as char, q4, true)?;
+        if large_32 {
+            self.ascii_32[idx] = Some(entry);
+        } else {
+            self.ascii_16[idx] = Some(entry);
+        }
+        Some(entry)
     }
 
     /// 查找或光栅化并上传字形（按 0.25px 量化字号 `font_size_q4` 精确光栅化）；若图集已满返回 `None` 触发扩容并重编本帧。

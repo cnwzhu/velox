@@ -21,6 +21,20 @@ pub use velox_base as base;
 #[cfg(feature = "component")]
 pub use velox_component as component;
 
+#[cfg(feature = "canvas")]
+pub use velox_canvas as canvas;
+
+#[cfg(feature = "canvas")]
+pub use velox_canvas::{
+    world_to_overlay_anchor, CanvasDragMode, CanvasInteraction, FlatRTree, InteractiveCanvas,
+    ItemStateBuffer, LodLevel, LodPolicy, Minimap, PolygonBackdrop, SceneStore, ViewportController,
+};
+
+#[cfg(feature = "custom-shader")]
+pub use velox_engine::renderers::wgpu::{
+    register_custom_shader, unregister_custom_shader, CustomShaderPrimitive, CustomShaderViewport,
+};
+
 #[cfg(feature = "base")]
 pub use velox_base::{
     clip_offset_left, clip_offset_right, input, line_range_at, next_word_boundary,
@@ -141,6 +155,7 @@ pub use velox_component::{
     SpringProgress, SpringReveal, StatusBar, Stepper, SurfaceCanvas, Svg, Switch, TabBar, Table,
     Tabs, Tag, TailwindStyled, TextInput, TextView, Textarea, TimeField, Toast, Toggle,
     ToggleGroup, Toolbar, Tooltip, Tree, UniformList, VirtualKeyboard, VirtualList,
+    apply_tw_liquid_glass, liquid_glass_panel,
 };
 #[cfg(all(feature = "component", feature = "std"))]
 pub use velox_component::SpringAnimator;
@@ -222,6 +237,13 @@ pub mod prelude {
     #[cfg(feature = "smol")]
     pub use velox_async::{SmolScheduler, VeloxEngineSmolExt, VeloxSmolExt};
 
+
+    #[cfg(feature = "canvas")]
+    pub use velox_canvas::{
+        world_to_overlay_anchor, CanvasDragMode, CanvasInteraction, FlatRTree, InteractiveCanvas,
+        ItemStateBuffer, LodLevel, LodPolicy, Minimap, PolygonBackdrop, SceneStore,
+        ViewportController,
+    };
 
     pub use velox_engine::prelude::*;
 }

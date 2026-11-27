@@ -43,7 +43,7 @@ pub use components::{
 };
 pub use motion::{MotionDivExt, MotionPreset, SpringCard, SpringProgress, SpringReveal};
 pub use motion::SpringAnimator;
-pub use styled::TailwindStyled;
+pub use styled::{apply_tw_liquid_glass, liquid_glass_panel, TailwindStyled};
 pub use theme::Theme;
 pub use velox_base::{
     clip_offset_left, clip_offset_right, input, line_range_at, next_word_boundary,
@@ -93,7 +93,7 @@ pub mod prelude {
     };
     pub use crate::motion::{MotionDivExt, MotionPreset, SpringCard, SpringProgress, SpringReveal};
     pub use crate::motion::SpringAnimator;
-    pub use crate::styled::TailwindStyled;
+    pub use crate::styled::{apply_tw_liquid_glass, liquid_glass_panel, TailwindStyled};
     pub use crate::theme::Theme;
     pub use velox_base::{
         clip_offset_left, clip_offset_right, line_range_at, next_word_boundary, prev_word_boundary,

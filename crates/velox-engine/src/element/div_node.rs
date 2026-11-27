@@ -323,6 +323,8 @@ pub struct DivRareHandlers<'a> {
     pub on_drag: Option<&'a dyn Fn(&mut ActionScope)>,
     pub on_hover: Option<&'a dyn Fn(bool, &mut ActionScope)>,
     pub on_pointer_move: Option<&'a dyn Fn(&mut ActionScope)>,
+    pub on_wheel: Option<&'a dyn Fn(crate::pod::WheelEvent, &mut ActionScope)>,
+    pub on_pinch: Option<&'a dyn Fn(crate::pod::PinchEvent, &mut ActionScope)>,
     pub on_swipe: Option<&'a dyn Fn(crate::pod::SwipeDir, &mut ActionScope)>,
     pub on_key_input: Option<&'a dyn Fn(crate::pod::KeyCode, &mut ActionScope)>,
     pub on_key_nav: Option<&'a dyn Fn(crate::pod::KeyCode, &mut ActionScope)>,
@@ -485,6 +487,16 @@ impl<'a> DivNode<'a> {
         self.interact
             .and_then(|i| i.rare)
             .and_then(|r| r.on_pointer_move)
+    }
+
+    #[inline(always)]
+    pub fn on_wheel(&self) -> Option<&'a dyn Fn(crate::pod::WheelEvent, &mut ActionScope)> {
+        self.interact.and_then(|i| i.rare).and_then(|r| r.on_wheel)
+    }
+
+    #[inline(always)]
+    pub fn on_pinch(&self) -> Option<&'a dyn Fn(crate::pod::PinchEvent, &mut ActionScope)> {
+        self.interact.and_then(|i| i.rare).and_then(|r| r.on_pinch)
     }
 
     #[inline(always)]

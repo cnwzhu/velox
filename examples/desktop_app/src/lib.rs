@@ -8,6 +8,7 @@
 //! - **DATA DISPLAY**：`Table & List`、`Settings & Icons`。
 
 pub mod async_demo;
+pub mod demos;
 pub mod i18n;
 pub mod reactive;
 mod stories;
@@ -19,6 +20,7 @@ pub use async_demo::{
 pub use velox_kit::prelude::block_on;
 pub use velox_kit::TokioScheduler;
 use i18n::{next_demo_locale, DESKTOP_CATALOG};
+pub use stories::canvas::{CanvasDemoState, CanvasPreset};
 pub use stories::chat::{ChatDemoState, ChatEntry, ChatStreamPhase};
 pub use reactive::{GallerySignals, OverviewPlaygroundView, StatusBarView};
 use velox_kit::component::{
@@ -82,6 +84,7 @@ pub enum GalleryStory {
     Motion,
     EngineLab,
     Chat,
+    Canvas,
 }
 
 /// 兼容旧命名的类型别名。
@@ -107,6 +110,7 @@ impl GalleryStory {
             Self::Motion => 13,
             Self::EngineLab => 14,
             Self::Chat => 15,
+            Self::Canvas => 16,
         }
     }
 
@@ -128,7 +132,8 @@ impl GalleryStory {
             12 => Self::Effects,
             13 => Self::Motion,
             14 => Self::EngineLab,
-            _ => Self::Chat,
+            15 => Self::Chat,
+            _ => Self::Canvas,
         }
     }
 
@@ -199,6 +204,11 @@ impl GalleryStory {
             || name.eq_ignore_ascii_case("ai-chat")
         {
             Some(Self::Chat)
+        } else if name.eq_ignore_ascii_case("canvas")
+            || name.eq_ignore_ascii_case("stadium")
+            || name.eq_ignore_ascii_case("map")
+        {
+            Some(Self::Canvas)
         } else {
             None
         }
@@ -223,6 +233,7 @@ impl GalleryStory {
             Self::Motion => "story.motion",
             Self::EngineLab => "story.engine",
             Self::Chat => "story.chat",
+            Self::Canvas => "story.canvas",
         }
     }
 }
@@ -358,6 +369,9 @@ pub struct GalleryApp {
 
     // AI Chat (gpui-kit animated chat story)
     pub chat: stories::chat::ChatDemoState,
+
+    // Interactive 2D Canvas (Hilbert RTree + OBB SDF + Minimap + optional custom-shader)
+    pub canvas_demo: stories::canvas::CanvasDemoState,
 }
 
 /// 兼容旧示例主视图命名的类型别名。
@@ -482,6 +496,7 @@ impl GalleryApp {
             input_otp,
             input_color_picker: ColorPickerState::from_color(Color::rgb(59, 130, 246)),
             chat: stories::chat::ChatDemoState::new(),
+            canvas_demo: stories::canvas::CanvasDemoState::new(),
         }
     }
 
@@ -782,6 +797,9 @@ impl View for GalleryApp {
             SidebarItem::new(GalleryStory::Chat.id(), cx.t("story.chat").as_str(), "C")
                 .icon_name(IconName::Info)
                 .badge("AI"),
+            SidebarItem::new(GalleryStory::Canvas.id(), cx.t("story.canvas").as_str(), "M")
+                .icon_name(IconName::Star)
+                .badge("2D"),
         ]);
 
         let sidebar_sections = cx.arena().alloc_iter([
@@ -826,6 +844,7 @@ impl View for GalleryApp {
             GalleryStory::Motion => self.render_story_motion(cx, theme),
             GalleryStory::EngineLab => self.render_story_engine_lab(cx, theme),
             GalleryStory::Chat => self.render_story_chat(cx, theme),
+            GalleryStory::Canvas => self.render_story_canvas(cx, theme),
         };
 
         let content_scroll_max = match self.active_story {
@@ -833,7 +852,8 @@ impl View for GalleryApp {
             GalleryStory::Motion
             | GalleryStory::EngineLab
             | GalleryStory::Feedback
-            | GalleryStory::Chat => 620,
+            | GalleryStory::Chat
+            | GalleryStory::Canvas => 620,
             _ => 420,
         };
 

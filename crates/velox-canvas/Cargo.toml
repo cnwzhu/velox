@@ -1,0 +1,17 @@
+[package]
+name = "velox-canvas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "High-density 2D interactive canvas for Velox: Hilbert FlatRTree spatial index, SoA SceneStore, gesture ViewportController, semantic LOD, Minimap, and optional custom-shader hook"
+
+[features]
+default = []
+custom-shader = ["velox-engine/custom-shader"]
+
+[dependencies]
+velox-engine = { version = "0.4.0", path = "../velox-engine", default-features = false, features = ["std"] }

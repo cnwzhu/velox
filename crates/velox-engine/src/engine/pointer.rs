@@ -591,10 +591,42 @@ impl VeloxEngine {
 
     #[inline(never)]
     pub(super) fn dispatch_scroll_axis_at(&mut self, px: i16, py: i16, delta: i16, prefer_horiz: bool) -> bool {
-        if self.root_pod.is_none() {
+        let Some(root_id) = self.root_pod else {
             return false;
-        }
+        };
         self.ensure_hits_available();
+        // 0. 优先派发自定义 `on_wheel` 回调（如交互画布 Zoom-to-Cursor），避免滚轮被外层页面滚动吞掉
+        let hits = self.cached_hit_regions();
+        let mods = self.modifiers;
+        for hit in hits.iter().rev() {
+            if hit.bounds.intersect(hit.clip).contains(px, py) {
+                if let Some(on_wheel) = hit.on_wheel() {
+                    let ev = crate::pod::WheelEvent {
+                        x: px,
+                        y: py,
+                        local_x: (px - hit.bounds.x).clamp(0, hit.bounds.w),
+                        local_y: (py - hit.bounds.y).clamp(0, hit.bounds.h),
+                        width: hit.bounds.w.max(1),
+                        height: hit.bounds.h.max(1),
+                        delta_x: if prefer_horiz { delta } else { 0 },
+                        delta_y: if prefer_horiz { 0 } else { delta },
+                    };
+                    let owner = Self::resolve_hit_pod(root_id, hit.owner_pod);
+                    {
+                        let mut acx = self
+                            .make_action_scope(owner, (px, py), DragEvent::default())
+                            .with_modifiers(mods);
+                        on_wheel(ev, &mut acx);
+                    }
+                    self.flush_async_after_event();
+                    self.interaction_dirty = true;
+                    return true;
+                }
+                if hit.occlude {
+                    break;
+                }
+            }
+        }
         // 支持嵌套滚动链（Scroll Chaining）：先尝试最内层匹配滚动容器，若已触顶/触底无法继续滚动则自动向上冒泡至外层容器
         let mut preferred: crate::arena::SmallVec<(u32, i16), 8> = crate::arena::SmallVec::new();
         let mut fallback: crate::arena::SmallVec<(u32, i16), 8> = crate::arena::SmallVec::new();
@@ -631,6 +663,55 @@ impl VeloxEngine {
             }
         }
         // 即使均在边界未产生位移，仍返回 true 表示事件已被滚动容器体系消费
+        true
+    }
+
+    /// 派发指定坐标 `(px, py)` 处的双指捏合缩放手势 [`crate::pod::PinchEvent`]。
+    #[inline(never)]
+    pub fn dispatch_pinch_at(&mut self, px: i16, py: i16, delta_scale_x1000: i16) -> bool {
+        self.last_pinch_delta_x1000 = delta_scale_x1000;
+        let Some(root_id) = self.root_pod else {
+            self.interaction_dirty = true;
+            return true;
+        };
+        self.ensure_hits_available();
+        let hits = self.cached_hit_regions();
+        let mods = self.modifiers;
+        let mut handled = false;
+        for hit in hits.iter().rev() {
+            if hit.bounds.intersect(hit.clip).contains(px, py) {
+                if let Some(on_pinch) = hit.on_pinch() {
+                    let ev = crate::pod::PinchEvent {
+                        x: px,
+                        y: py,
+                        local_x: (px - hit.bounds.x).clamp(0, hit.bounds.w),
+                        local_y: (py - hit.bounds.y).clamp(0, hit.bounds.h),
+                        width: hit.bounds.w.max(1),
+                        height: hit.bounds.h.max(1),
+                        delta_scale_x1000,
+                    };
+                    let owner = Self::resolve_hit_pod(root_id, hit.owner_pod);
+                    let stopped = {
+                        let mut acx = self
+                            .make_action_scope(owner, (px, py), DragEvent::default())
+                            .with_modifiers(mods);
+                        on_pinch(ev, &mut acx);
+                        acx.is_propagation_stopped()
+                    };
+                    handled = true;
+                    if stopped {
+                        break;
+                    }
+                }
+                if hit.occlude {
+                    break;
+                }
+            }
+        }
+        if handled {
+            self.flush_async_after_event();
+        }
+        self.interaction_dirty = true;
         true
     }
 

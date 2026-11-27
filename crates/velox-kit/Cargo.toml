@@ -10,7 +10,7 @@ categories.workspace = true
 description = "The one crate applications depend on — unified facade re-exporting velox-engine, velox-base, and velox-component"
 
 [features]
-default = ["gpu", "winit", "component"]
+default = ["gpu", "winit", "component", "canvas"]
 
 # 运行时与窗口（纯 Rust 平台桥接 wayland / android / ios / harmony / web 随 std 自动可用）
 std = ["velox-engine/std", "velox-base?/std", "velox-component?/std"]
@@ -19,17 +19,20 @@ winit = ["std", "velox-engine/winit"]
 # GPU 硬件加速后端（内置 software 软光栅始终可用；关闭 default-features 并启用 std 即纯软件渲染）
 gpu = ["std", "velox-engine/gpu"]
 gpu-interop = ["gpu", "velox-engine/gpu-interop"]
+custom-shader = ["gpu", "velox-engine/custom-shader", "velox-canvas?/custom-shader"]
 
-# 组件层（关闭 default-features 即仅使用 velox-engine）
+# 组件层与 2D 空间画布基座（关闭 default-features 即仅使用 velox-engine）
 base = ["dep:velox-base"]
 component = ["base", "dep:velox-component"]
+canvas = ["std", "dep:velox-canvas"]
 
 # 可选独立调度器适配 crate（按需开启，默认全部关闭保持零外部异步运行时依赖）
 tokio = ["std", "dep:velox-async", "velox-async/tokio"]
 smol = ["std", "dep:velox-async", "velox-async/smol"]
 
 [dependencies]
-velox-engine = { version = "0.3.0", path = "../velox-engine", default-features = false }
-velox-base = { version = "0.3.0", path = "../velox-base", optional = true }
-velox-component = { version = "0.3.0", path = "../velox-component", optional = true }
-velox-async = { version = "0.3.0", path = "../velox-async", default-features = false, optional = true }
+velox-engine = { version = "0.4.0", path = "../velox-engine", default-features = false }
+velox-base = { version = "0.4.0", path = "../velox-base", optional = true }
+velox-component = { version = "0.4.0", path = "../velox-component", optional = true }
+velox-canvas = { version = "0.4.0", path = "../velox-canvas", optional = true }
+velox-async = { version = "0.4.0", path = "../velox-async", default-features = false, optional = true }

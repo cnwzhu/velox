@@ -18,6 +18,9 @@ std = []
 # 默认轻量级 2D SDF GPU 硬件加速后端（纯 wgpu；内置 software 软光栅始终可用）
 gpu = ["dep:wgpu"]
 
+# 可选 WGSL 自定义着色器逃生舱（依赖 gpu，允许注册自定义 wgpu::RenderPipeline 嵌入画布渲染顺序）
+custom-shader = ["gpu"]
+
 # 跨 API / 跨框架零拷贝显存句柄桥接（Windows DX12 NT Handle / Linux Vulkan DMA-BUF / Metal IOSurface / Android AHB）
 gpu-interop = ["gpu", "dep:windows", "dep:ash"]
 

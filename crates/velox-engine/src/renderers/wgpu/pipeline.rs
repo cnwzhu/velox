@@ -117,6 +117,7 @@ pub struct WgpuRenderer {
     sprite_atlas: SpriteAtlas,
     ramp_atlas: GradientRampAtlas,
     effects: Option<GpuEffectsEngine>,
+    canvas_engine: Option<super::canvas_pipeline::CanvasGpuEngine>,
     external_textures: HashMap<ExternalTextureId, ExternalTextureEntry>,
     next_external_id: u32,
     target_format: wgpu::TextureFormat,
@@ -311,6 +312,7 @@ impl WgpuRenderer {
             sprite_atlas,
             ramp_atlas,
             effects: None,
+            canvas_engine: None,
             external_textures: HashMap::new(),
             next_external_id: 1,
             target_format,
@@ -1020,6 +1022,73 @@ impl WgpuRenderer {
                     xform: IDENTITY_XFORM,
                 });
             }
+            DrawPayload::SceneCanvas(spec) => {
+                // 隔离图层/多 Pass 兜底路径：通过软件光栅同步到精灵图集以保持与复杂混合模式兼容
+                let sb = snap_bounds_region_scaled(op.bounds, sf);
+                let sc = Region::new(
+                    sc_f[0] as i16,
+                    sc_f[1] as i16,
+                    (sc_f[2] - sc_f[0]).max(0.0) as i16,
+                    (sc_f[3] - sc_f[1]).max(0.0) as i16,
+                );
+                let eff = sc.intersect(sb);
+                if eff.is_empty() {
+                    return Ok(());
+                }
+                let w = eff.w.max(1) as usize;
+                let h = eff.h.max(1) as usize;
+                let hash = ((spec.content_hash() as u64) << 32)
+                    | (((eff.x.saturating_sub(sb.x) as u16 as u64) << 16)
+                        | (eff.y.saturating_sub(sb.y) as u16 as u64))
+                    ^ ((sf * 16.0).round() as u64);
+                let cache_key = SpriteCacheKey {
+                    w: w as u32,
+                    h: h as u32,
+                    hash,
+                };
+                let uv = if let Some(cached) = self.sprite_atlas.lookup(cache_key) {
+                    cached
+                } else {
+                    let len = w * h;
+                    if self.sprite_scratch.len() < len {
+                        self.sprite_scratch.resize(len, Rgba8888(0));
+                    }
+                    let slice = &mut self.sprite_scratch[..len];
+                    slice.fill(Rgba8888(0));
+                    crate::canvas_scene::rasterize_scene_canvas(
+                        sb, eff, spec, sf, eff.x, eff.y, w, slice,
+                    );
+                    let rgba_bytes = pod_as_bytes(slice);
+                    let Some(u) = self.sprite_atlas.insert_and_upload(queue, cache_key, rgba_bytes)
+                    else {
+                        return Err(AtlasGrowNeed {
+                            glyph_full: false,
+                            sprite_need: Some((w as u32, h as u32)),
+                            ramp_full: false,
+                        });
+                    };
+                    u
+                };
+                self.primitives.push(GpuPrimitive {
+                    bounds: [
+                        eff.x as f32 - origin_x,
+                        eff.y as f32 - origin_y,
+                        w as f32,
+                        h as f32,
+                    ],
+                    clip: shifted_sc,
+                    uv,
+                    color0: [1.0; 4],
+                    color1: [0.0; 4],
+                    border_color: [0.0; 4],
+                    params: [0.0, 0.0, KIND_SPRITE, 0.0],
+                    extra: [clip_radius_px, 0.0, 0.0, 0.0],
+                    radii: [0.0; 4],
+                    grad_a: [0.0; 4],
+                    grad_b: [0.0; 4],
+                    xform: IDENTITY_XFORM,
+                });
+            }
             DrawPayload::PushLayer(_)
             | DrawPayload::PopLayer
             | DrawPayload::ExternalTexture(_) => {}
@@ -1360,6 +1429,25 @@ impl WgpuRenderer {
             return;
         }
 
+        if ops
+            .iter()
+            .any(|op| matches!(op.payload, DrawPayload::SceneCanvas(_)))
+            && !viewport.is_empty()
+        {
+            self.render_to_view_with_scene_canvas(
+                device,
+                queue,
+                ops,
+                viewport,
+                scale_factor,
+                target_view,
+                phys_width,
+                phys_height,
+                clear_color,
+            );
+            return;
+        }
+
         let mut bind_group_dirty = false;
         for _attempt in 0..4 {
             match self.try_encode_ops(queue, ops, viewport, scale_factor) {
@@ -1447,6 +1535,9 @@ impl WgpuRenderer {
     ) {
         if dirty_regions.is_empty()
             || crate::renderers::software::ops_have_layers_or_blend(ops)
+            || ops
+                .iter()
+                .any(|op| matches!(op.payload, DrawPayload::SceneCanvas(_)))
         {
             self.render_to_view(
                 device,
@@ -2431,5 +2522,357 @@ impl WgpuRenderer {
 
         self.effects = Some(fx);
         result
+    }
+
+    /// 针对包含 `DrawPayload::SceneCanvas` 的无图层帧执行零离屏拷贝交错渲染：
+    /// 画布前 UI → 背景填充 → `CanvasGpuEngine`（bg_shaders + StaticMesh + 32B+4B Instanced SDF + fg_shaders）
+    /// → ASCII 快速字形标签（含 Zoom Font Lock）+ 橡皮筋框选 → 画布后浮层 UI（Tooltip / Minimap）。
+    #[allow(clippy::too_many_arguments)]
+    fn render_to_view_with_scene_canvas(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        ops: &[DrawOp<'_>],
+        viewport: Region,
+        scale_factor: f32,
+        target_view: &wgpu::TextureView,
+        phys_width: u32,
+        phys_height: u32,
+        clear_color: wgpu::Color,
+    ) {
+        enum InterleavedStep {
+            UiBatch(u32, u32),
+            Canvas {
+                op_idx: usize,
+                bounds_phys: [f32; 4],
+                clip_phys: [f32; 4],
+                scissor: Region,
+            },
+        }
+
+        let sf = scale_factor.clamp(0.5, 4.0);
+        let pw = phys_width.max(1);
+        let ph = phys_height.max(1);
+        let use_ttf = crate::display::ttf_atlas::has_system_font();
+        let mut steps: Vec<InterleavedStep> = Vec::with_capacity(8);
+
+        let mut bind_group_dirty = false;
+        for _attempt in 0..4 {
+            self.primitives.clear();
+            steps.clear();
+            let mut batch_start = 0u32;
+            let mut err_need: Option<AtlasGrowNeed> = None;
+
+            for (op_idx, op) in ops.iter().enumerate() {
+                let raw_clip = match op.payload {
+                    DrawPayload::StyledQuad(sq) if sq.transform.is_some() => {
+                        viewport.intersect(op.clip)
+                    }
+                    _ => viewport.intersect(op.clip).intersect(op.bounds),
+                };
+                if raw_clip.is_empty() {
+                    continue;
+                }
+                if let DrawPayload::SceneCanvas(spec) = op.payload {
+                    let bounds_phys = snap_bounds(op.bounds, sf);
+                    let clip_phys = snap_clip(raw_clip, sf);
+                    let scissor = snap_clip_region_scaled(raw_clip, sf);
+
+                    // 1. 先向 UI 批次推入画布纯色背景（位于 CustomShader / StaticMesh 下方）
+                    if spec.bg.a() > 0 && spec.opacity > 0 {
+                        let bg = spec.bg.scale_alpha(spec.opacity);
+                        self.primitives.push(make_quad_primitive(
+                            bounds_phys,
+                            clip_phys,
+                            (op.clip_radius as f32) * sf,
+                            0.0,
+                            0.0,
+                            false,
+                            bg,
+                            Color::TRANSPARENT,
+                            Color::TRANSPARENT,
+                        ));
+                    }
+                    let batch_end = self.primitives.len() as u32;
+                    if batch_end > batch_start {
+                        steps.push(InterleavedStep::UiBatch(batch_start, batch_end));
+                        batch_start = batch_end;
+                    }
+
+                    // 2. 插入画布 GPU Instanced + Mesh + CustomShader Pass
+                    steps.push(InterleavedStep::Canvas {
+                        op_idx,
+                        bounds_phys,
+                        clip_phys,
+                        scissor,
+                    });
+
+                    // 3. 画布上方编码 ASCII 快速字形标签（Zoom Font Lock）与橡皮筋框选
+                    if let Err(need) = self.encode_canvas_overlay_primitives(
+                        queue,
+                        spec,
+                        bounds_phys,
+                        clip_phys,
+                        (op.clip_radius as f32) * sf,
+                        sf,
+                    ) {
+                        err_need = Some(need);
+                        break;
+                    }
+                } else if let Err(need) = self.encode_single_op(
+                    queue, op, raw_clip, viewport, sf, use_ttf, 0.0, 0.0,
+                ) {
+                    err_need = Some(need);
+                    break;
+                }
+            }
+
+            if let Some(need) = err_need {
+                let (dirty, can_retry) = self.handle_atlas_grow(device, need);
+                if dirty {
+                    bind_group_dirty = true;
+                }
+                if !can_retry {
+                    break;
+                }
+            } else {
+                let final_end = self.primitives.len() as u32;
+                if final_end > batch_start {
+                    steps.push(InterleavedStep::UiBatch(batch_start, final_end));
+                }
+                break;
+            }
+        }
+
+        if self.primitives.len() > self.instance_capacity {
+            self.instance_capacity = self.primitives.len().next_power_of_two();
+            self.instance_buf = Self::create_instance_buffer(device, self.instance_capacity);
+            bind_group_dirty = true;
+        }
+        if bind_group_dirty {
+            self.rebuild_bind_group(device);
+        }
+
+        let slot0 = AlignedViewportSlot {
+            uniform: ViewportUniform {
+                size: [pw as f32, ph as f32],
+                is_srgb: if self.target_is_srgb { 1.0 } else { 0.0 },
+                _pad: 0.0,
+            },
+            _pad: [0u8; 256 - core::mem::size_of::<ViewportUniform>()],
+        };
+        queue.write_buffer(&self.viewport_buf, 0, pod_as_bytes(&[slot0]));
+        if !self.primitives.is_empty() {
+            queue.write_buffer(&self.instance_buf, 0, pod_as_bytes(&self.primitives));
+        }
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("velox_wgpu_scene_canvas_encoder"),
+        });
+
+        let mut cleared = false;
+        let is_srgb = self.target_is_srgb;
+        let mut canvas_eng = self
+            .canvas_engine
+            .take()
+            .unwrap_or_else(|| super::canvas_pipeline::CanvasGpuEngine::new(device, self.target_format));
+
+        for step in &steps {
+            match *step {
+                InterleavedStep::UiBatch(start, end) => {
+                    let load = if !cleared {
+                        cleared = true;
+                        wgpu::LoadOp::Clear(clear_color)
+                    } else {
+                        wgpu::LoadOp::Load
+                    };
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("velox_canvas_ui_batch"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: target_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                        multiview_mask: None,
+                    });
+                    if end > start {
+                        rpass.set_pipeline(&self.pipeline);
+                        rpass.set_bind_group(0, &self.bind_group, &[0]);
+                        rpass.draw(0..6, start..end);
+                    }
+                }
+                InterleavedStep::Canvas {
+                    op_idx,
+                    bounds_phys,
+                    clip_phys,
+                    scissor,
+                } => {
+                    if !cleared {
+                        cleared = true;
+                        let _clear_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("velox_canvas_clear"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: target_view,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(clear_color),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            occlusion_query_set: None,
+                            timestamp_writes: None,
+                            multiview_mask: None,
+                        });
+                    }
+                    if let DrawPayload::SceneCanvas(spec) = ops[op_idx].payload {
+                        canvas_eng.render_canvas(
+                            device,
+                            queue,
+                            &mut encoder,
+                            target_view,
+                            pw,
+                            ph,
+                            bounds_phys,
+                            clip_phys,
+                            scissor,
+                            sf,
+                            is_srgb,
+                            spec,
+                        );
+                    }
+                }
+            }
+        }
+
+        self.canvas_engine = Some(canvas_eng);
+        queue.submit([encoder.finish()]);
+    }
+
+    /// 编码画布近景 ASCII 快速标签（手势缩放时自动锁定 16px/32px 离散基准字号 + `O(1)` 查表防图集抖动）与橡皮筋框选矩形。
+    fn encode_canvas_overlay_primitives(
+        &mut self,
+        queue: &wgpu::Queue,
+        spec: &crate::canvas_scene::SceneCanvasSpec<'_>,
+        bounds_phys: [f32; 4],
+        clip_phys: [f32; 4],
+        clip_radius_px: f32,
+        sf: f32,
+    ) -> Result<(), AtlasGrowNeed> {
+        let vp_zoom = spec.viewport.zoom * sf;
+        let vp_ox = bounds_phys[0] + spec.viewport.offset_x * sf;
+        let vp_oy = bounds_phys[1] + spec.viewport.offset_y * sf;
+
+        // 1. ASCII 快速通道：绕过 CosmicEditor，直接按字节查表出字形实例
+        for lbl in spec.labels {
+            if lbl.text.is_empty() {
+                continue;
+            }
+            let target_px = (lbl.font_px * sf).clamp(6.0, 48.0);
+            let col_f32 = color_to_f32(lbl.color.scale_alpha(spec.opacity));
+            let center_x = lbl.wx * vp_zoom + vp_ox;
+            let center_y = lbl.wy * vp_zoom + vp_oy;
+
+            // Zoom Font Lock：缩放态锁定 16px / 32px 离散基准字号并顶点缩放纹理，手势停稳 120ms 后恢复 0.25px 精确光栅化
+            let use_fast_lock = spec.zooming || lbl.text.is_ascii();
+            if use_fast_lock && lbl.text.is_ascii() {
+                let (large_32, base_px, q4_exact) = if spec.zooming {
+                    let large = target_px > 20.0;
+                    (large, if large { 32.0 } else { 16.0 }, 0u16)
+                } else {
+                    let q4 = (target_px * 4.0).round().clamp(24.0, 192.0) as u16;
+                    (false, target_px, q4)
+                };
+                let ratio = if spec.zooming {
+                    target_px / base_px
+                } else {
+                    1.0
+                };
+                let mut total_adv = 0.0f32;
+                let mut cached_entries: [Option<super::atlas::GlyphAtlasEntry>; 16] = [None; 16];
+                let bytes = lbl.text.as_bytes();
+                let count = bytes.len().min(16);
+                for i in 0..count {
+                    let b = bytes[i];
+                    let entry = if spec.zooming {
+                        self.glyph_atlas.get_ascii_fast(queue, b, large_32)
+                    } else {
+                        self.glyph_atlas.get_or_insert(queue, b as char, q4_exact, true)
+                    };
+                    let Some(e) = entry else {
+                        return Err(AtlasGrowNeed {
+                            glyph_full: true,
+                            sprite_need: None,
+                            ramp_full: false,
+                        });
+                    };
+                    total_adv += (e.advance.max(4) as f32) * ratio;
+                    cached_entries[i] = Some(e);
+                }
+                let mut pen_x = center_x - total_adv * 0.5;
+                let baseline_y = center_y + target_px * 0.34;
+                for i in 0..count {
+                    if let Some(e) = cached_entries[i] {
+                        if e.width > 0 && e.height > 0 {
+                            let gw = (e.width as f32) * ratio;
+                            let gh = (e.height as f32) * ratio;
+                            let gx = pen_x + (e.xmin as f32) * ratio;
+                            let gy = baseline_y - gh - (e.ymin as f32) * ratio;
+                            if gx + gw >= clip_phys[0]
+                                && gx <= clip_phys[2]
+                                && gy + gh >= clip_phys[1]
+                                && gy <= clip_phys[3]
+                            {
+                                self.primitives.push(GpuPrimitive {
+                                    bounds: [gx, gy, gw, gh],
+                                    clip: clip_phys,
+                                    uv: e.uv,
+                                    color0: col_f32,
+                                    color1: [0.0; 4],
+                                    border_color: [0.0; 4],
+                                    params: [0.0, 0.0, KIND_GLYPH, 0.0],
+                                    extra: [clip_radius_px, 0.0, 0.0, 0.0],
+                                    radii: [0.0; 4],
+                                    grad_a: [0.0; 4],
+                                    grad_b: [0.0; 4],
+                                    xform: IDENTITY_XFORM,
+                                });
+                            }
+                        }
+                        pen_x += (e.advance.max(4) as f32) * ratio;
+                    }
+                }
+            }
+        }
+
+        // 2. 橡皮筋框选矩形
+        if let Some([mx0, my0, mx1, my1]) = spec.marquee {
+            let x0 = bounds_phys[0] + mx0.min(mx1) * sf;
+            let y0 = bounds_phys[1] + my0.min(my1) * sf;
+            let w = (mx1 - mx0).abs() * sf;
+            let h = (my1 - my0).abs() * sf;
+            if w > 1.0 && h > 1.0 {
+                self.primitives.push(make_quad_primitive(
+                    [x0, y0, w, h],
+                    clip_phys,
+                    clip_radius_px,
+                    2.0 * sf,
+                    1.5 * sf,
+                    false,
+                    spec.marquee_color.scale_alpha(52),
+                    Color::TRANSPARENT,
+                    spec.marquee_color.scale_alpha(220),
+                ));
+            }
+        }
+        Ok(())
     }
 }

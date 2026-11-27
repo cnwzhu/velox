@@ -738,3 +738,289 @@ pub fn measure_rich_text_box(spec: &RichTextSpec<'_>, max_width: i16) -> (i16, i
         total_h.min(i16::MAX as i32) as i16,
     )
 }
+
+// ============================================================================
+// 国际多脚本分类、Emoji 序列聚类、多字体回退链与富文本内联真实组件流（InlineFlow）
+// ============================================================================
+
+/// Unicode 文字脚本分类（供多字体回退链与复杂混排脚本分段使用）。
+#[repr(u8)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
+pub enum ScriptKind {
+    #[default]
+    Latin = 0,
+    Cjk = 1,
+    Arabic = 2,
+    Hebrew = 3,
+    Devanagari = 4,
+    Cyrillic = 5,
+    Emoji = 6,
+    Symbol = 7,
+}
+
+/// 分类单个 Unicode 标量值所属文字脚本（100% `#![no_std]` 零查表分支）。
+#[inline]
+pub const fn classify_script(ch: char) -> ScriptKind {
+    let cp = ch as u32;
+    if is_emoji_char(ch)
+        || cp == 0x200D
+        || cp == 0xFE0F
+        || (cp >= 0x1F3FB && cp <= 0x1F3FF)
+        || (cp >= 0x1F1E6 && cp <= 0x1F1FF)
+    {
+        return ScriptKind::Emoji;
+    }
+    if (cp >= 0x4E00 && cp <= 0x9FFF)
+        || (cp >= 0x3400 && cp <= 0x4DBF)
+        || (cp >= 0x3000 && cp <= 0x30FF)
+        || (cp >= 0xAC00 && cp <= 0xD7AF)
+        || (cp >= 0xFF00 && cp <= 0xFFEF)
+    {
+        return ScriptKind::Cjk;
+    }
+    if (cp >= 0x0600 && cp <= 0x06FF)
+        || (cp >= 0x0750 && cp <= 0x077F)
+        || (cp >= 0x08A0 && cp <= 0x08FF)
+    {
+        return ScriptKind::Arabic;
+    }
+    if cp >= 0x0590 && cp <= 0x05FF {
+        return ScriptKind::Hebrew;
+    }
+    if cp >= 0x0900 && cp <= 0x097F {
+        return ScriptKind::Devanagari;
+    }
+    if cp >= 0x0400 && cp <= 0x052F {
+        return ScriptKind::Cyrillic;
+    }
+    if cp < 0x0250 || (cp >= 0x1E00 && cp <= 0x1EFF) {
+        return ScriptKind::Latin;
+    }
+    ScriptKind::Symbol
+}
+
+/// 按脚本与 Emoji ZWJ 聚类后的文本分段。
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct ScriptRun<'a> {
+    pub script: ScriptKind,
+    pub text: &'a str,
+}
+
+/// 将任意 UTF-8 文本零堆切分为同脚本运行段（自动合并 Emoji ZWJ / 肤色修饰符 / VS-16 簇）。
+pub fn split_script_runs<'a>(text: &'a str) -> SmallVec<ScriptRun<'a>, 32> {
+    let mut runs: SmallVec<ScriptRun<'a>, 32> = SmallVec::new();
+    let mut iter = text.char_indices().peekable();
+    let mut cur_start: Option<usize> = None;
+    let mut cur_script = ScriptKind::Latin;
+
+    while let Some((idx, ch)) = iter.next() {
+        let sc = if ch.is_whitespace() && cur_start.is_some() {
+            cur_script
+        } else {
+            classify_script(ch)
+        };
+        match cur_start {
+            None => {
+                cur_start = Some(idx);
+                cur_script = sc;
+            }
+            Some(start) if sc != cur_script => {
+                let _ = runs.push(ScriptRun {
+                    script: cur_script,
+                    text: &text[start..idx],
+                });
+                cur_start = Some(idx);
+                cur_script = sc;
+            }
+            Some(_) => {}
+        }
+    }
+    if let Some(start) = cur_start {
+        let _ = runs.push(ScriptRun {
+            script: cur_script,
+            text: &text[start..],
+        });
+    }
+    runs
+}
+
+/// 8 槽位零堆多脚本字体回退链（支持为 CJK / Arabic / Emoji / Devanagari 等独立绑定自定义或系统字族）。
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct FontFallbackChain {
+    slots: [Option<FontFamily>; 8],
+}
+
+impl Default for FontFallbackChain {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FontFallbackChain {
+    #[inline(always)]
+    pub const fn new() -> Self {
+        Self { slots: [None; 8] }
+    }
+
+    /// 为指定文字脚本绑定回退字族。
+    #[inline(always)]
+    pub const fn with_script(mut self, script: ScriptKind, family: FontFamily) -> Self {
+        self.slots[script as usize] = Some(family);
+        self
+    }
+
+    /// 查询指定字符最终应使用的 [`FontSpec`]（保持原始字重与斜体）。
+    #[inline]
+    pub const fn resolve_for_char(&self, ch: char, base: FontSpec) -> FontSpec {
+        let script = classify_script(ch);
+        if let Some(fam) = self.slots[script as usize] {
+            FontSpec {
+                family: fam,
+                weight: base.weight,
+                style: base.style,
+            }
+        } else {
+            base
+        }
+    }
+}
+
+/// 富文本内联真实组件流（`InlineFlow`）：
+/// 允许在自动换行的段落流中无缝混排多色文字、彩色 Emoji 与任意真实交互组件（`Button` / `Badge` / `Tag` / `Kbd` 等）。
+pub struct InlineFlow<'a> {
+    root: crate::element::Div<'a>,
+    default_size: u8,
+    default_color: Color,
+}
+
+/// 创建一个富文本内联组件混排流容器（支持自动换行、基线居中对齐与任意内联交互组件）。
+#[inline]
+pub fn inline_flow<'a>() -> InlineFlow<'a> {
+    use crate::style::Styled;
+    InlineFlow {
+        root: crate::element::div()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap(4),
+        default_size: 13,
+        default_color: Color::WHITE,
+    }
+}
+
+impl<'a> InlineFlow<'a> {
+    #[inline]
+    pub fn w(mut self, w: i16) -> Self {
+        use crate::style::Styled;
+        self.root = self.root.w(w);
+        self
+    }
+
+    #[inline]
+    pub fn w_full(mut self) -> Self {
+        use crate::style::Styled;
+        self.root = self.root.w_full();
+        self
+    }
+
+    #[inline]
+    pub fn gap(mut self, px: i8) -> Self {
+        use crate::style::Styled;
+        self.root = self.root.gap(px);
+        self
+    }
+
+    #[inline]
+    pub const fn default_size(mut self, px: u8) -> Self {
+        self.default_size = px;
+        self
+    }
+
+    #[inline]
+    pub const fn default_color(mut self, color: Color) -> Self {
+        self.default_color = color;
+        self
+    }
+
+    /// 追加一段可自动按词/CJK 字符边界拆行并与内联组件混排的文本。
+    pub fn text(self, cx: &'a FrameScope, content: &'a str) -> Self {
+        let sz = self.default_size;
+        let col = self.default_color;
+        self.styled_text(cx, content, col, sz, false)
+    }
+
+    /// 追加一段带自定义颜色/字号/加粗的混排文本（自动按空格与 CJK 边界切分，确保丝滑换行）。
+    pub fn styled_text(
+        mut self,
+        cx: &'a FrameScope,
+        content: &'a str,
+        color: Color,
+        font_size: u8,
+        bold: bool,
+    ) -> Self {
+        let mut start = 0usize;
+        let mut iter = content.char_indices().peekable();
+        while let Some((idx, ch)) = iter.next() {
+            let next_idx = iter.peek().map(|&(ni, _)| ni).unwrap_or(content.len());
+            let is_cjk = matches!(
+                classify_script(ch),
+                ScriptKind::Cjk | ScriptKind::Emoji
+            );
+            if ch.is_whitespace() {
+                if idx > start {
+                    let word = &content[start..idx];
+                    self = self.push_atom_text(cx, word, color, font_size, bold);
+                }
+                start = next_idx;
+            } else if is_cjk {
+                if idx > start {
+                    self = self.push_atom_text(cx, &content[start..idx], color, font_size, bold);
+                }
+                self = self.push_atom_text(cx, &content[idx..next_idx], color, font_size, bold);
+                start = next_idx;
+            }
+        }
+        if start < content.len() {
+            self = self.push_atom_text(cx, &content[start..], color, font_size, bold);
+        }
+        self
+    }
+
+    fn push_atom_text(
+        mut self,
+        cx: &'a FrameScope,
+        word: &'a str,
+        color: Color,
+        font_size: u8,
+        bold: bool,
+    ) -> Self {
+        if word.is_empty() {
+            return self;
+        }
+        let sz = if bold { font_size.saturating_add(1) } else { font_size };
+        let t = crate::element::text(word).size(sz).color(color).nowrap();
+        self.root = self.root.child(cx, t);
+        self
+    }
+
+    /// 追加任意真实可交互组件（如 `Button`、`Badge`、`Tag`、`Kbd`、图标、迷你进度条）作为行内原子元素。
+    #[inline]
+    pub fn inline_widget(mut self, cx: &'a FrameScope, widget: impl IntoElement<'a>) -> Self {
+        self.root = self.root.child(cx, widget);
+        self
+    }
+
+    /// 完成构建并输出底层 [`crate::element::Div`]。
+    #[inline]
+    pub fn build(self) -> crate::element::Div<'a> {
+        self.root
+    }
+}
+
+impl<'a> IntoElement<'a> for InlineFlow<'a> {
+    #[inline]
+    fn into_element(self, cx: &'a FrameScope) -> Element<'a> {
+        self.root.into_element(cx)
+    }
+}

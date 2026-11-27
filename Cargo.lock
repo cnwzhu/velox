@@ -48,7 +48,7 @@ checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
 
 [[package]]
 name = "android_app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "velox-kit",
 ]
@@ -381,7 +381,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "desktop_app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "reqwest",
  "tokio",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "harmony_app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "velox-kit",
 ]
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "hello_world"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "velox-kit",
 ]
@@ -985,7 +985,7 @@ dependencies = [
 
 [[package]]
 name = "ios_app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "velox-kit",
 ]
@@ -2594,7 +2594,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "velox-async"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-executor",
  "async-io",
@@ -2604,14 +2604,21 @@ dependencies = [
 
 [[package]]
 name = "velox-base"
-version = "0.3.0"
+version = "0.4.0"
+dependencies = [
+ "velox-engine",
+]
+
+[[package]]
+name = "velox-canvas"
+version = "0.4.0"
 dependencies = [
  "velox-engine",
 ]
 
 [[package]]
 name = "velox-component"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "velox-base",
  "velox-engine",
@@ -2619,7 +2626,7 @@ dependencies = [
 
 [[package]]
 name = "velox-engine"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ash",
  "bumpalo",
@@ -2633,10 +2640,11 @@ dependencies = [
 
 [[package]]
 name = "velox-kit"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "velox-async",
  "velox-base",
+ "velox-canvas",
  "velox-component",
  "velox-engine",
 ]
@@ -2867,7 +2875,7 @@ dependencies = [
 
 [[package]]
 name = "web_app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "velox-kit",
 ]

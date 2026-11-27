@@ -20,8 +20,8 @@ use winit::event_loop::EventLoop;
 #[cfg(feature = "winit")]
 use handler::{WinitAppHandler, WinitUserEvent};
 pub use multi_window::{
-    CsdConfig, CsdHitZone, MultiWindowId, MultiWindowManager, MultiWindowSpec, WindowRole,
-    WindowSession,
+    CsdConfig, CsdHitZone, DetachedDockPanel, DockZone, MultiWindowId, MultiWindowManager,
+    MultiWindowSpec, WindowRole, WindowSession,
 };
 pub use nested::run_nested_compositor_window;
 pub use super::shm_driver::{

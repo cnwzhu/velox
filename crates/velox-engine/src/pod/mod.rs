@@ -9,7 +9,7 @@ mod theme;
 
 pub use events::{
     ClickEvent, CursorShape, DragEvent, DragPayload, EventPhase, ImePreedit, InputEvent, KeyCode,
-    KeyModifiers, PointerButton, PointerKind, SafeAreaInsets, SwipeDir,
+    KeyModifiers, PinchEvent, PointerButton, PointerKind, SafeAreaInsets, SwipeDir, WheelEvent,
 };
 pub use handle::{Handle, PodId};
 pub use pool::{PodPool, PodReadGuard, MAX_PODS, POD_SLOT_BYTES};

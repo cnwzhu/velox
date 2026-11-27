@@ -55,6 +55,8 @@ pub enum DrawPayload<'a> {
     DecodedImage(&'a crate::image_pipeline::DecodedImageSpec),
     /// 原生抗锯齿 2D 矢量画布（8B Arena 引用）。
     Vector(&'a crate::vector_canvas::VectorDrawSpec<'a>),
+    /// 高密度 2D 交互式场景画布（8B Arena 引用，零膨胀 `DrawOp`）。
+    SceneCanvas(&'a crate::canvas_scene::SceneCanvasSpec<'a>),
 }
 
 impl<'a> PartialEq for DrawPayload<'a> {
@@ -125,6 +127,7 @@ impl<'a> PartialEq for DrawPayload<'a> {
             (Self::RichText(a), Self::RichText(b)) => a == b,
             (Self::DecodedImage(a), Self::DecodedImage(b)) => a == b,
             (Self::Vector(a), Self::Vector(b)) => a == b,
+            (Self::SceneCanvas(a), Self::SceneCanvas(b)) => a == b,
             _ => false,
         }
     }
@@ -275,6 +278,10 @@ impl<'a> DrawOp<'a> {
             DrawPayload::Vector(vec_spec) => {
                 mix(&mut h, 13);
                 vec_spec.mix_hash(&mut h);
+            }
+            DrawPayload::SceneCanvas(spec) => {
+                mix(&mut h, 14);
+                mix_u32(&mut h, spec.content_hash());
             }
         }
         let eff_bounds = match self.payload {

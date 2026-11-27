@@ -92,6 +92,8 @@ pub enum Element<'a> {
     DecodedImage(&'a crate::image_pipeline::DecodedImageSpec),
     /// 原生抗锯齿 2D 矢量画布（`Polyline` / `Polygon` / `Circle` / `Sector`，8B Arena 引用）。
     Vector(&'a crate::vector_canvas::VectorDrawSpec<'a>),
+    /// 高密度 2D 交互式场景画布（32B 静态几何 + 4B 动态状态分离 + 可选 `custom-shader`，8B Arena 引用）。
+    SceneCanvas(&'a crate::canvas_scene::SceneCanvasSpec<'a>),
     /// 视图边界：引用另一个常驻 `Handle<T>`（`PodId` + `generation`），作为局部重绘与独立布局的隔离点。
     SubView {
         id: PodId,

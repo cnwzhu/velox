@@ -522,6 +522,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                     Element::RichText(_) => 0x3000_0000 | unkeyed_ord,
                     Element::DecodedImage(_) => 0x5000_0000 | unkeyed_ord,
                     Element::Vector(_) => 0x6000_0000 | unkeyed_ord,
+                    Element::SceneCanvas(s) => s.id,
                 }
             };
 
@@ -811,6 +812,26 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                     clip: parent_clip,
                     clip_radius: parent_clip_radius,
                     payload: DrawPayload::Vector(v_ref),
+                }) {
+                    *dropped_ops = dropped_ops.saturating_add(1);
+                }
+            }
+        }
+        Element::SceneCanvas(canvas_spec) => {
+            let emit_here = (!overlay_pass && !in_overlay) || (overlay_pass && in_overlay);
+            if !emit_here {
+                return;
+            }
+            let bounds = translate_region(Region::new(node.x, node.y, node.w, node.h), inherited_offset);
+            let mut spec = **canvas_spec;
+            spec.opacity = ((spec.opacity as u16 * inherited_opacity as u16) / 255) as u8;
+            if let Some(c_ref) = arena.try_alloc(spec) {
+                if !out_ops.push(DrawOp {
+                    id: Some(spec.id),
+                    bounds,
+                    clip: parent_clip,
+                    clip_radius: parent_clip_radius,
+                    payload: DrawPayload::SceneCanvas(c_ref),
                 }) {
                     *dropped_ops = dropped_ops.saturating_add(1);
                 }

@@ -289,7 +289,7 @@ pub fn lower_draw_ops<S: LoweredPrimitiveSink + ?Sized>(
                         sink.fill_rect(scaled_bounds, r, c, c, false);
                     }
                 }
-                DrawPayload::Vector(_) => {}
+                DrawPayload::Vector(_) | DrawPayload::SceneCanvas(_) => {}
             }
 
             if needs_elem_clip {

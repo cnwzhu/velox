@@ -77,6 +77,27 @@ pub enum VectorPrimitive<'a> {
         sweep_deg: f32,
         fill: Color,
     },
+    /// 光滑三次贝塞尔曲线（24 段解析细分抗锯齿描边 + 虚线支持）。
+    CubicBezier {
+        p0: VecPoint,
+        p1: VecPoint,
+        p2: VecPoint,
+        p3: VecPoint,
+        color: Color,
+        width: f32,
+        dash_len: f32,
+        gap_len: f32,
+    },
+    /// 任意坐标系完整 W3C SVG Path `d` 矢量路径（突破 24×24 限制，支持 20 条贝塞尔/椭圆弧指令、`NonZero`/`EvenOdd` 4× AA 填充与任意宽度圆/斜/平头描边）。
+    SvgPath {
+        d: &'a str,
+        fill: Color,
+        fill_rule: crate::svg::SvgFillRule,
+        stroke: Color,
+        stroke_width: f32,
+        line_cap: crate::svg::SvgLineCap,
+        line_join: crate::svg::SvgLineJoin,
+    },
 }
 
 impl<'a> PartialEq for VectorPrimitive<'a> {
@@ -173,6 +194,65 @@ impl<'a> PartialEq for VectorPrimitive<'a> {
                     && canon_f32(sd1) == canon_f32(sd2)
                     && canon_f32(sw1) == canon_f32(sw2)
                     && f1 == f2
+            }
+            (
+                Self::CubicBezier {
+                    p0: a0,
+                    p1: a1,
+                    p2: a2,
+                    p3: a3,
+                    color: c1,
+                    width: w1,
+                    dash_len: d1,
+                    gap_len: g1,
+                },
+                Self::CubicBezier {
+                    p0: b0,
+                    p1: b1,
+                    p2: b2,
+                    p3: b3,
+                    color: c2,
+                    width: w2,
+                    dash_len: d2,
+                    gap_len: g2,
+                },
+            ) => {
+                a0 == b0
+                    && a1 == b1
+                    && a2 == b2
+                    && a3 == b3
+                    && c1 == c2
+                    && canon_f32(w1) == canon_f32(w2)
+                    && canon_f32(d1) == canon_f32(d2)
+                    && canon_f32(g1) == canon_f32(g2)
+            }
+            (
+                Self::SvgPath {
+                    d: d1,
+                    fill: f1,
+                    fill_rule: r1,
+                    stroke: s1,
+                    stroke_width: sw1,
+                    line_cap: lc1,
+                    line_join: lj1,
+                },
+                Self::SvgPath {
+                    d: d2,
+                    fill: f2,
+                    fill_rule: r2,
+                    stroke: s2,
+                    stroke_width: sw2,
+                    line_cap: lc2,
+                    line_join: lj2,
+                },
+            ) => {
+                d1 == d2
+                    && f1 == f2
+                    && r1 == r2
+                    && s1 == s2
+                    && canon_f32(sw1) == canon_f32(sw2)
+                    && lc1 == lc2
+                    && lj1 == lj2
             }
             _ => false,
         }
@@ -277,6 +357,46 @@ impl<'a> VectorDrawSpec<'a> {
                     mix_u32(h, canon_f32(start_deg));
                     mix_u32(h, canon_f32(sweep_deg));
                     mix_u32(h, fill.0);
+                }
+                VectorPrimitive::CubicBezier {
+                    p0,
+                    p1,
+                    p2,
+                    p3,
+                    color,
+                    width,
+                    dash_len,
+                    gap_len,
+                } => {
+                    mix_u8(h, 5);
+                    for pt in [p0, p1, p2, p3] {
+                        mix_u32(h, canon_f32(pt.x));
+                        mix_u32(h, canon_f32(pt.y));
+                    }
+                    mix_u32(h, color.0);
+                    mix_u32(h, canon_f32(width));
+                    mix_u32(h, canon_f32(dash_len));
+                    mix_u32(h, canon_f32(gap_len));
+                }
+                VectorPrimitive::SvgPath {
+                    d,
+                    fill,
+                    fill_rule,
+                    stroke,
+                    stroke_width,
+                    line_cap,
+                    line_join,
+                } => {
+                    mix_u8(h, 6);
+                    mix_u32(h, fill.0);
+                    mix_u8(h, fill_rule as u8);
+                    mix_u32(h, stroke.0);
+                    mix_u32(h, canon_f32(stroke_width));
+                    mix_u8(h, line_cap as u8);
+                    mix_u8(h, line_join as u8);
+                    for &b in d.as_bytes() {
+                        mix_u8(h, b);
+                    }
                 }
             }
         }
@@ -665,6 +785,90 @@ pub fn rasterize_vector_spec<P: PixelFormat>(
                             cov_r,
                         );
                     }
+                }
+            }
+            VectorPrimitive::CubicBezier {
+                p0,
+                p1,
+                p2,
+                p3,
+                color,
+                width,
+                dash_len,
+                gap_len,
+            } => {
+                let col = scale_c(color);
+                if col.a() == 0 || width <= 0.0 {
+                    continue;
+                }
+                let mut pts = [VecPoint::default(); 25];
+                for i in 0..=24 {
+                    let t = i as f32 / 24.0;
+                    let u = 1.0 - t;
+                    let uu = u * u;
+                    let tt = t * t;
+                    let uuu = uu * u;
+                    let ttt = tt * t;
+                    pts[i] = VecPoint::new(
+                        uuu * p0.x + 3.0 * uu * t * p1.x + 3.0 * u * tt * p2.x + ttt * p3.x,
+                        uuu * p0.y + 3.0 * uu * t * p1.y + 3.0 * u * tt * p2.y + ttt * p3.y,
+                    );
+                }
+                rasterize_polyline(
+                    &pts,
+                    col,
+                    width,
+                    dash_len,
+                    gap_len,
+                    false,
+                    bounds,
+                    vis,
+                    sf,
+                    origin_x,
+                    origin_y,
+                    stride,
+                    target,
+                );
+            }
+            VectorPrimitive::SvgPath {
+                d,
+                fill,
+                fill_rule,
+                stroke,
+                stroke_width,
+                line_cap,
+                line_join,
+            } => {
+                if d.is_empty() {
+                    continue;
+                }
+                let xf = crate::svg::Transform2D::new(sf, 0.0, 0.0, sf, bx0, by0);
+                let mut path = crate::svg::FlattenedPath::new();
+                path.parse_svg_path_d(d, xf);
+                if path.is_empty() {
+                    continue;
+                }
+                let fcol = scale_c(fill);
+                if fcol.a() > 0 {
+                    crate::svg::fill_path(
+                        &path, fcol, fill_rule, vis, origin_x, origin_y, stride, target,
+                    );
+                }
+                let scol = scale_c(stroke);
+                if scol.a() > 0 && stroke_width > 0.0 {
+                    crate::svg::stroke_path(
+                        &path,
+                        scol,
+                        stroke_width * sf,
+                        line_cap,
+                        line_join,
+                        4.0,
+                        vis,
+                        origin_x,
+                        origin_y,
+                        stride,
+                        target,
+                    );
                 }
             }
         }

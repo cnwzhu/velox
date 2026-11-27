@@ -223,6 +223,53 @@ pub trait TailwindStyled: Styled + Sized {
         apply_tw_button_variant(self.style_mut(), theme, variant);
         self
     }
+
+    /// 应用现代液态玻璃（Liquid Glass）半透明毛玻璃表面样式（暗色/亮色自适应高光描边 + 半透明折射底色）。
+    /// 在 `Div` 上配合 `.backdrop_blur(14)` 即可激活 GPU Dual Kawase 实时模糊，软件后端自动降级为柔和磨砂玻璃。
+    #[inline]
+    fn tw_liquid_glass(mut self, theme: &Theme) -> Self {
+        apply_tw_liquid_glass(self.style_mut(), theme);
+        self
+    }
+}
+
+/// 对底层 [`Style`] 应用液态玻璃（Liquid Glass）高光描边与半透明磨砂表面令牌。
+#[inline]
+pub fn apply_tw_liquid_glass(style: &mut Style, theme: &Theme) {
+    let dark = theme_is_dark(theme);
+    if style.bg == Color::TRANSPARENT {
+        style.bg = if dark {
+            theme.card.lerp(Color::WHITE, 14).scale_alpha(168)
+        } else {
+            Color::WHITE.scale_alpha(188)
+        };
+    }
+    if style.border_px() == 0 {
+        style.set_border_px(1);
+        style.border_color = if dark {
+            Color::rgba(255, 255, 255, 58)
+        } else {
+            Color::rgba(255, 255, 255, 210)
+        };
+    }
+    if (style.rounded & 0x7F) == 0 {
+        style.set_rounded(12);
+    }
+}
+
+/// 快速创建一个开箱即用的液态玻璃容器（GPU 端自动启用 Dual Kawase 实时 `backdrop_blur` + 轻微饱和提升，软件端优雅降级）。
+#[inline]
+pub fn liquid_glass_panel<'a>(theme: &Theme, blur_radius: u8) -> Div<'a> {
+    let dark = theme_is_dark(theme);
+    let tint = if dark {
+        Color::rgba(30, 41, 59, 88)
+    } else {
+        Color::rgba(255, 255, 255, 110)
+    };
+    div()
+        .tw_liquid_glass(theme)
+        .backdrop_acrylic(blur_radius.max(4), tint)
+        .p(12)
 }
 
 impl<T: Styled> TailwindStyled for T {}

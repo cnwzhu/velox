@@ -121,6 +121,46 @@ pub struct DragEvent {
     pub delta_y: i16,
 }
 
+/// 滚轮缩放/滚动事件参数（供交互画布实现 Zoom-to-Cursor 等精细控制）。
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct WheelEvent {
+    /// 指针屏幕坐标 X。
+    pub x: i16,
+    /// 指针屏幕坐标 Y。
+    pub y: i16,
+    /// 相对目标元素左边界的局部坐标 X。
+    pub local_x: i16,
+    /// 相对目标元素上边界的局部坐标 Y。
+    pub local_y: i16,
+    /// 目标元素宽度。
+    pub width: i16,
+    /// 目标元素高度。
+    pub height: i16,
+    /// 水平滚轮增量（像素步长）。
+    pub delta_x: i16,
+    /// 垂直滚轮增量（像素步长；负值通常代表向上滚/放大）。
+    pub delta_y: i16,
+}
+
+/// 双指捏合缩放手势事件参数（支持触控板 `PinchGesture` 与移动端多点触控）。
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct PinchEvent {
+    /// 缩放中心屏幕坐标 X。
+    pub x: i16,
+    /// 缩放中心屏幕坐标 Y。
+    pub y: i16,
+    /// 相对目标元素左边界的局部中心坐标 X。
+    pub local_x: i16,
+    /// 相对目标元素上边界的局部中心坐标 Y。
+    pub local_y: i16,
+    /// 目标元素宽度。
+    pub width: i16,
+    /// 目标元素高度。
+    pub height: i16,
+    /// 缩放相对增量 × 1000（如 `+100` 表示放大 10%，`-100` 表示缩小 10%）。
+    pub delta_scale_x1000: i16,
+}
+
 /// 物理按键与旋转编码器导航键值（面向无触摸屏 MCU 与桌面键盘）。
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum KeyCode {

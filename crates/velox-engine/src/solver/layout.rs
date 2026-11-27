@@ -349,6 +349,10 @@ fn pass1_horizontal_measure_inner(
             node.min_size = vec_spec.width;
             node.pref_size = vec_spec.width;
         }
+        Element::SceneCanvas(spec) => {
+            node.min_size = spec.width;
+            node.pref_size = spec.width;
+        }
         Element::SubView { .. } => {
             node.min_size = 0;
             node.pref_size = 0;
@@ -1047,6 +1051,10 @@ fn pass3_vertical_measure_inner(
         Element::Vector(vec_spec) => {
             node.min_size = vec_spec.height;
             node.pref_size = vec_spec.height;
+        }
+        Element::SceneCanvas(spec) => {
+            node.min_size = spec.height;
+            node.pref_size = spec.height;
         }
         Element::SubView { .. } => {
             node.min_size = 0;

@@ -264,6 +264,23 @@ impl DamageTracker {
                         pi += k_del;
                     }
                     (None, None) => {
+                        if prev_slice[pi].effective_bounds == c_snap.effective_bounds {
+                            if let crate::motion::DrawPayload::SceneCanvas(spec) =
+                                curr_ops[ci].payload
+                            {
+                                if !spec.dirty_screen_rects.is_empty() {
+                                    for &r in spec.dirty_screen_rects {
+                                        let sub = r.intersect(c_snap.effective_bounds);
+                                        if !sub.is_empty() {
+                                            self.add_region(sub);
+                                        }
+                                    }
+                                    pi += 1;
+                                    ci += 1;
+                                    continue;
+                                }
+                            }
+                        }
                         self.add_region(prev_slice[pi].effective_bounds);
                         self.add_region(c_snap.effective_bounds);
                         pi += 1;

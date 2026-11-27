@@ -40,7 +40,7 @@ Add `velox-kit` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-velox-kit = "0.3"
+velox-kit = "0.4"
 ```
 
 Build your first native Velox desktop app:

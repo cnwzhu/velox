@@ -356,7 +356,9 @@ pub fn collect_a11y_nodes<'a, const CAP: usize>(
                     });
                 }
             }
-            DrawPayload::DecodedImage(_) | DrawPayload::Vector(_) => {
+            DrawPayload::DecodedImage(_)
+            | DrawPayload::Vector(_)
+            | DrawPayload::SceneCanvas(_) => {
                 let parent = find_best_parent_id(out.as_slice(), op.bounds, u32::MAX, true);
                 let ordinal = out
                     .as_slice()

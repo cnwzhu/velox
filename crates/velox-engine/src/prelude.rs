@@ -19,9 +19,14 @@ pub use crate::async_rt::{
     block_on, AsyncApp, BackgroundExecutor, BoxFuture, ForegroundExecutor, ManualScheduler,
     NativeStdScheduler, SchedulerBackend, StdAsyncDriver, Task, Timer, UiWakeFuture, UiWakeSignal,
 };
+pub use crate::automation::{
+    compute_engine_frame_checksum, AutomationResult, AutomationSession, EventRecorder,
+    EventReplayer, RecordedEvent, RecordedStep, ReplayReport, SemanticAction, SemanticQuery,
+};
 pub use crate::damage::DamageTracker;
 pub use crate::devtools::{
-    build_inspector_overlay, capture_telemetry, FrameTelemetry, InspectorConfig,
+    build_inspector_overlay, build_live_devtools_panel, capture_telemetry, FrameBudgetRing,
+    FrameTelemetry, InspectorConfig, LiveInspectorState, LiveStyleOverrides, StyleOverride,
 };
 pub use crate::display::{DisplaySurface, PixelFormat, Rgb565, Rgba8888, SpriteFormat, Xrgb8888};
 pub use crate::element::{
@@ -37,6 +42,10 @@ pub use crate::i18n::{
     StaticLocaleTable, TextDirection,
 };
 pub use crate::keymap::{ActionId, KeyBinding, KeyChord, KeyStroke, Keymap, KeymapMatch};
+pub use crate::media::{
+    convert_i420_to_rgba8, convert_nv12_to_rgba8, VideoPixelFormat, VideoSurfaceSpec,
+    WebViewHostRegion, WebViewHostSync, WebViewHostUpdate,
+};
 pub use crate::motion::{
     DrawOp, DrawPayload, MotionCache, MotionState, Presence, Spring, SpringConfig, Tween,
 };
@@ -50,11 +59,20 @@ pub use crate::platform::{
     AsyncPlatformSurface, DesktopRenderBackend, FlushReport, Platform, PlatformControlFlow,
     PlatformSurface,
 };
-pub use crate::platform::clipboard_read_text;
+pub use crate::platform::clipboard::{
+    clipboard_read_payload, clipboard_read_text, clipboard_write_payload, ClipboardImage,
+    ClipboardPayload,
+};
+pub use crate::platform::os_integration::{
+    run_file_dialog, set_mock_file_dialog_handler, DragPreviewGhost, FileDialogMode,
+    FileDialogRequest, FileDialogResult, FileFilter, NativeMenuBar, NativeMenuItem,
+    NativeMenuSection, SystemTraySpec,
+};
+pub use crate::platform::winit::{DetachedDockPanel, DockZone};
 pub use crate::pod::{
     derive_scoped_id, ActionScope, ClickEvent, CoreTheme, CursorShape, DragEvent, DragPayload,
-    EventPhase, FrameScope, Handle, ImePreedit, InputEvent, KeyCode, KeyModifiers, PodId, PodPool,
-    PointerButton, PointerKind, SafeAreaInsets, Scope, SwipeDir,
+    EventPhase, FrameScope, Handle, ImePreedit, InputEvent, KeyCode, KeyModifiers, PinchEvent,
+    PodId, PodPool, PointerButton, PointerKind, SafeAreaInsets, Scope, SwipeDir, WheelEvent,
 };
 pub use crate::renderers::software::OffscreenCompositor;
 pub use crate::renderers::software::{
@@ -74,10 +92,11 @@ pub use crate::svg::{
     SvgViewBox, Transform2D,
 };
 pub use crate::text_rich::{
-    contains_rtl, is_emoji_char, is_rtl_char, measure_rich_text_box, mirror_bidi_char,
-    reorder_bidi_visual, rich_text, shape_text_run, BidiClass, BidiVisualRun, FontFamily, FontSpec,
-    FontStyle as RichFontStyle, FontWeight as RichFontWeight, RichText, RichTextSpec, ShapedGlyph,
-    TextDecoration as RichTextDecoration, TextSpan,
+    classify_script, contains_rtl, inline_flow, is_emoji_char, is_rtl_char, measure_rich_text_box,
+    mirror_bidi_char, reorder_bidi_visual, rich_text, shape_text_run, split_script_runs, BidiClass,
+    BidiVisualRun, FontFallbackChain, FontFamily, FontSpec, FontStyle as RichFontStyle,
+    FontWeight as RichFontWeight, InlineFlow, RichText, RichTextSpec, ScriptKind, ScriptRun,
+    ShapedGlyph, TextDecoration as RichTextDecoration, TextSpan,
 };
 pub use crate::image_pipeline::{
     compute_object_fit, decoded_image, map_nine_slice_coord, DecodedImage, DecodedImageSpec,
@@ -93,4 +112,14 @@ pub use crate::display::{
 };
 pub use crate::vector_canvas::{
     rasterize_vector_spec, vector_canvas, VecPoint, VectorCanvas, VectorDrawSpec, VectorPrimitive,
+};
+#[cfg(feature = "custom-shader")]
+pub use crate::renderers::wgpu::{
+    register_custom_shader, unregister_custom_shader, CustomShaderPrimitive, CustomShaderViewport,
+};
+pub use crate::canvas_scene::{
+    rasterize_scene_canvas, scene_canvas, CanvasAsciiLabel, CanvasItemState, CanvasMeshVertex,
+    CanvasPrimitiveKind, CanvasStaticGeom, CustomShaderCall, CustomShaderId, CustomShaderLayer,
+    SceneCanvas, SceneCanvasSpec, StaticSceneId, Viewport2D, CANVAS_STATE_DISABLED,
+    CANVAS_STATE_FOCUSED, CANVAS_STATE_HOVERED, CANVAS_STATE_LOCKED, CANVAS_STATE_SELECTED,
 };

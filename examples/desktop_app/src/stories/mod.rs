@@ -1,6 +1,7 @@
 //! `Velox Component Gallery` 交互式组件画廊故事页面集合（按功能域分组组织）。
 
 mod buttons;
+pub(crate) mod canvas;
 pub(crate) mod chat;
 mod data;
 mod editor;

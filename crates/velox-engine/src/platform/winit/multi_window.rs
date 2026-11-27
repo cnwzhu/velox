@@ -25,6 +25,28 @@ pub enum WindowRole {
     Popover = 2,
     /// 轻量原生悬浮提示窗口。
     Tooltip = 3,
+    /// 从主窗口 Dock 工作区拖出形成的独立原生 OS 窗口（支持共享 `Signal` 状态并随时拖回吸附合并）。
+    DockTearOff = 4,
+}
+
+/// Dock 工作区停靠目标方位（用于拖回吸附合并）。
+#[repr(u8)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum DockZone {
+    Left = 0,
+    Right = 1,
+    Bottom = 2,
+    Center = 3,
+}
+
+/// 已从主窗拖出的 Dock 面板记录。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DetachedDockPanel {
+    pub window_id: MultiWindowId,
+    pub parent_id: MultiWindowId,
+    pub panel_key: String,
+    pub title: String,
+    pub origin_zone: DockZone,
 }
 
 /// 客户端自绘无边框标题栏（Client-Side Decorations / CSD）配置。
@@ -159,11 +181,12 @@ pub struct WindowSession {
     pub maximized: bool,
 }
 
-/// 跨平台多窗口会话管理器（支持主窗 + 任意副窗 + 越界浮层 Popover + 统一广播事件与独立脏区步进）。
+/// 跨平台多窗口会话管理器（支持主窗 + 任意副窗 + 越界浮层 Popover + Dock 拖出独立窗 + 统一广播事件与独立脏区步进）。
 pub struct MultiWindowManager {
     next_id: u32,
     windows: HashMap<MultiWindowId, WindowSession>,
     order: Vec<MultiWindowId>,
+    detached_docks: Vec<DetachedDockPanel>,
 }
 
 impl Default for MultiWindowManager {
@@ -178,6 +201,7 @@ impl MultiWindowManager {
             next_id: 1,
             windows: HashMap::new(),
             order: Vec::new(),
+            detached_docks: Vec::new(),
         }
     }
 
@@ -280,5 +304,63 @@ impl MultiWindowManager {
         };
         let vp: Region = w.engine.viewport_region();
         w.spec.csd.hit_test(x, y, vp.w, vp.h)
+    }
+
+    /// 将主窗口中的某个 Dock 面板拖出（Tear-Off）为独立原生 OS 窗口，并共享同一响应式 `Signal` 图。
+    pub fn tear_off_dock_panel<V: View>(
+        &mut self,
+        parent: MultiWindowId,
+        panel_key: impl Into<String>,
+        title: impl Into<String>,
+        origin_zone: DockZone,
+        width: i16,
+        height: i16,
+        view: V,
+    ) -> MultiWindowId {
+        let title_str = title.into();
+        let key_str = panel_key.into();
+        let spec = MultiWindowSpec {
+            title: title_str.clone(),
+            width,
+            height,
+            role: WindowRole::DockTearOff,
+            parent: Some(parent),
+            transparent: false,
+            always_on_top: false,
+            csd: CsdConfig {
+                enabled: true,
+                ..CsdConfig::default()
+            },
+        };
+        let win_id = self.open_window(spec, view);
+        self.detached_docks.push(DetachedDockPanel {
+            window_id: win_id,
+            parent_id: parent,
+            panel_key: key_str,
+            title: title_str,
+            origin_zone,
+        });
+        win_id
+    }
+
+    /// 将独立拖出窗口重新吸附合并回主窗口指定 [`DockZone`]，关闭该子窗并返回 `(panel_key, target_zone)`。
+    pub fn redock_panel(
+        &mut self,
+        win_id: MultiWindowId,
+        target_zone: DockZone,
+    ) -> Option<(String, DockZone)> {
+        let pos = self
+            .detached_docks
+            .iter()
+            .position(|d| d.window_id == win_id)?;
+        let entry = self.detached_docks.remove(pos);
+        let _ = self.close_window(win_id);
+        Some((entry.panel_key, target_zone))
+    }
+
+    /// 返回当前所有处于独立窗口状态的 Dock 拖出面板列表。
+    #[inline]
+    pub fn detached_dock_panels(&self) -> &[DetachedDockPanel] {
+        &self.detached_docks
     }
 }

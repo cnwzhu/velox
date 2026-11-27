@@ -13,7 +13,11 @@ path = "src/lib.rs"
 name = "desktop_app"
 path = "src/main.rs"
 
+[features]
+default = []
+custom-shader = ["velox-kit/custom-shader"]
+
 [dependencies]
-velox-kit = { path = "../../crates/velox-kit", default-features = false, features = ["gpu", "winit", "component", "tokio"] }
+velox-kit = { path = "../../crates/velox-kit", default-features = false, features = ["gpu", "winit", "component", "canvas", "tokio"] }
 tokio = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["default-tls", "charset", "http2"] }

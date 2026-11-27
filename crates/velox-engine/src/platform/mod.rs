@@ -25,6 +25,7 @@ pub mod android;
 pub mod embed_ffi;
 pub mod harmony;
 pub mod ios;
+pub mod os_integration;
 pub mod shm_driver;
 pub mod wayland;
 pub mod winit;

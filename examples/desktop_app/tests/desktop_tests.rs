@@ -1846,3 +1846,102 @@ fn test_otp_no_outer_border_and_password_eye_toggle() {
         "OtpInput outer container (id=1450) must never render an outer border or focus rectangle"
     );
 }
+
+#[test]
+fn test_gallery_interactive_canvas_story_zoom_lod_presets_and_dual_backend() {
+    use velox_kit::core::display::Xrgb8888;
+    use velox_kit::core::motion::DrawPayload;
+    use velox_kit::core::renderers::wgpu::WgpuOffscreenRenderer;
+
+    let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, 820);
+    engine.view_mut(root).unwrap().active_story = GalleryStory::Canvas;
+    let _ = engine.step_frame_dt(16);
+
+    // 1. 校验 SceneCanvas 已正确进入 DrawOp 且包含 2,000+ 弧形看台旋转座位与 Minimap
+    let canvas_count = engine
+        .cached_draw_ops()
+        .iter()
+        .filter(|op| matches!(op.payload, DrawPayload::SceneCanvas(_)))
+        .count();
+    assert!(
+        canvas_count >= 2,
+        "expected main InteractiveCanvas + Minimap SceneCanvas ops, got {canvas_count}"
+    );
+    assert!(
+        engine.view(root).unwrap().canvas_demo.store.len() >= 2_000,
+        "Stadium preset should load 2,000+ rotated OBB seats"
+    );
+
+    // 2. 在主画布中心派发滚轮放大事件（Zoom-to-Cursor）并验证缩放倍率提升与 120ms Zoom Font Lock
+    let (cx, cy) = hit_center(&engine, 7100);
+    let zoom_before = engine.view(root).unwrap().canvas_demo.controller.viewport.zoom;
+    assert!(engine.dispatch_event(InputEvent::Scroll {
+        x: cx,
+        y: cy,
+        delta_y: -20,
+    }));
+    let zoom_after = engine.view(root).unwrap().canvas_demo.controller.viewport.zoom;
+    assert!(
+        zoom_after > zoom_before * 1.1,
+        "wheel up must zoom canvas in: before={zoom_before}, after={zoom_after}"
+    );
+
+    // 推进 160ms (> 120ms Zoom Font Lock) 验证画布自动收敛回 0% CPU 休眠
+    let mut settled = false;
+    for _ in 0..20 {
+        let _ = engine.step_frame_dt(16);
+        if !engine.needs_redraw() {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled, "InteractiveCanvas must settle cleanly to 0% CPU after zoom lock expires");
+
+    // 3. 切换 Herringbone Cabin 与 Ship Bay 预设场景并验证软件 + GPU 双后端成功渲染
+    let (bx, by) = hit_center(&engine, 7102); // Herringbone Cabin
+    assert!(engine.dispatch_click(bx, by));
+    let _ = engine.step_frame_dt(16);
+    assert_eq!(
+        engine.view(root).unwrap().canvas_demo.preset,
+        desktop_app::CanvasPreset::Cabin
+    );
+
+    let (sx, sy) = hit_center(&engine, 7103); // Ship Bay
+    assert!(engine.dispatch_click(sx, sy));
+    let _ = engine.step_frame_dt(16);
+    assert_eq!(
+        engine.view(root).unwrap().canvas_demo.preset,
+        desktop_app::CanvasPreset::ShipBay
+    );
+
+    // 双后端光栅验证（Software + 真实硬件 GPU）
+    let vp = engine.viewport_region();
+    let w = vp.w as usize;
+    let h = vp.h as usize;
+    let mut sw_buf = vec![Xrgb8888(0xFF00_0000); w * h];
+    engine.rasterize_region(vp, &mut sw_buf);
+    let sw_vivid = sw_buf
+        .iter()
+        .filter(|px| {
+            let c = px.to_color();
+            c.r().abs_diff(c.g()) > 30 || c.g().abs_diff(c.b()) > 30
+        })
+        .count();
+    assert!(sw_vivid > 5_000, "Canvas software render should draw colorful scene, got {sw_vivid}");
+
+    let mut gpu = WgpuOffscreenRenderer::new(w, h);
+    if gpu.ensure_gpu() {
+        let ops = engine.cached_draw_ops();
+        if gpu.render_draw_ops_scaled(ops, vp, 1.0) {
+            let gpu_vivid = gpu
+                .rgba_buffer
+                .chunks_exact(4)
+                .filter(|px| px[0].abs_diff(px[1]) > 30 || px[1].abs_diff(px[2]) > 30)
+                .count();
+            assert!(
+                gpu_vivid > 5_000,
+                "Canvas GPU 32B+4B pipeline should draw colorful scene, got {gpu_vivid}"
+            );
+        }
+    }
+}

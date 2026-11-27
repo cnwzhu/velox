@@ -1,10 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    # 1. GUI 框架层 (GUI Framework: Core / Base / Component / Kit)
+    # 1. GUI 框架核心层 (Core / Base / Component / Canvas Foundation / Kit)
     "crates/velox-engine",
     "crates/velox-base",
     "crates/velox-component",
+    "crates/velox-canvas",
     "crates/velox-kit",
 
     # 2. 独立异步调度器适配层 (Pluggable Scheduler Adapters)
@@ -20,7 +21,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MPL-2.0"
 repository = "https://github.com/cnwzhu/velox"

@@ -40,7 +40,7 @@
 
 ```toml
 [dependencies]
-velox-kit = "0.3"
+velox-kit = "0.4"
 ```
 
 编写你的第一个 Velox 原生桌面应用：

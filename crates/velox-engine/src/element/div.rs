@@ -128,6 +128,8 @@ impl<'a> IntoElement<'a> for Div<'a> {
                     on_drag: self.on_drag,
                     on_hover: self.on_hover,
                     on_pointer_move: self.on_pointer_move,
+                    on_wheel: self.on_wheel,
+                    on_pinch: self.on_pinch,
                     on_swipe: self.on_swipe,
                     on_key_input: self.on_key_input,
                     on_key_nav: self.on_key_nav,
@@ -242,6 +244,10 @@ pub struct Div<'a> {
     pub on_hover: Option<&'a dyn Fn(bool, &mut ActionScope)>,
     /// 指针在热区内移动时的连续追踪回调闭包（未按下悬停移动时触发，坐标由 `ActionScope::drag_event()` 读取）。
     pub on_pointer_move: Option<&'a dyn Fn(&mut ActionScope)>,
+    /// 滚轮滚动/缩放事件回调闭包（分配于 `ScratchArena`）。
+    pub on_wheel: Option<&'a dyn Fn(crate::pod::WheelEvent, &mut ActionScope)>,
+    /// 双指捏合缩放手势回调闭包（分配于 `ScratchArena`）。
+    pub on_pinch: Option<&'a dyn Fn(crate::pod::PinchEvent, &mut ActionScope)>,
     /// 四向快速滑动手势回调闭包（分配于 `ScratchArena`）。
     pub on_swipe: Option<&'a dyn Fn(crate::pod::SwipeDir, &mut ActionScope)>,
     /// 字符与文本输入事件响应闭包（分配于 `ScratchArena`，供聚焦态 `TextInput` 编辑使用）。
@@ -316,6 +322,8 @@ pub fn div<'a>() -> Div<'a> {
         on_drag: None,
         on_hover: None,
         on_pointer_move: None,
+        on_wheel: None,
+        on_pinch: None,
         on_swipe: None,
         on_key_input: None,
         on_key_nav: None,
@@ -385,6 +393,8 @@ impl<'a> Div<'a> {
             || self.on_drag.is_some()
             || self.on_hover.is_some()
             || self.on_pointer_move.is_some()
+            || self.on_wheel.is_some()
+            || self.on_pinch.is_some()
             || self.on_swipe.is_some()
             || self.on_key_input.is_some()
             || self.on_key_nav.is_some()
@@ -1155,6 +1165,48 @@ impl<'a> Div<'a> {
             handler(ev, acx);
         });
         self.on_pointer_move = Some(wrapped);
+        self
+    }
+
+    /// 绑定原始滚轮事件回调闭包（适用于交互画布 Zoom-to-Cursor 缩放）。
+    #[inline(always)]
+    pub fn on_wheel_raw(
+        mut self,
+        handler: &'a dyn Fn(crate::pod::WheelEvent, &mut ActionScope),
+    ) -> Self {
+        self.on_wheel = Some(handler);
+        self
+    }
+
+    /// 绑定与 `cx.listener(...)` 兼容的滚轮事件回调闭包。
+    #[inline(always)]
+    pub fn on_wheel(
+        mut self,
+        _cx: &'a FrameScope,
+        handler: &'a dyn Fn(crate::pod::WheelEvent, &mut ActionScope),
+    ) -> Self {
+        self.on_wheel = Some(handler);
+        self
+    }
+
+    /// 绑定原始双指捏合缩放手势回调闭包。
+    #[inline(always)]
+    pub fn on_pinch_raw(
+        mut self,
+        handler: &'a dyn Fn(crate::pod::PinchEvent, &mut ActionScope),
+    ) -> Self {
+        self.on_pinch = Some(handler);
+        self
+    }
+
+    /// 绑定与 `cx.listener(...)` 兼容的双指捏合缩放手势回调闭包。
+    #[inline(always)]
+    pub fn on_pinch(
+        mut self,
+        _cx: &'a FrameScope,
+        handler: &'a dyn Fn(crate::pod::PinchEvent, &mut ActionScope),
+    ) -> Self {
+        self.on_pinch = Some(handler);
         self
     }
 

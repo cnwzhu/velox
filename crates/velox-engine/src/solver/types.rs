@@ -195,6 +195,16 @@ impl<'a> HitRegion<'a> {
     }
 
     #[inline(always)]
+    pub fn on_wheel(&self) -> Option<&'a dyn Fn(crate::pod::WheelEvent, &mut ActionScope)> {
+        self.interact.and_then(|i| i.rare).and_then(|r| r.on_wheel)
+    }
+
+    #[inline(always)]
+    pub fn on_pinch(&self) -> Option<&'a dyn Fn(crate::pod::PinchEvent, &mut ActionScope)> {
+        self.interact.and_then(|i| i.rare).and_then(|r| r.on_pinch)
+    }
+
+    #[inline(always)]
     pub fn on_swipe(&self) -> Option<&'a dyn Fn(crate::pod::SwipeDir, &mut ActionScope)> {
         self.interact.and_then(|i| i.rare).and_then(|r| r.on_swipe)
     }
@@ -343,6 +353,21 @@ pub(super) fn outer_box_spec(elem: &Element<'_>) -> OuterBoxSpec {
             max_w: vec_spec.width,
             min_h: vec_spec.height,
             max_h: vec_spec.height,
+            margin: Edges::all(0),
+            pos: None,
+            flex_grow: 0,
+            align_self: None,
+            flex_dir: FlexDir::Col,
+            justify: Justify::Start,
+        },
+        Element::SceneCanvas(spec) => OuterBoxSpec {
+            kind: 3,
+            width: Length::Px(spec.width),
+            height: Length::Px(spec.height),
+            min_w: spec.width,
+            max_w: spec.width,
+            min_h: spec.height,
+            max_h: spec.height,
             margin: Edges::all(0),
             pos: None,
             flex_grow: 0,

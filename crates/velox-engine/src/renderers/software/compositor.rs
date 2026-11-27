@@ -208,6 +208,18 @@ pub fn rasterize_region<P: PixelFormat>(
                     dst,
                 );
             }
+            DrawPayload::SceneCanvas(spec) => {
+                crate::canvas_scene::rasterize_scene_canvas(
+                    op.bounds,
+                    sub_clip,
+                    spec,
+                    1.0,
+                    buffer_origin_x,
+                    buffer_origin_y,
+                    buffer_stride,
+                    dst,
+                );
+            }
         };
 
         if corner_clip_active {
@@ -640,6 +652,18 @@ pub(crate) fn rasterize_region_scaled<P: PixelFormat>(
                     vec_spec,
                     sb,
                     sub_clip,
+                    sf,
+                    buffer_origin_x,
+                    buffer_origin_y,
+                    buffer_stride,
+                    dst,
+                );
+            }
+            DrawPayload::SceneCanvas(spec) => {
+                crate::canvas_scene::rasterize_scene_canvas(
+                    sb,
+                    sub_clip,
+                    spec,
                     sf,
                     buffer_origin_x,
                     buffer_origin_y,

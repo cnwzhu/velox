@@ -1223,6 +1223,11 @@ mod std_layers {
                     vec_spec, sb, sub_clip, sf, origin_x, origin_y, stride, dst,
                 );
             }
+            DrawPayload::SceneCanvas(spec) => {
+                crate::canvas_scene::rasterize_scene_canvas(
+                    sb, sub_clip, spec, sf, origin_x, origin_y, stride, dst,
+                );
+            }
         };
 
         if clip_r_16 > 0 {

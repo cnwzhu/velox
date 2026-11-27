@@ -199,3 +199,51 @@ pub fn clipboard_read_text() -> Option<std::string::String> {
 pub fn clipboard_has_text() -> bool {
     imp::has_text()
 }
+
+/// 富格式剪贴板图像数据（RGBA8888）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ClipboardImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba8: std::vec::Vec<u8>,
+}
+
+/// 富格式剪贴板负载（支持纯文本、RGBA 位图、文件路径列表及任意自定义 MIME 数据）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ClipboardPayload {
+    Text(std::string::String),
+    Image(ClipboardImage),
+    FilePaths(std::vec::Vec<std::path::PathBuf>),
+    CustomMime {
+        mime: std::string::String,
+        bytes: std::vec::Vec<u8>,
+    },
+}
+
+static RICH_CLIPBOARD: std::sync::OnceLock<std::sync::Mutex<Option<ClipboardPayload>>> =
+    std::sync::OnceLock::new();
+
+/// 向跨平台富格式剪贴板写入多模态负载（写入文本时同步刷新系统原生剪贴板）。
+pub fn clipboard_write_payload(payload: ClipboardPayload) -> bool {
+    if let ClipboardPayload::Text(ref t) = payload {
+        let _ = clipboard_write_text(t);
+    }
+    let lock = RICH_CLIPBOARD.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut g) = lock.lock() {
+        *g = Some(payload);
+        true
+    } else {
+        false
+    }
+}
+
+/// 从富格式剪贴板读取最近写入的多模态负载；若仅系统文本剪贴板存在内容则自动封装为 `ClipboardPayload::Text`。
+pub fn clipboard_read_payload() -> Option<ClipboardPayload> {
+    let lock = RICH_CLIPBOARD.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(g) = lock.lock() {
+        if let Some(ref p) = *g {
+            return Some(p.clone());
+        }
+    }
+    clipboard_read_text().map(ClipboardPayload::Text)
+}

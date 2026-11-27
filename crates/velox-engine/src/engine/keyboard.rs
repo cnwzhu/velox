@@ -71,12 +71,10 @@ impl VeloxEngine {
                 true
             }
             InputEvent::Pinch {
-                delta_scale_x1000, ..
-            } => {
-                self.last_pinch_delta_x1000 = delta_scale_x1000;
-                self.interaction_dirty = true;
-                true
-            }
+                x,
+                y,
+                delta_scale_x1000,
+            } => self.dispatch_pinch_at(x, y, delta_scale_x1000),
             InputEvent::Rotate { delta_deg10, .. } => {
                 self.last_rotate_deg10 = delta_deg10;
                 self.interaction_dirty = true;
@@ -160,6 +158,36 @@ impl VeloxEngine {
     #[inline(always)]
     pub const fn ime_enabled(&self) -> bool {
         self.ime_enabled
+    }
+
+    /// 计算当前聚焦输入控件的精准屏幕逻辑矩形，供 `winit` / `wayland` / 移动端原生 IME 候选窗零漂移跟随。
+    ///
+    /// - 优先定位当前拥有键盘焦点且可编辑（`on_text_input` / 聚焦 `HitRegion`）的屏幕边界；
+    /// - 当存在正在组合的预编辑文本（`ime_preedit`）时自动按组合宽度推进水平锚点，确保中文/日文/韩文候选窗紧贴光标。
+    pub fn ime_cursor_rect(&self) -> Option<Region> {
+        let fidx = self.interaction.focused_index?;
+        let hits = self.cached_hit_regions();
+        let hit = hits
+            .iter()
+            .rev()
+            .find(|h| h.focus_index == Some(fidx))?;
+        let eff = hit.bounds.intersect(hit.clip);
+        if eff.is_empty() {
+            return None;
+        }
+        let preedit_advance = if !self.ime_preedit.is_empty() {
+            let chars = self.ime_preedit.as_str().chars().count().min(32) as i16;
+            chars.saturating_mul(8)
+        } else {
+            0
+        };
+        let cx = eff
+            .x
+            .saturating_add(8)
+            .saturating_add(preedit_advance)
+            .min(eff.right().saturating_sub(2));
+        let h = eff.h.clamp(16, 36);
+        Some(Region::new(cx, eff.y, 2, h))
     }
 
     /// 派发系统 IME 组合输入预编辑更新（如拼音 `"zhongwen"` 与候选光标区间）。
