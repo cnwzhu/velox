@@ -1,8 +1,7 @@
 #![cfg(feature = "tokio")]
 
 use core::time::Duration;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::mpsc::{SyncSender, sync_channel};
 
 use velox_async::{TokioScheduler, VeloxTokioExt};
 use velox_engine::prelude::*;
@@ -68,32 +67,25 @@ fn test_velox_async_tokio_scheduler_background_timer_and_application_ext() {
 #[test]
 fn test_velox_async_tokio_task_drop_cancels_background_future() {
     let engine = VeloxEngine::new(160, 80).with_scheduler(TokioScheduler::global());
-    let dropped = Arc::new(AtomicBool::new(false));
-    struct Guard(Arc<AtomicBool>);
+    let (started_tx, started_rx) = sync_channel(1);
+    let (dropped_tx, dropped_rx) = sync_channel(1);
+    struct Guard(SyncSender<()>);
     impl Drop for Guard {
         fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
+            let _ = self.0.try_send(());
         }
     }
 
-    let task = engine.background_spawn({
-        let flag = Arc::clone(&dropped);
-        async move {
-            let _g = Guard(flag);
-            velox_async::tokio::runtime::time::sleep(Duration::from_secs(30)).await;
-        }
+    let task = engine.background_spawn(async move {
+        let _guard = Guard(dropped_tx);
+        started_tx.send(()).expect("test must wait for task start");
+        core::future::pending::<()>().await;
     });
-    std::thread::sleep(Duration::from_millis(10));
+    started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("Tokio background task must start");
     drop(task);
-
-    for _ in 0..50 {
-        if dropped.load(Ordering::Acquire) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(4));
-    }
-    assert!(
-        dropped.load(Ordering::Acquire),
-        "dropping Task must promptly cancel and drop Tokio background future"
-    );
+    dropped_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("dropping Task must promptly cancel and drop Tokio background future");
 }

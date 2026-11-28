@@ -383,6 +383,53 @@ fn test_parallel_strip_rasterization_pixel_exact() {
 }
 
 #[test]
+fn test_parallel_raster_recovers_after_pixel_format_panics() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use velox_engine::display::PixelFormat;
+    use velox_engine::motion::{DrawOp, DrawPayload};
+
+    static PANIC_ONCE: AtomicBool = AtomicBool::new(true);
+    #[derive(Copy, Clone, Default, PartialEq, Eq)]
+    struct FalliblePixel(Xrgb8888);
+
+    impl PixelFormat for FalliblePixel {
+        const BLACK: Self = Self(Xrgb8888::BLACK);
+
+        fn from_color(color: Color) -> Self {
+            if PANIC_ONCE.swap(false, Ordering::Relaxed) {
+                panic!("pixel conversion failed");
+            }
+            Self(Xrgb8888::from_color(color))
+        }
+
+        fn to_color(self) -> Color {
+            self.0.to_color()
+        }
+    }
+
+    let viewport = Region::new(0, 0, 320, 240);
+    let op = DrawOp {
+        id: None,
+        bounds: viewport,
+        clip: viewport,
+        clip_radius: 0,
+        subpx_q4: 0,
+        payload: DrawPayload::Quad {
+            bg: Color::WHITE,
+            bg_grad: Color::WHITE,
+            border_color: Color::TRANSPARENT,
+            rounded: 0,
+            border_width: 0,
+        },
+    };
+    let mut pixels = vec![FalliblePixel::default(); 320 * 240];
+    let mut draw = || rasterize_region_parallel(&[op], viewport, 0, 0, 320, &mut pixels);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut draw)).is_err());
+    draw();
+    assert!(pixels.iter().all(|&p| p.to_color() == Color::WHITE));
+}
+
+#[test]
 fn test_desktop_default_gpu_backend_and_offscreen_compositor() {
     use velox_engine::platform::shm_driver::{WaylandSurfaceDriver, WlSurface};
     use velox_engine::platform::wayland::WaylandPlatform;

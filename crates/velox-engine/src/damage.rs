@@ -126,29 +126,29 @@ impl DamageTracker {
                 (Some(k_ins), Some(k_del)) if k_ins <= k_del => {
                     for k in 0..k_ins {
                         let c = &curr_ops[ci + k];
-                        self.add_region(c.bounds.intersect(c.clip));
+                        self.add_region(c.effective_damage_bounds());
                     }
                     ci += k_ins;
                 }
                 (Some(k_ins), None) => {
                     for k in 0..k_ins {
                         let c = &curr_ops[ci + k];
-                        self.add_region(c.bounds.intersect(c.clip));
+                        self.add_region(c.effective_damage_bounds());
                     }
                     ci += k_ins;
                 }
                 (_, Some(k_del)) => {
                     for k in 0..k_del {
                         let p = &prev_ops[pi + k];
-                        self.add_region(p.bounds.intersect(p.clip));
+                        self.add_region(p.effective_damage_bounds());
                     }
                     pi += k_del;
                 }
                 (None, None) => {
                     let p = &prev_ops[pi];
                     let c = &curr_ops[ci];
-                    self.add_region(p.bounds.intersect(p.clip));
-                    self.add_region(c.bounds.intersect(c.clip));
+                    self.add_region(p.effective_damage_bounds());
+                    self.add_region(c.effective_damage_bounds());
                     pi += 1;
                     ci += 1;
                 }
@@ -156,12 +156,12 @@ impl DamageTracker {
         }
         while pi < prev_ops.len() {
             let p = &prev_ops[pi];
-            self.add_region(p.bounds.intersect(p.clip));
+            self.add_region(p.effective_damage_bounds());
             pi += 1;
         }
         while ci < curr_ops.len() {
             let c = &curr_ops[ci];
-            self.add_region(c.bounds.intersect(c.clip));
+            self.add_region(c.effective_damage_bounds());
             ci += 1;
         }
     }
@@ -227,6 +227,7 @@ impl DamageTracker {
         curr_ops: &[DrawOp<'_>],
         record_damage: bool,
     ) {
+        let mut unchanged_prefix = 0;
         if record_damage {
             const WINDOW: usize = 8;
             let prev_slice = prev_snapshots.as_slice();
@@ -235,6 +236,9 @@ impl DamageTracker {
             while pi < prev_slice.len() && ci < curr_ops.len() {
                 let c_snap = curr_ops[ci].to_snapshot();
                 if prev_slice[pi] == c_snap {
+                    if ci == unchanged_prefix && ci == pi {
+                        unchanged_prefix += 1;
+                    }
                     pi += 1;
                     ci += 1;
                     continue;
@@ -298,8 +302,9 @@ impl DamageTracker {
             }
         }
 
-        prev_snapshots.clear();
-        for op in curr_ops {
+        // The equal prefix already has current snapshots. Reuse it without rehashing.
+        prev_snapshots.truncate(unchanged_prefix);
+        for op in &curr_ops[unchanged_prefix..] {
             let _ = prev_snapshots.push(op.to_snapshot());
         }
     }

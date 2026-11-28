@@ -180,6 +180,16 @@ impl WinitPlatform {
                 pending_gpu: None,
                 #[cfg(feature = "gpu")]
                 gpu_warmup_in_flight,
+                #[cfg(feature = "gpu")]
+                pending_gpu_damage: std::vec::Vec::new(),
+                #[cfg(feature = "gpu")]
+                pending_gpu_full_repaint: false,
+                #[cfg(feature = "gpu")]
+                gpu_present_retry_streak: 0,
+                #[cfg(feature = "gpu")]
+                gpu_retry_not_before: None,
+                #[cfg(feature = "gpu")]
+                window_occluded: false,
                 surface: None,
                 window: None,
                 window_shown: false,

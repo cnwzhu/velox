@@ -28,6 +28,8 @@ pub use sdf::{
 #[allow(unused_imports)]
 pub(crate) use sdf::rasterize_quad;
 pub(crate) use sprite::rasterize_sprite_source;
+#[cfg(any(feature = "gpu", not(target_arch = "wasm32")))]
+pub(crate) use sdf::{SpatialOcclusionGrid, with_spatial_occlusion};
 pub use text::rasterize_text;
 #[cfg(feature = "gpu")]
 pub(crate) use effects::ops_have_layers_or_blend;

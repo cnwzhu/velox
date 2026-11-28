@@ -19,6 +19,9 @@ use super::text::rasterize_text;
 use super::text::{compute_scaled_text_box, rasterize_text_scaled};
 use super::{snap_bounds_region_scaled, snap_clip_region_scaled};
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::{SpatialOcclusionGrid, with_spatial_occlusion};
+
 /// 针对局部像素缓冲（全屏 Framebuffer 或 MCU 条带缓冲区）光栅化指定脏区 `dirty_region` 内的所有 `DrawOp`。
 pub fn rasterize_region<P: PixelFormat>(
     ops: &[DrawOp<'_>],
@@ -27,6 +30,28 @@ pub fn rasterize_region<P: PixelFormat>(
     buffer_origin_y: i16,
     buffer_stride: usize,
     target: &mut [P],
+) {
+    rasterize_region_inner(
+        ops,
+        dirty_region,
+        buffer_origin_x,
+        buffer_origin_y,
+        buffer_stride,
+        target,
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
+    );
+}
+
+fn rasterize_region_inner<P: PixelFormat>(
+    ops: &[DrawOp<'_>],
+    dirty_region: Region,
+    buffer_origin_x: i16,
+    buffer_origin_y: i16,
+    buffer_stride: usize,
+    target: &mut [P],
+    #[cfg(not(target_arch = "wasm32"))]
+    occlusion: Option<&SpatialOcclusionGrid>,
 ) {
     if dirty_region.is_empty() || buffer_stride == 0 || target.is_empty() {
         return;
@@ -55,11 +80,17 @@ pub fn rasterize_region<P: PixelFormat>(
 
     let mut occluders: crate::arena::SmallVec<(usize, Region), 32> = crate::arena::SmallVec::new();
     let mut occluders_complete = true;
-    for (idx, op) in ops.iter().enumerate() {
-        let occ = opaque_core_rect(op).intersect(dirty_region);
-        if !occ.is_empty() && !occluders.push((idx, occ)) {
-            occluders_complete = false;
-            break;
+    #[cfg(not(target_arch = "wasm32"))]
+    let build_local = occlusion.is_none();
+    #[cfg(target_arch = "wasm32")]
+    let build_local = true;
+    if build_local {
+        for (idx, op) in ops.iter().enumerate() {
+            let occ = opaque_core_rect(op).intersect(dirty_region);
+            if !occ.is_empty() && !occluders.push((idx, occ)) {
+                occluders_complete = false;
+                break;
+            }
         }
     }
 
@@ -71,10 +102,18 @@ pub fn rasterize_region<P: PixelFormat>(
         if raw_clip.is_empty() {
             continue;
         }
-        let effective_clip = if occluders_complete {
-            clip_against_opaque_rects(raw_clip, occluders.as_slice(), idx)
-        } else {
-            compute_unoccluded_clip(raw_clip, &ops[(idx + 1)..])
+        let effective_clip = {
+            #[cfg(not(target_arch = "wasm32"))]
+            let indexed = occlusion.map(|grid| grid.clip_region(raw_clip, idx));
+            #[cfg(target_arch = "wasm32")]
+            let indexed: Option<Region> = None;
+            indexed.unwrap_or_else(|| {
+                if occluders_complete {
+                    clip_against_opaque_rects(raw_clip, occluders.as_slice(), idx)
+                } else {
+                    compute_unoccluded_clip(raw_clip, &ops[(idx + 1)..])
+                }
+            })
         };
         if effective_clip.is_empty() {
             continue;
@@ -384,6 +423,119 @@ fn touches_rounded_corners(eff: Region, clip: Region, r: i16) -> bool {
     x_near && y_near
 }
 
+/// 多条带高 DPI 软件光栅化前一次性预计算的 `TextRun` 缩放盒与量化字号，
+/// 避免每个 16 行并行条带对全屏 `TextRun` 重复调用 `compute_scaled_text_box`（`count_text_lines` + `measure_line_width_f32`）。
+#[derive(Copy, Clone)]
+pub(super) struct PrecomputedScaledTextBox {
+    adj_bounds: Region,
+    adj_sc: Region,
+    adj_flags: u8,
+    logical_fs: u8,
+    fs_q4: u16,
+}
+
+fn precompute_scaled_text_boxes(
+    ops: &[DrawOp<'_>],
+    viewport: Region,
+    sf: f32,
+    #[cfg(not(target_arch = "wasm32"))] occlusion: Option<&SpatialOcclusionGrid>,
+) -> std::vec::Vec<Option<PrecomputedScaledTextBox>> {
+    let mut table = std::vec![None; ops.len()];
+    if ops.is_empty() || viewport.is_empty() {
+        return table;
+    }
+    let has_text = ops
+        .iter()
+        .any(|op| matches!(op.payload, DrawPayload::TextRun { .. }));
+    if !has_text {
+        return table;
+    }
+
+    let vp_clip_phys = snap_clip_region_scaled(viewport, sf);
+    let mut occluders: crate::arena::SmallVec<(usize, Region), 32> = crate::arena::SmallVec::new();
+    let mut occluders_complete = true;
+    #[cfg(not(target_arch = "wasm32"))]
+    let build_local = occlusion.is_none();
+    #[cfg(target_arch = "wasm32")]
+    let build_local = true;
+    if build_local {
+        for (idx, op) in ops.iter().enumerate() {
+            let occ = opaque_core_rect(op).intersect(viewport);
+            if !occ.is_empty() && !occluders.push((idx, occ)) {
+                occluders_complete = false;
+                break;
+            }
+        }
+    }
+
+    for (idx, op) in ops.iter().enumerate() {
+        let DrawPayload::TextRun {
+            text,
+            color,
+            font_size,
+            text_flags,
+        } = op.payload
+        else {
+            continue;
+        };
+        if text.is_empty() || color.a() == 0 {
+            continue;
+        }
+        let raw_clip = viewport.intersect(op.clip).intersect(op.bounds);
+        if raw_clip.is_empty() {
+            continue;
+        }
+        let eff_clip = {
+            #[cfg(not(target_arch = "wasm32"))]
+            let indexed = occlusion.map(|grid| grid.clip_region(raw_clip, idx));
+            #[cfg(target_arch = "wasm32")]
+            let indexed: Option<Region> = None;
+            indexed.unwrap_or_else(|| {
+                if occluders_complete {
+                    clip_against_opaque_rects(raw_clip, occluders.as_slice(), idx)
+                } else {
+                    compute_unoccluded_clip(raw_clip, &ops[(idx + 1)..])
+                }
+            })
+        };
+        if eff_clip.is_empty() {
+            continue;
+        }
+        let sb = snap_bounds_region_scaled(op.bounds, sf);
+        let clip_region = if op.clip_radius > 0 { op.clip } else { eff_clip };
+        let mut sc = snap_clip_region_scaled(clip_region, sf);
+        if (op.bounds.w == 1 && eff_clip.w == 1) || (op.bounds.h == 1 && eff_clip.h == 1) {
+            if op.bounds.w == 1 && eff_clip.w == 1 {
+                let new_r = sc.right().max(sb.right()).min(vp_clip_phys.right());
+                sc.w = new_r.saturating_sub(sc.x).max(0);
+            }
+            if op.bounds.h == 1 && eff_clip.h == 1 {
+                let new_b = sc.bottom().max(sb.bottom()).min(vp_clip_phys.bottom());
+                sc.h = new_b.saturating_sub(sc.y).max(0);
+            }
+        }
+        let (adj_bounds, adj_sc, adj_flags, logical_fs, fs_q4) = compute_scaled_text_box(
+            op.bounds,
+            op.clip,
+            viewport,
+            sb,
+            sc,
+            text.as_str(),
+            font_size,
+            text_flags,
+            sf,
+        );
+        table[idx] = Some(PrecomputedScaledTextBox {
+            adj_bounds,
+            adj_sc,
+            adj_flags,
+            logical_fs,
+            fs_q4,
+        });
+    }
+    table
+}
+
 /// 在 `std` 下直接按精确分数/整数 DPI 缩放因子 `scale_factor` 光栅化原始逻辑 `DrawOp` 流，
 /// 与 `WgpuRenderer` 共享同一套 Pixel Snapping、0.25px 亚像素字号 (`font_size_q4`)、
 /// Evan Wallace 高斯软阴影、解析圆弧 SDF 与预乘边框混合真源，消除软件首屏切 GPU 时的视觉抖动。
@@ -397,6 +549,8 @@ pub(crate) fn rasterize_region_scaled<P: PixelFormat>(
     buffer_origin_y: i16,
     buffer_stride: usize,
     target: &mut [P],
+    #[cfg(not(target_arch = "wasm32"))] occlusion: Option<&SpatialOcclusionGrid>,
+    precomputed_text: Option<&[Option<PrecomputedScaledTextBox>]>,
 ) {
     if dirty_region_phys.is_empty() || buffer_stride == 0 || target.is_empty() || viewport.is_empty()
     {
@@ -429,11 +583,17 @@ pub(crate) fn rasterize_region_scaled<P: PixelFormat>(
 
     let mut occluders: crate::arena::SmallVec<(usize, Region), 32> = crate::arena::SmallVec::new();
     let mut occluders_complete = true;
-    for (idx, op) in ops.iter().enumerate() {
-        let occ = opaque_core_rect(op).intersect(viewport);
-        if !occ.is_empty() && !occluders.push((idx, occ)) {
-            occluders_complete = false;
-            break;
+    #[cfg(not(target_arch = "wasm32"))]
+    let build_local = occlusion.is_none();
+    #[cfg(target_arch = "wasm32")]
+    let build_local = true;
+    if build_local {
+        for (idx, op) in ops.iter().enumerate() {
+            let occ = opaque_core_rect(op).intersect(viewport);
+            if !occ.is_empty() && !occluders.push((idx, occ)) {
+                occluders_complete = false;
+                break;
+            }
         }
     }
 
@@ -445,10 +605,18 @@ pub(crate) fn rasterize_region_scaled<P: PixelFormat>(
         if raw_clip.is_empty() {
             continue;
         }
-        let eff_clip = if occluders_complete {
-            clip_against_opaque_rects(raw_clip, occluders.as_slice(), idx)
-        } else {
-            compute_unoccluded_clip(raw_clip, &ops[(idx + 1)..])
+        let eff_clip = {
+            #[cfg(not(target_arch = "wasm32"))]
+            let indexed = occlusion.map(|grid| grid.clip_region(raw_clip, idx));
+            #[cfg(target_arch = "wasm32")]
+            let indexed: Option<Region> = None;
+            indexed.unwrap_or_else(|| {
+                if occluders_complete {
+                    clip_against_opaque_rects(raw_clip, occluders.as_slice(), idx)
+                } else {
+                    compute_unoccluded_clip(raw_clip, &ops[(idx + 1)..])
+                }
+            })
         };
         if eff_clip.is_empty() {
             continue;
@@ -490,17 +658,38 @@ pub(crate) fn rasterize_region_scaled<P: PixelFormat>(
                 if text.is_empty() || color.a() == 0 {
                     continue;
                 }
-                let (adj_bounds, adj_sc, adj_flags, logical_fs, fs_q4) = compute_scaled_text_box(
-                    op.bounds,
-                    op.clip,
-                    viewport,
-                    sb,
-                    sc,
-                    text.as_str(),
-                    font_size,
-                    text_flags,
-                    sf,
-                );
+                let (adj_bounds, adj_sc, adj_flags, logical_fs, fs_q4) = if let Some(pre) =
+                    precomputed_text.and_then(|t| t.get(idx)).and_then(|&slot| slot)
+                {
+                    (
+                        pre.adj_bounds,
+                        pre.adj_sc,
+                        pre.adj_flags,
+                        pre.logical_fs,
+                        pre.fs_q4,
+                    )
+                } else {
+                    // 未启用多条带预计算表时，先用保守垂直包围盒快速剔除完全不落入当前脏区的文本
+                    let logical_fs = font_size.max(8);
+                    let render_fs = ((logical_fs as f32) * sf).clamp(8.0, 255.0).ceil() as i16;
+                    let expand_y = render_fs.saturating_sub(sb.h).max(0) / 2 + 4;
+                    let est_y0 = sc.y.min(sb.y.saturating_sub(expand_y));
+                    let est_y1 = sc.bottom().max(sb.bottom().saturating_add(expand_y));
+                    if est_y1 <= dirty_phys.y || est_y0 >= dirty_phys.bottom() {
+                        continue;
+                    }
+                    compute_scaled_text_box(
+                        op.bounds,
+                        op.clip,
+                        viewport,
+                        sb,
+                        sc,
+                        text.as_str(),
+                        font_size,
+                        text_flags,
+                        sf,
+                    )
+                };
                 let eff = adj_sc.intersect(dirty_phys);
                 if eff.is_empty() {
                     continue;
@@ -750,12 +939,10 @@ pub(crate) fn rasterize_region_scaled_parallel<P: PixelFormat>(
     #[cfg(not(target_arch = "wasm32"))]
     {
         let area = (dirty_phys.w.max(0) as usize) * (dirty_phys.h.max(0) as usize);
-        let has_shader = ops_have_layers_or_blend(ops)
-            || ops.iter().any(|op| {
-                matches!(op.payload, DrawPayload::Sprite(SpriteSource::Shader { .. }))
-                    && !dirty_region.intersect(op.clip).intersect(op.bounds).is_empty()
-            });
-        if !has_shader && dirty_phys.h >= 32 && area >= 65_536 {
+        if dirty_phys.h >= 32
+            && area >= 65_536
+            && can_rasterize_parallel(ops)
+        {
             if parallel_pool::dispatch_parallel_strips_scaled(
                 ops,
                 viewport,
@@ -780,6 +967,9 @@ pub(crate) fn rasterize_region_scaled_parallel<P: PixelFormat>(
         oy_phys,
         stride,
         target,
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
+        None,
     );
 }
 
@@ -1093,12 +1283,10 @@ pub fn rasterize_region_parallel<P: PixelFormat>(
     #[cfg(not(target_arch = "wasm32"))]
     {
         let area = (dirty_region.w.max(0) as usize) * (dirty_region.h.max(0) as usize);
-        let has_shader = ops_have_layers_or_blend(ops)
-            || ops.iter().any(|op| {
-                matches!(op.payload, DrawPayload::Sprite(SpriteSource::Shader { .. }))
-                    && !dirty_region.intersect(op.clip).intersect(op.bounds).is_empty()
-            });
-        if !has_shader && dirty_region.h >= 32 && area >= 65_536 {
+        if dirty_region.h >= 32
+            && area >= 65_536
+            && can_rasterize_parallel(ops)
+        {
             if parallel_pool::dispatch_parallel_strips(
                 ops,
                 dirty_region,
@@ -1123,16 +1311,34 @@ pub fn rasterize_region_parallel<P: PixelFormat>(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn can_rasterize_parallel(ops: &[DrawOp<'_>]) -> bool {
+    !ops_have_layers_or_blend(ops)
+        && !ops.iter().any(|op| match op.payload {
+            DrawPayload::Sprite(SpriteSource::Shader { .. }) => true,
+            DrawPayload::SceneCanvas(spec) => {
+                spec.software_bg_fallback.is_some() || spec.software_fg_fallback.is_some()
+            }
+            _ => false,
+        })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 mod parallel_pool {
     use super::*;
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::boxed::Box;
+    use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
     use std::sync::{Arc, Condvar, Mutex, OnceLock};
+    use std::vec::Vec;
 
     /// 单个并行光栅化批次描述符（类型擦除像素函数指针以支持任意 `P: PixelFormat`）。
     #[derive(Copy, Clone)]
     struct BatchJob {
         ops_ptr: usize,
         ops_len: usize,
+        occlusion_ptr: usize,
+        precomputed_text_ptr: usize,
+        precomputed_text_len: usize,
         viewport: Region,
         scale_factor: f32,
         dirty_region: Region,
@@ -1173,6 +1379,15 @@ mod parallel_pool {
                 (job.target_ptr as *mut P).add(row_start),
                 row_end - row_start,
             );
+            let occlusion = (job.occlusion_ptr as *const SpatialOcclusionGrid).as_ref();
+            let precomputed_text = if job.precomputed_text_ptr != 0 && job.precomputed_text_len > 0 {
+                Some(core::slice::from_raw_parts(
+                    job.precomputed_text_ptr as *const Option<PrecomputedScaledTextBox>,
+                    job.precomputed_text_len,
+                ))
+            } else {
+                None
+            };
             if job.scale_factor > 0.0 {
                 rasterize_region_scaled(
                     ops,
@@ -1183,15 +1398,18 @@ mod parallel_pool {
                     y0,
                     job.stride,
                     strip_target,
+                    occlusion,
+                    precomputed_text,
                 );
             } else {
-                rasterize_region(
+                rasterize_region_inner(
                     ops,
                     strip_reg,
                     job.origin_x,
                     y0,
                     job.stride,
                     strip_target,
+                    occlusion,
                 );
             }
         }
@@ -1204,6 +1422,23 @@ mod parallel_pool {
         done_cv: Condvar,
         next_strip: AtomicUsize,
         num_workers: AtomicUsize,
+        panics: Mutex<Vec<Box<dyn core::any::Any + Send>>>,
+    }
+
+    fn process_strips(shared: &PoolShared, job: &BatchJob) {
+        let result = catch_unwind(AssertUnwindSafe(|| loop {
+            let idx = shared.next_strip.fetch_add(1, Ordering::Relaxed);
+            if idx >= job.total_strips {
+                break;
+            }
+            // The dispatching thread waits for every participant before returning.
+            unsafe { (job.strip_fn)(job, idx) };
+        }));
+        if let Err(payload) = result {
+            shared.next_strip.fetch_max(job.total_strips, Ordering::Relaxed);
+            let mut panics = shared.panics.lock().unwrap_or_else(|e| e.into_inner());
+            panics.push(payload);
+        }
     }
 
     struct WorkerDoneGuard<'a>(&'a PoolShared);
@@ -1235,6 +1470,7 @@ mod parallel_pool {
                 done_cv: Condvar::new(),
                 next_strip: AtomicUsize::new(0),
                 num_workers: AtomicUsize::new(0),
+                panics: Mutex::new(Vec::new()),
             });
 
             let mut spawned = 0usize;
@@ -1258,15 +1494,7 @@ mod parallel_pool {
                             };
                             if let Some(j) = job {
                                 let _done_guard = WorkerDoneGuard(&sh);
-                                loop {
-                                    let idx = sh.next_strip.fetch_add(1, Ordering::Relaxed);
-                                    if idx >= j.total_strips {
-                                        break;
-                                    }
-                                    unsafe {
-                                        (j.strip_fn)(&j, idx);
-                                    }
-                                }
+                                process_strips(&sh, &j);
                             }
                         }
                     })
@@ -1384,55 +1612,72 @@ mod parallel_pool {
         }
 
         let strip_h: i16 = 16;
-        let total_strips = ((dirty_region.h + strip_h - 1) / strip_h).max(1) as usize;
+        let total_strips = (dirty_region.h as usize).div_ceil(strip_h as usize);
         if total_strips <= 1 {
             return false;
         }
 
-        let job = BatchJob {
-            ops_ptr: ops.as_ptr() as usize,
-            ops_len: ops.len(),
-            viewport,
-            scale_factor,
-            dirty_region,
-            origin_x,
-            origin_y,
-            stride,
-            target_ptr: target.as_mut_ptr() as usize,
-            target_len: target.len(),
-            strip_h,
-            total_strips,
-            strip_fn: run_strip_typed::<P>,
-        };
+        with_spatial_occlusion(ops, |occlusion| {
+            let precomputed_text = if scale_factor > 0.0 {
+                precompute_scaled_text_boxes(ops, viewport, scale_factor.clamp(0.5, 4.0), occlusion)
+            } else {
+                Vec::new()
+            };
+            let job = BatchJob {
+                ops_ptr: ops.as_ptr() as usize,
+                ops_len: ops.len(),
+                occlusion_ptr: occlusion.map_or(0, |grid| core::ptr::from_ref(grid) as usize),
+                precomputed_text_ptr: if precomputed_text.is_empty() {
+                    0
+                } else {
+                    precomputed_text.as_ptr() as usize
+                },
+                precomputed_text_len: precomputed_text.len(),
+                viewport,
+                scale_factor,
+                dirty_region,
+                origin_x,
+                origin_y,
+                stride,
+                target_ptr: target.as_mut_ptr() as usize,
+                target_len: target.len(),
+                strip_h,
+                total_strips,
+                strip_fn: run_strip_typed::<P>,
+            };
 
-        pool.next_strip.store(0, Ordering::Release);
-        {
-            let mut rem = pool.done_mutex.lock().unwrap_or_else(|e| e.into_inner());
-            *rem = num_workers;
-        }
-        {
-            let mut st = pool.state.lock().unwrap_or_else(|e| e.into_inner());
-            st.0 = st.0.wrapping_add(1);
-            st.1 = Some(job);
-            pool.work_cv.notify_all();
-        }
-
-        // 主线程自身也参与抢占条带计算
-        loop {
-            let idx = pool.next_strip.fetch_add(1, Ordering::Relaxed);
-            if idx >= total_strips {
-                break;
+            pool.next_strip.store(0, Ordering::Release);
+            {
+                let mut rem = pool.done_mutex.lock().unwrap_or_else(|e| e.into_inner());
+                *rem = num_workers;
             }
-            unsafe {
-                run_strip_typed::<P>(&job, idx);
+            {
+                let mut st = pool.state.lock().unwrap_or_else(|e| e.into_inner());
+                st.0 = st.0.wrapping_add(1);
+                st.1 = Some(job);
+                pool.work_cv.notify_all();
             }
-        }
 
-        // 等待所有工作线程完成当前批次
-        let mut rem = pool.done_mutex.lock().unwrap_or_else(|e| e.into_inner());
-        while *rem > 0 {
-            rem = pool.done_cv.wait(rem).unwrap_or_else(|e| e.into_inner());
-        }
+            process_strips(pool, &job);
+            {
+                let mut rem = pool.done_mutex.lock().unwrap_or_else(|e| e.into_inner());
+                while *rem > 0 {
+                    rem = pool.done_cv.wait(rem).unwrap_or_else(|e| e.into_inner());
+                }
+            }
+            pool.state.lock().unwrap_or_else(|e| e.into_inner()).1 = None;
+            let mut panics = pool.panics.lock().unwrap_or_else(|e| e.into_inner());
+            if !panics.is_empty() {
+                let mut failures = core::mem::take(&mut *panics);
+                drop(panics);
+                drop(_dispatch_guard);
+                if let Some(payload) = failures.pop() {
+                    // Discard other errors only after no worker can access the buffers.
+                    drop(failures);
+                    resume_unwind(payload);
+                }
+            }
+        });
         true
     }
 }

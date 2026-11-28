@@ -802,23 +802,44 @@ impl WgpuOffscreenRenderer {
         sf: f32,
         dirty_regions: &[Region],
     ) {
+        #[cfg(target_endian = "little")]
+        {
+            // Every u32 bit pattern is valid for Rgba8888, and on little-endian
+            // targets its memory representation matches the output RGBA bytes.
+            let (prefix, pixels, suffix) = unsafe { self.rgba_buffer.align_to_mut::<Rgba8888>() };
+            if prefix.is_empty() && suffix.is_empty() {
+                Self::rasterize_software(ops, viewport, sf, dirty_regions, self.width, pixels);
+                return;
+            }
+        }
+
         let needed = self.width * self.height;
         if self.fallback_pixmap.len() != needed {
             self.fallback_pixmap.resize(needed, Rgba8888(0));
         }
-        for &reg in dirty_regions {
-            if !reg.is_empty() {
-                rasterize_region_scaled_parallel(
-                    ops,
-                    viewport,
-                    sf,
-                    reg,
-                    0,
-                    0,
-                    self.width,
-                    &mut self.fallback_pixmap,
-                );
-            }
+        Self::rasterize_software(
+            ops,
+            viewport,
+            sf,
+            dirty_regions,
+            self.width,
+            &mut self.fallback_pixmap,
+        );
+        for (dst, px) in self.rgba_buffer.chunks_exact_mut(4).zip(&self.fallback_pixmap) {
+            dst.copy_from_slice(&px.to_rgba_bytes());
+        }
+    }
+
+    fn rasterize_software(
+        ops: &[DrawOp<'_>],
+        viewport: Region,
+        sf: f32,
+        dirty_regions: &[Region],
+        stride: usize,
+        pixels: &mut [Rgba8888],
+    ) {
+        for &region in dirty_regions {
+            rasterize_region_scaled_parallel(ops, viewport, sf, region, 0, 0, stride, pixels);
         }
     }
 }
@@ -862,13 +883,6 @@ impl Renderer for WgpuOffscreenRenderer {
         }
 
         self.rasterize_software_fallback(ops, viewport, s as f32, dirty_regions);
-        for (dst, px) in self
-            .rgba_buffer
-            .chunks_exact_mut(4)
-            .zip(self.fallback_pixmap.iter())
-        {
-            dst.copy_from_slice(&px.to_rgba_bytes());
-        }
         (dirty_regions.len(), total_pixels)
     }
 

@@ -62,6 +62,21 @@ pub(super) struct WinitAppHandler {
     pub(super) pending_gpu: Option<crate::renderers::wgpu::PreparedWgpuContext>,
     #[cfg(feature = "gpu")]
     pub(super) gpu_warmup_in_flight: bool,
+    /// 尚未成功提交至 Swapchain 的累计脏区（防止 `Timeout`/`Lost` 获取纹理失败时丢失引擎已消费的脏矩形）。
+    #[cfg(feature = "gpu")]
+    pub(super) pending_gpu_damage: Vec<Region>,
+    /// 当未提交脏区溢出或上次 Swapchain 获取失败时，强制下一次成功提交执行全量重绘。
+    #[cfg(feature = "gpu")]
+    pub(super) pending_gpu_full_repaint: bool,
+    /// 连续瞬态提交失败重试计数（前 2 次即时重试，后续转入低频指数退避直到成功或窗口遮挡暂停）。
+    #[cfg(feature = "gpu")]
+    pub(super) gpu_present_retry_streak: u8,
+    /// 可见窗口瞬态提交失败后的下一次退避重试截止时刻（遮挡或最小化时自动清空进入 `Wait` 零空转）。
+    #[cfg(feature = "gpu")]
+    pub(super) gpu_retry_not_before: Option<Instant>,
+    /// 窗口当前是否被系统遮挡（`WindowEvent::Occluded` 或 Swapchain 返回 `Occluded`）。
+    #[cfg(feature = "gpu")]
+    pub(super) window_occluded: bool,
     pub(super) surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     pub(super) window: Option<Arc<Window>>,
     pub(super) window_shown: bool,
@@ -243,30 +258,105 @@ impl WinitAppHandler {
     ) -> bool {
         #[cfg(feature = "gpu")]
         if let Some(gpu_surf) = &mut self.gpu_surface {
+            let viewport = self.core.viewport_region();
             let curr_damage: Vec<Region> = self.core.step_frame_dt(dt_ms.max(1)).to_vec();
-            if curr_damage.is_empty() && !force_present && self.window_shown {
+            for r in curr_damage {
+                let clipped = r.intersect(viewport);
+                if clipped.is_empty() {
+                    continue;
+                }
+                if !self.pending_gpu_full_repaint {
+                    if self.pending_gpu_damage.len() >= 8 {
+                        self.pending_gpu_full_repaint = true;
+                        self.pending_gpu_damage.clear();
+                    } else {
+                        self.pending_gpu_damage.push(clipped);
+                    }
+                }
+            }
+            if force_present || !self.window_shown {
+                self.pending_gpu_full_repaint = true;
+            }
+            if self.pending_gpu_damage.is_empty() && !self.pending_gpu_full_repaint {
                 self.sync_ime_cursor_area();
                 self.sync_cursor_shape();
                 return false;
             }
-            let viewport = self.core.viewport_region();
+            // 若处于交换链瞬态失败的退避窗口期内：动画与引擎脏区已推进并累积，
+            // 但推迟本次交换链纹理获取直至退避截止时刻，避免活跃动画或高频事件绕过退避反复撞击异常表面。
+            if let Some(retry_at) = self.gpu_retry_not_before {
+                if Instant::now() < retry_at {
+                    self.sync_ime_cursor_area();
+                    self.sync_cursor_shape();
+                    return false;
+                }
+                self.gpu_retry_not_before = None;
+            }
             let ops = self.core.cached_draw_ops();
             let sf = self.core.scale_factor();
             let scene_bg = infer_scene_bg(ops, self.core.theme().background);
-            let presented = gpu_surf.render_scaled_with_clear_dirty(
+            let full_vp = [viewport];
+            let submit_damage: &[Region] = if self.pending_gpu_full_repaint {
+                &full_vp
+            } else {
+                self.pending_gpu_damage.as_slice()
+            };
+            let outcome = gpu_surf.render_scaled_with_clear_dirty_status(
                 ops,
                 viewport,
                 sf,
                 scene_bg,
-                &curr_damage,
+                submit_damage,
             );
-            if presented {
-                if wait_gpu_sync {
-                    gpu_surf.flush_and_wait();
+            let presented = match outcome {
+                crate::renderers::wgpu::SurfacePresentOutcome::Presented => {
+                    if wait_gpu_sync {
+                        gpu_surf.flush_and_wait();
+                    }
+                    self.wl_surface.committed_damage = submit_damage.to_vec();
+                    self.wl_surface.commit();
+                    self.pending_gpu_damage.clear();
+                    self.pending_gpu_full_repaint = false;
+                    self.gpu_present_retry_streak = 0;
+                    self.gpu_retry_not_before = None;
+                    self.window_occluded = false;
+                    true
                 }
-                self.wl_surface.committed_damage = curr_damage;
-                self.wl_surface.commit();
-            }
+                crate::renderers::wgpu::SurfacePresentOutcome::Occluded => {
+                    // 窗口处于遮挡/最小化：保留全量重绘需求并暂停重试，等取消遮挡时自动恢复
+                    self.pending_gpu_full_repaint = true;
+                    self.window_occluded = true;
+                    self.gpu_present_retry_streak = 0;
+                    self.gpu_retry_not_before = None;
+                    gpu_surf.invalidate_persistent_target();
+                    false
+                }
+                crate::renderers::wgpu::SurfacePresentOutcome::RetryableFailure => {
+                    // 瞬态获取失败（如 Timeout / Lost）：保留全量重绘标记；
+                    // 前 2 次立即重试以快速自愈偶发重建，后续转入指数退避（50/100/250/500ms）直到成功或窗口遮挡暂停，
+                    // 既防高频空转，也避免静止页面在 Swapchain 自行恢复后永久挂死。
+                    self.pending_gpu_full_repaint = true;
+                    gpu_surf.invalidate_persistent_target();
+                    let streak = self.gpu_present_retry_streak.saturating_add(1);
+                    self.gpu_present_retry_streak = streak;
+                    if streak <= 2 {
+                        self.gpu_retry_not_before = None;
+                        if let Some(win) = &self.window {
+                            win.request_redraw();
+                        }
+                    } else {
+                        let backoff_ms = match streak {
+                            3 => 50,
+                            4 => 100,
+                            5 => 250,
+                            _ => 500,
+                        };
+                        self.gpu_retry_not_before =
+                            Some(Instant::now() + Duration::from_millis(backoff_ms));
+                    }
+                    false
+                }
+            };
             self.sync_window_theme(scene_bg);
             self.sync_ime_cursor_area();
             self.sync_cursor_shape();
@@ -990,6 +1080,23 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppHandler {
                     }
                 }
             }
+            WindowEvent::Occluded(occ) => {
+                #[cfg(feature = "gpu")]
+                {
+                    self.window_occluded = occ;
+                    if occ {
+                        self.gpu_retry_not_before = None;
+                    } else if self.pending_gpu_full_repaint || !self.pending_gpu_damage.is_empty() {
+                        self.gpu_present_retry_streak = 0;
+                        self.gpu_retry_not_before = None;
+                        if let Some(win) = &self.window {
+                            win.request_redraw();
+                        }
+                    }
+                }
+                #[cfg(not(feature = "gpu"))]
+                let _ = occ;
+            }
             WindowEvent::RedrawRequested => {
                 if let Some(inner) = self.window.as_ref().map(|w| w.inner_size()) {
                     if inner.width == 0 || inner.height == 0 {
@@ -1036,7 +1143,41 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppHandler {
                 sz.width == 0 || sz.height == 0 || w.is_minimized() == Some(true)
             })
             .unwrap_or(false);
-        if minimized || !self.core.needs_redraw() {
+        #[cfg(feature = "gpu")]
+        let occluded = self.window_occluded;
+        #[cfg(not(feature = "gpu"))]
+        let occluded = false;
+
+        if minimized || occluded {
+            #[cfg(feature = "gpu")]
+            {
+                self.gpu_retry_not_before = None;
+            }
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+
+        // 可见窗口存在待提交 GPU 退避重试：到期触发重绘，未到期按退避截止时刻休眠，避免永久挂起与高频空转
+        #[cfg(feature = "gpu")]
+        if let Some(retry_at) = self.gpu_retry_not_before {
+            let now = Instant::now();
+            if now >= retry_at {
+                self.gpu_retry_not_before = None;
+                if let Some(win) = &self.window {
+                    win.request_redraw();
+                }
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    now + Duration::from_millis(50),
+                ));
+                return;
+            }
+            if !self.core.needs_redraw() {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(retry_at));
+                return;
+            }
+        }
+
+        if !self.core.needs_redraw() {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
         }

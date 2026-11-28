@@ -342,7 +342,8 @@ impl AutomationSession {
 
         match method.as_str() {
             "initialize" => format!(
-                "{{\"jsonrpc\":\"2.0\",\"id\":{req_id},\"result\":{{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{{\"tools\":{{}}}},\"serverInfo\":{{\"name\":\"velox-automation-mcp\",\"version\":\"0.4.0\"}}}}}}"
+                "{{\"jsonrpc\":\"2.0\",\"id\":{req_id},\"result\":{{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{{\"tools\":{{}}}},\"serverInfo\":{{\"name\":\"velox-automation-mcp\",\"version\":\"{version}\"}}}}}}",
+                version = env!("CARGO_PKG_VERSION"),
             ),
             "tools/list" => format!(
                 "{{\"jsonrpc\":\"2.0\",\"id\":{req_id},\"result\":{{\"tools\":[{{\"name\":\"velox_snapshot_tree\",\"description\":\"Capture structured Velox UI accessibility/semantic tree as JSON\"}},{{\"name\":\"velox_click\",\"description\":\"Click a UI node by numeric id\"}},{{\"name\":\"velox_click_label\",\"description\":\"Find and click a UI node by label substring\"}},{{\"name\":\"velox_fill\",\"description\":\"Focus and type text into an input node by id\"}},{{\"name\":\"velox_scroll\",\"description\":\"Scroll a container node by delta_y\"}},{{\"name\":\"velox_wait_idle\",\"description\":\"Advance frames until all animations settle to 0% CPU idle\"}}]}}}}"

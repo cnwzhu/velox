@@ -315,7 +315,20 @@ impl<'a> DrawOp<'a> {
                 mix_u32(&mut h, spec.content_hash());
             }
         }
-        let eff_bounds = match self.payload {
+        let eff_bounds = self.effective_damage_bounds();
+        DrawOpSnapshot {
+            effective_bounds: eff_bounds,
+            payload_hash: h,
+        }
+    }
+
+    /// 计算本条绘制指令实际可能触及的逻辑像素包围盒（供 `DamageTracker` 与 `DrawOpSnapshot` 共用）。
+    ///
+    /// 对单行 / `nowrap` `TextRun` 同步覆盖与 `compute_scaled_text_box` 同源的横向/纵向外扩范围（受 `self.clip` 裁剪），
+    /// 确保溢出布局框的长文本在变更或删除时均生成完整脏区，杜绝持久渲染目标局部重绘残影。
+    #[inline]
+    pub fn effective_damage_bounds(&self) -> Region {
+        match self.payload {
             DrawPayload::PushLayer(layer) => layer.expanded_bounds().intersect(self.clip),
             DrawPayload::StyledQuad(sq) => {
                 if let Some(t) = sq.transform {
@@ -328,11 +341,107 @@ impl<'a> DrawOp<'a> {
                     self.bounds.intersect(self.clip)
                 }
             }
-            _ => self.bounds.intersect(self.clip),
-        };
-        DrawOpSnapshot {
-            effective_bounds: eff_bounds,
-            payload_hash: h,
+            DrawPayload::TextRun {
+                text,
+                color,
+                font_size,
+                text_flags,
+            } => {
+                if text.is_empty() || color.a() == 0 {
+                    return Region::EMPTY;
+                }
+                let logical_fs = font_size.max(8);
+                let char_h = logical_fs as i16;
+                let line_step = (char_h.saturating_mul(5) / 4).max(char_h);
+                let is_ellipsis = (text_flags & 0x04) != 0;
+                let is_nowrap = (text_flags & 0x08) != 0;
+                let mut b = self.bounds;
+
+                let measure_w = |s: &str| -> i16 {
+                    {
+                        crate::display::measure_line_width_f32(s, logical_fs).ceil() as i16
+                    }
+                };
+
+                // 统一覆盖单行/nowrap 与多行折行（含圆角父容器中溢出布局框的多行文本），零堆分配
+                let (line_count, max_line_w) = if is_nowrap || is_ellipsis || self.bounds.w <= 0 {
+                    (1i16, measure_w(text.as_str()))
+                } else {
+                    let mut count = 0i16;
+                    let mut max_w = 0i16;
+                    let mut rem = text.as_str();
+                    while !rem.is_empty() && count < 32 {
+                        let (line_slice, next_rem) =
+                            crate::display::next_wrapped_line(rem, logical_fs, self.bounds.w);
+                        max_w = max_w.max(measure_w(line_slice));
+                        count += 1;
+                        if next_rem.len() == rem.len() {
+                            break;
+                        }
+                        rem = next_rem;
+                    }
+                    (count.max(1), max_w)
+                };
+
+                if !is_ellipsis {
+                    // 横向：覆盖单行 HiDPI 扩展或长词超出布局框的真实绘制宽度（+~3% 或至少 4px 余量）
+                    let extra_w = (max_line_w / 32).max(4);
+                    let target_w = max_line_w.saturating_add(extra_w);
+                    if target_w > b.w {
+                        let diff_w = target_w - b.w;
+                        match text_flags & 0x03 {
+                            1 => b.x = b.x.saturating_sub(diff_w / 2),
+                            2 => b.x = b.x.saturating_sub(diff_w),
+                            _ => {}
+                        }
+                        b.w = target_w;
+                        if b.right() > self.clip.right() {
+                            let over = b.right().saturating_sub(self.clip.right());
+                            b.x = b.x.saturating_sub(over).max(self.clip.x);
+                        }
+                    }
+                    // 纵向：覆盖单行字高扩宽与多行总块高 `char_h + line_step * (lines - 1)` + ascent/descent 余量
+                    let block_h = char_h
+                        .saturating_add(line_step.saturating_mul(line_count.saturating_sub(1)))
+                        .saturating_add((char_h / 2).max(4));
+                    if block_h > b.h {
+                        if line_count <= 1 {
+                            let diff_h = block_h - b.h;
+                            b.y = b.y.saturating_sub(diff_h / 2);
+                        } else {
+                            // 多行文本从 top_y = bounds.y 开始向下延伸，同时顶部预留 ascent 微量溢出余量
+                            let top_pad = (char_h / 4).max(2);
+                            b.y = b.y.saturating_sub(top_pad);
+                        }
+                        b.h = block_h.saturating_add((char_h / 4).max(2));
+                    }
+                } else if max_line_w <= self.bounds.w {
+                    b.w = b.w.max(max_line_w.saturating_add(4));
+                }
+
+                let mut res = b.union(self.bounds);
+                if self.subpx_q4 != 0 {
+                    res = Region::new(
+                        res.x.saturating_sub(1),
+                        res.y.saturating_sub(1),
+                        res.w.saturating_add(2),
+                        res.h.saturating_add(2),
+                    );
+                }
+                res.intersect(self.clip)
+            }
+            _ => {
+                let mut res = self.bounds;
+                if self.subpx_q4 != 0 {
+                    res = Region::new(
+                        res.x.saturating_sub(1),
+                        res.y.saturating_sub(1),
+                        res.w.saturating_add(2),
+                        res.h.saturating_add(2),
+                    );
+                }
+                res.intersect(self.clip)
+            }
         }
     }
 }

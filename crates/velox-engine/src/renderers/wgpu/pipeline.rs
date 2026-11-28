@@ -11,7 +11,7 @@ use crate::element::SpriteSource;
 use crate::motion::{DrawOp, DrawPayload};
 use crate::renderers::software::{
     align_offset_x, compute_scaled_text_box, compute_unoccluded_clip, rasterize_sprite_source,
-    split_text_lines,
+    split_text_lines, with_spatial_occlusion,
 };
 use crate::solver::Region;
 use crate::style::Color;
@@ -587,7 +587,7 @@ impl WgpuRenderer {
     /// 返回最近一帧合批提交的 [`GpuPrimitive`] 实例数量。
     #[inline]
     pub fn last_primitive_count(&self) -> usize {
-        self.primitives.len()
+        self.uploaded_primitives.len()
     }
 
     /// 返回当前字形图集与精灵图集的物理像素边长 `(glyph_size, sprite_size)`。
@@ -1035,10 +1035,9 @@ impl WgpuRenderer {
         if self.instance_buf_dirty_all || self.uploaded_primitives.is_empty() {
             let bytes = pod_as_bytes(&self.primitives);
             queue.write_buffer(&self.instance_buf, 0, bytes);
-            self.uploaded_primitives.clear();
-            self.uploaded_primitives.extend_from_slice(&self.primitives);
-            self.instance_buf_dirty_all = false;
             self.last_uploaded_instance_bytes = bytes.len();
+            core::mem::swap(&mut self.uploaded_primitives, &mut self.primitives);
+            self.instance_buf_dirty_all = false;
             return;
         }
 
@@ -1095,8 +1094,7 @@ impl WgpuRenderer {
         }
 
         if uploaded_bytes > 0 || old_len != new_len {
-            self.uploaded_primitives.clear();
-            self.uploaded_primitives.extend_from_slice(&self.primitives);
+            core::mem::swap(&mut self.uploaded_primitives, &mut self.primitives);
         }
         self.last_uploaded_instance_bytes = uploaded_bytes;
     }
@@ -1888,6 +1886,54 @@ impl WgpuRenderer {
         phys_w: u32,
         phys_h: u32,
     ) -> Result<(), AtlasGrowNeed> {
+        self.try_encode_ops_filtered(device, queue, ops, viewport, scale_factor, phys_w, phys_h, None)
+    }
+
+    /// 将单条逻辑脏矩形转换为物理 Scissor 矩形 `(sx, sy, sw, sh)`：
+    /// 联合 `snap_clip_region_scaled` 与 `snap_bounds_region_scaled` 两种像素对齐规则，
+    /// 并按 `sf` 动态计算物理余量 `ceil(0.5 * sf) + 1`，严格覆盖高倍 DPI（最高 400%）下
+    /// Q4 亚像素偏移（±7/16 * sf）、1px 恒宽细线与边缘抗锯齿，杜绝删除/移动残影。
+    #[inline]
+    fn dirty_region_to_phys_scissor(
+        dirty: Region,
+        viewport: Region,
+        sf: f32,
+        pw: u32,
+        ph: u32,
+    ) -> (u32, u32, u32, u32) {
+        let clipped = dirty.intersect(viewport);
+        if clipped.is_empty() {
+            return (0, 0, 0, 0);
+        }
+        let pc = snap_clip_region_scaled(clipped, sf);
+        let pb = snap_bounds_region_scaled(clipped, sf);
+        // Q4 亚像素最大偏移 ±(7/16)*sf（4.0x 下为 ±1.75px）+ 取整/抗锯齿 1px -> ceil(0.5*sf) + 1
+        let margin = ((sf * 0.5).ceil() as i16).saturating_add(1);
+        let x0 = pc.x.min(pb.x).saturating_sub(margin).max(0) as u32;
+        let y0 = pc.y.min(pb.y).saturating_sub(margin).max(0) as u32;
+        let x1 = (pc.right().max(pb.right()).saturating_add(margin).max(0) as u32).min(pw);
+        let y1 = (pc.bottom().max(pb.bottom()).saturating_add(margin).max(0) as u32).min(ph);
+        let sx = x0.min(pw);
+        let sy = y0.min(ph);
+        let sw = x1.saturating_sub(sx);
+        let sh = y1.saturating_sub(sy);
+        (sx, sy, sw, sh)
+    }
+
+    /// 支持按逻辑脏区包围盒 `dirty_union` 与物理脏区包围盒 `dirty_phys_union` 预过滤非脏区图元的编码路径
+    /// （专供持久目标局部 Scissor 重绘，在保持遮挡裁剪与实际绘制边界 100% 同源的前提下跳过未触及脏区的 CPU 编码与 GPU 实例上传）。
+    #[allow(clippy::too_many_arguments)]
+    fn try_encode_ops_filtered(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        ops: &[DrawOp<'_>],
+        viewport: Region,
+        scale_factor: f32,
+        phys_w: u32,
+        phys_h: u32,
+        dirty_filter: Option<(Region, Region)>,
+    ) -> Result<(), AtlasGrowNeed> {
         self.primitives.clear();
         self.ui_slug_segments.clear();
         if let Some(slug) = &mut self.ui_slug_engine {
@@ -1901,42 +1947,95 @@ impl WgpuRenderer {
         let use_ttf = crate::display::ttf_atlas::has_system_font();
         let mut batch_prim_start = 0u32;
 
-        for (idx, op) in ops.iter().enumerate() {
-            let raw_clip = match op.payload {
-                DrawPayload::StyledQuad(sq) if sq.transform.is_some() => viewport.intersect(op.clip),
-                _ => viewport.intersect(op.clip).intersect(op.bounds),
-            };
-            if raw_clip.is_empty() {
-                continue;
+        with_spatial_occlusion(ops, |occlusion| {
+            for (idx, op) in ops.iter().enumerate() {
+                let raw_clip = match op.payload {
+                    DrawPayload::StyledQuad(sq) if sq.transform.is_some() => viewport.intersect(op.clip),
+                    _ => viewport.intersect(op.clip).intersect(op.bounds),
+                };
+                if raw_clip.is_empty() {
+                    continue;
+                }
+                let eff_clip = match occlusion {
+                    Some(grid) => grid.clip_region(raw_clip, idx),
+                    None => compute_unoccluded_clip(raw_clip, &ops[(idx + 1)..]),
+                };
+                if eff_clip.is_empty() {
+                    continue;
+                }
+                if let Some((du, du_phys)) = dirty_filter {
+                    let touches_dirty = match op.payload {
+                        DrawPayload::TextRun {
+                            text,
+                            color,
+                            font_size,
+                            text_flags,
+                        } => {
+                            if text.is_empty() || color.a() == 0 {
+                                false
+                            } else if viewport.intersect(op.clip).intersect(du).is_empty() {
+                                // 任何文本都不会绘制到父裁剪框之外：O(1) 零度量剔除
+                                false
+                            } else if !raw_clip.intersect(du).is_empty() {
+                                // 原始布局框已与脏区相交，直接放行
+                                true
+                            } else {
+                                // 无论 1x 还是 HiDPI、无论普通父裁剪还是圆角父裁剪（op.clip_radius > 0），
+                                // 均与 `encode_single_op` 完全同源地计算最终物理绘制裁剪框 `adj_sc` 再与 `du_phys` 求交：
+                                // - 1x 圆角父裁剪下 `clip_reg = op.clip`，`nowrap` 文本外溢进父容器绝不被误剔除；
+                                // - HiDPI 下 `compute_scaled_text_box` 横向/纵向扩展与实际编码严格一致。
+                                let sb_phys = snap_bounds_region_scaled(op.bounds, sf);
+                                let clip_reg = if op.clip_radius > 0 { op.clip } else { eff_clip };
+                                let sc_phys = snap_clip_region_scaled(clip_reg, sf);
+                                let (_, adj_sc, _, _, _) = compute_scaled_text_box(
+                                    op.bounds,
+                                    op.clip,
+                                    viewport,
+                                    sb_phys,
+                                    sc_phys,
+                                    text.as_str(),
+                                    font_size,
+                                    text_flags,
+                                    sf,
+                                );
+                                !adj_sc.intersect(du_phys).is_empty()
+                            }
+                        }
+                        DrawPayload::StyledQuad(sq) if sq.transform.is_some() => {
+                            !op.clip.intersect(du).is_empty()
+                        }
+                        _ => !eff_clip.intersect(du).is_empty(),
+                    };
+                    if !touches_dirty {
+                        continue;
+                    }
+                }
+                let prim_before = self.primitives.len() as u32;
+                let slug_before = self
+                    .ui_slug_engine
+                    .as_ref()
+                    .map(|s| s.instance_count())
+                    .unwrap_or(0);
+                self.encode_single_op(
+                    device, queue, op, eff_clip, viewport, sf, use_ttf, 0.0, 0.0, phys_w, phys_h,
+                )?;
+                let slug_after = self
+                    .ui_slug_engine
+                    .as_ref()
+                    .map(|s| s.instance_count())
+                    .unwrap_or(0);
+                if slug_after > slug_before {
+                    self.ui_slug_segments.push((
+                        batch_prim_start,
+                        prim_before,
+                        slug_before,
+                        slug_after,
+                    ));
+                    batch_prim_start = prim_before;
+                }
             }
-            let eff_clip = compute_unoccluded_clip(raw_clip, &ops[(idx + 1)..]);
-            if eff_clip.is_empty() {
-                continue;
-            }
-            let prim_before = self.primitives.len() as u32;
-            let slug_before = self
-                .ui_slug_engine
-                .as_ref()
-                .map(|s| s.instance_count())
-                .unwrap_or(0);
-            self.encode_single_op(
-                device, queue, op, eff_clip, viewport, sf, use_ttf, 0.0, 0.0, phys_w, phys_h,
-            )?;
-            let slug_after = self
-                .ui_slug_engine
-                .as_ref()
-                .map(|s| s.instance_count())
-                .unwrap_or(0);
-            if slug_after > slug_before {
-                self.ui_slug_segments.push((
-                    batch_prim_start,
-                    prim_before,
-                    slug_before,
-                    slug_after,
-                ));
-                batch_prim_start = prim_before;
-            }
-        }
+            Ok(())
+        })?;
         if !self.ui_slug_segments.is_empty() {
             let final_prim = self.primitives.len() as u32;
             if final_prim > batch_prim_start {
@@ -2524,10 +2623,10 @@ impl WgpuRenderer {
                 multiview_mask: None,
             });
             if self.ui_slug_segments.is_empty() {
-                if !self.primitives.is_empty() {
+                if !self.uploaded_primitives.is_empty() {
                     rpass.set_pipeline(&self.pipeline);
                     rpass.set_bind_group(0, &self.bind_group, &[0]);
-                    rpass.draw(0..6, 0..(self.primitives.len() as u32));
+                    rpass.draw(0..6, 0..(self.uploaded_primitives.len() as u32));
                 }
             } else {
                 for &(p_start, p_end, s_start, s_end) in &self.ui_slug_segments {
@@ -2570,6 +2669,58 @@ impl WgpuRenderer {
         dirty_regions: &[Region],
         clear_color: wgpu::Color,
     ) {
+        let _ = self.render_to_view_dirty_with_copy(
+            device,
+            queue,
+            ops,
+            viewport,
+            scale_factor,
+            target_view,
+            phys_width,
+            phys_height,
+            dirty_regions,
+            clear_color,
+            None,
+        );
+    }
+
+    /// 面向持久渲染目标的局部 Scissor 渲染 + 同 `CommandEncoder` 硬件纹理拷贝上屏（单次 `queue.submit`）。
+    ///
+    /// - 返回 `true` 表示本次实际命中了 `LoadOp::Load + set_scissor_rect` 局部增量重绘（并跳过非脏区图元 CPU 编码）；
+    /// - 返回 `false` 表示因透明底、多 Pass 图层或 `SceneCanvas` 退化为整屏重绘（若传入 `post_copy`，同样在提交后完成拷贝上屏）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_to_view_dirty_with_copy(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        ops: &[DrawOp<'_>],
+        viewport: Region,
+        scale_factor: f32,
+        target_view: &wgpu::TextureView,
+        phys_width: u32,
+        phys_height: u32,
+        dirty_regions: &[Region],
+        clear_color: wgpu::Color,
+        post_copy: Option<(&wgpu::Texture, &wgpu::Texture)>,
+    ) -> bool {
+        let pw = phys_width.max(1);
+        let ph = phys_height.max(1);
+        let submit_copy_only = |src_tex: &wgpu::Texture, dst_tex: &wgpu::Texture| {
+            let mut copy_enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("velox_wgpu_persistent_copy_encoder"),
+            });
+            copy_enc.copy_texture_to_texture(
+                src_tex.as_image_copy(),
+                dst_tex.as_image_copy(),
+                wgpu::Extent3d {
+                    width: pw,
+                    height: ph,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit([copy_enc.finish()]);
+        };
+
         if dirty_regions.is_empty() {
             self.render_to_view(
                 device,
@@ -2578,11 +2729,14 @@ impl WgpuRenderer {
                 viewport,
                 scale_factor,
                 target_view,
-                phys_width,
-                phys_height,
+                pw,
+                ph,
                 clear_color,
             );
-            return;
+            if let Some((src_tex, dst_tex)) = post_copy {
+                submit_copy_only(src_tex, dst_tex);
+            }
+            return false;
         }
         if crate::renderers::software::ops_have_layers_or_blend(ops) && !viewport.is_empty() {
             // 透传精确脏区列表供 `backdrop-filter` 执行外扩采样框交集跳过与模糊小纹理复用
@@ -2593,16 +2747,25 @@ impl WgpuRenderer {
                 viewport,
                 scale_factor,
                 target_view,
-                phys_width,
-                phys_height,
+                pw,
+                ph,
                 clear_color,
                 Some(dirty_regions),
             );
-            return;
+            if let Some((src_tex, dst_tex)) = post_copy {
+                submit_copy_only(src_tex, dst_tex);
+            }
+            return false;
         }
-        if ops
-            .iter()
-            .any(|op| matches!(op.payload, DrawPayload::SceneCanvas(_)))
+        // A load-and-repaint pass is safe only if it overwrites the previous
+        // destination before drawing transparent content.
+        let opaque_background = ops.first().is_some_and(|op| {
+            matches!(op.payload, DrawPayload::Quad { rounded: 0, border_width: 0, .. })
+                && op.clip_radius == 0
+                && crate::renderers::software::opaque_core_rect(op).intersect(viewport) == viewport
+        });
+        if !opaque_background
+            || ops.iter().any(|op| matches!(op.payload, DrawPayload::SceneCanvas(_)))
         {
             self.render_to_view(
                 device,
@@ -2611,19 +2774,75 @@ impl WgpuRenderer {
                 viewport,
                 scale_factor,
                 target_view,
-                phys_width,
-                phys_height,
+                pw,
+                ph,
                 clear_color,
             );
-            return;
+            if let Some((src_tex, dst_tex)) = post_copy {
+                submit_copy_only(src_tex, dst_tex);
+            }
+            return false;
         }
+
         let sf = scale_factor.clamp(0.5, 4.0);
-        let pw = phys_width.max(1);
-        let ph = phys_height.max(1);
+
+        // 计算所有脏矩形在逻辑空间与物理空间中的并集包围盒（物理包围盒严格与 Scissor 同源，包含细线与取整余量）
+        let mut du_x0 = i16::MAX;
+        let mut du_y0 = i16::MAX;
+        let mut du_x1 = i16::MIN;
+        let mut du_y1 = i16::MIN;
+        let mut phys_x0 = u32::MAX;
+        let mut phys_y0 = u32::MAX;
+        let mut phys_x1 = 0u32;
+        let mut phys_y1 = 0u32;
+        for &d in dirty_regions {
+            let c = d.intersect(viewport);
+            if !c.is_empty() {
+                du_x0 = du_x0.min(c.x);
+                du_y0 = du_y0.min(c.y);
+                du_x1 = du_x1.max(c.right());
+                du_y1 = du_y1.max(c.bottom());
+                let (sx, sy, sw, sh) = Self::dirty_region_to_phys_scissor(d, viewport, sf, pw, ph);
+                if sw > 0 && sh > 0 {
+                    phys_x0 = phys_x0.min(sx);
+                    phys_y0 = phys_y0.min(sy);
+                    phys_x1 = phys_x1.max(sx.saturating_add(sw));
+                    phys_y1 = phys_y1.max(sy.saturating_add(sh));
+                }
+            }
+        }
+        if du_x0 >= du_x1 || du_y0 >= du_y1 || phys_x0 >= phys_x1 || phys_y0 >= phys_y1 {
+            if let Some((src_tex, dst_tex)) = post_copy {
+                submit_copy_only(src_tex, dst_tex);
+            }
+            return true;
+        }
+        let dirty_union = Region::new(
+            du_x0.saturating_sub(2),
+            du_y0.saturating_sub(2),
+            du_x1.saturating_sub(du_x0).saturating_add(4),
+            du_y1.saturating_sub(du_y0).saturating_add(4),
+        )
+        .intersect(viewport);
+        let dirty_phys_union = Region::new(
+            phys_x0.min(i16::MAX as u32) as i16,
+            phys_y0.min(i16::MAX as u32) as i16,
+            phys_x1.saturating_sub(phys_x0).min(i16::MAX as u32) as i16,
+            phys_y1.saturating_sub(phys_y0).min(i16::MAX as u32) as i16,
+        );
 
         let mut bind_group_dirty = false;
         for _attempt in 0..4 {
-            match self.try_encode_ops(device, queue, ops, viewport, sf, pw, ph) {
+            match self.try_encode_ops_filtered(
+                device,
+                queue,
+                ops,
+                viewport,
+                sf,
+                pw,
+                ph,
+                Some((dirty_union, dirty_phys_union)),
+            ) {
                 Ok(()) => break,
                 Err(need) => {
                     let (dirty, can_retry) = self.handle_atlas_grow(device, need);
@@ -2680,19 +2899,16 @@ impl WgpuRenderer {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            if !self.primitives.is_empty() || !self.ui_slug_segments.is_empty() {
+            if !self.uploaded_primitives.is_empty() || !self.ui_slug_segments.is_empty() {
                 for &d in dirty_regions {
-                    let pd = snap_clip_region_scaled(d.intersect(viewport), sf);
-                    let sx = (pd.x.max(0) as u32).min(pw);
-                    let sy = (pd.y.max(0) as u32).min(ph);
-                    let sw = (pd.w.max(0) as u32).min(pw.saturating_sub(sx));
-                    let sh = (pd.h.max(0) as u32).min(ph.saturating_sub(sy));
+                    let (sx, sy, sw, sh) =
+                        Self::dirty_region_to_phys_scissor(d, viewport, sf, pw, ph);
                     if sw > 0 && sh > 0 {
                         rpass.set_scissor_rect(sx, sy, sw, sh);
                         if self.ui_slug_segments.is_empty() {
                             rpass.set_pipeline(&self.pipeline);
                             rpass.set_bind_group(0, &self.bind_group, &[0]);
-                            rpass.draw(0..6, 0..(self.primitives.len() as u32));
+                            rpass.draw(0..6, 0..(self.uploaded_primitives.len() as u32));
                         } else {
                             for &(p_start, p_end, s_start, s_end) in &self.ui_slug_segments {
                                 if p_end > p_start {
@@ -2711,6 +2927,18 @@ impl WgpuRenderer {
                 }
             }
         }
+        // 在同一个 CommandEncoder 末尾直接将持久渲染目标拷入 Swapchain，单次 submit 零多余同步开销
+        if let Some((src_tex, dst_tex)) = post_copy {
+            encoder.copy_texture_to_texture(
+                src_tex.as_image_copy(),
+                dst_tex.as_image_copy(),
+                wgpu::Extent3d {
+                    width: pw,
+                    height: ph,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         queue.submit([encoder.finish()]);
         if let Some(fx) = &mut self.effects {
             fx.tick_idle_frame();
@@ -2718,6 +2946,7 @@ impl WgpuRenderer {
         if let Some(canvas) = &mut self.canvas_engine {
             canvas.tick_frame_reclaim();
         }
+        true
     }
 
     #[allow(clippy::too_many_arguments)]

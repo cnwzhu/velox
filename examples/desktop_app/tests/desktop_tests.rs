@@ -43,6 +43,13 @@ fn text_center(engine: &VeloxEngine, label: &str) -> (i16, i16) {
     )
 }
 
+/// 渲染新切换的故事页或入场浮层并将单次入场弹簧过渡快进至终态（不额外推进虚拟时钟，保留光标闪烁相位）。
+fn settle_entrance(engine: &mut VeloxEngine) {
+    let _ = engine.step_frame_dt(16);
+    engine.finish_animations();
+    let _ = engine.step_frame_dt(0);
+}
+
 #[test]
 fn test_gallery_winit_and_wayland_platforms_and_idle_sleep() {
     let (mut w_engine, _w_root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT);
@@ -174,7 +181,7 @@ fn test_gallery_all_11_stories_navigation_and_interactive_controls() {
     // 2. 切回 Buttons Story 验证按钮点击
     let (sx, sy) = text_center(&engine, "Button & Toggle");
     assert!(engine.dispatch_click(sx, sy));
-    let _ = engine.step_frame();
+    settle_entrance(&mut engine);
     let (px, py) = hit_center(&engine, 1101);
     assert!(engine.dispatch_click(px, py));
     assert_eq!(engine.view(root).unwrap().button_clicks, 1);
@@ -182,7 +189,7 @@ fn test_gallery_all_11_stories_navigation_and_interactive_controls() {
     // 3. 切到 Editor Story 验证键盘输入与 Undo/Redo
     let (sx, sy) = text_center(&engine, "Code Editor");
     assert!(engine.dispatch_click(sx, sy));
-    let _ = engine.step_frame();
+    settle_entrance(&mut engine);
 
     let (ex, ey) = hit_center(&engine, 320);
     assert!(engine.dispatch_pointer_down(ex, ey));
@@ -241,7 +248,7 @@ fn test_gallery_all_11_stories_navigation_and_interactive_controls() {
     // 4. 切到 Overlays Story：打开 Destructive AlertDialog 并验证 Escape 关闭
     let (sx, sy) = text_center(&engine, "Dialog & Modal");
     assert!(engine.dispatch_click(sx, sy));
-    let _ = engine.step_frame();
+    settle_entrance(&mut engine);
 
     let (dx, dy) = hit_center(&engine, 1602);
     assert!(engine.dispatch_click(dx, dy));
@@ -254,7 +261,7 @@ fn test_gallery_all_11_stories_navigation_and_interactive_controls() {
     // 5. 切到 Data Story：验证 DataTable 表头排序切换与动态 resize
     let (sx, sy) = text_center(&engine, "Table & List");
     assert!(engine.dispatch_click(sx, sy));
-    let _ = engine.step_frame();
+    settle_entrance(&mut engine);
 
     assert_eq!(engine.view(root).unwrap().table_sort_dir, SortDirection::Asc);
     let (hx, hy) = text_center(&engine, "Crate");
@@ -293,8 +300,8 @@ fn test_gallery_overview_animation_settles_to_idle() {
         "ProgressBar bounds transition should animate across multiple frames (got {animated_frames})"
     );
     assert!(
-        frames_needed > 0 && frames_needed <= 20 && !engine.needs_redraw(),
-        "Gallery must return to 0% CPU idle sleep after 200ms animation finishes (frames={frames_needed})"
+        frames_needed > 0 && frames_needed <= 40 && !engine.needs_redraw(),
+        "Gallery must return to 0% CPU idle sleep after 260ms spring animation settles (frames={frames_needed})"
     );
 }
 
@@ -399,7 +406,7 @@ fn test_gallery_code_editor_cosmic_text_zero_jitter_and_wrap() {
 
     let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT);
     engine.view_mut(root).unwrap().active_story = GalleryStory::Editor;
-    let _ = engine.step_frame();
+    settle_entrance(&mut engine);
 
     // 1. 光标移动前后，所有文本坐标必须 100% 纹丝不动（0 抖动）
     let pos_a: Vec<(i16, i16)> = engine
@@ -455,29 +462,18 @@ fn test_gallery_code_editor_cosmic_text_zero_jitter_and_wrap() {
     assert_eq!(sel_quads.len(), 1);
     assert!(sel_quads[0].w > 50 && sel_quads[0].w < 160);
 
-    // 3. 开启软折行后，超长行自动折为多条视觉行并保持选区渲染正常
-    engine
-        .view_mut(root)
-        .unwrap()
-        .editor_buf
-        .buffer_mut()
-        .set_wrap(Wrap::WordOrGlyph);
-    engine
-        .view_mut(root)
-        .unwrap()
-        .editor_buf
-        .buffer_mut()
-        .set_size(Some(420.0), None);
-    engine
-        .view_mut(root)
-        .unwrap()
-        .editor_buf
-        .set_selection(EditSelection::Normal(Cursor::new(1, 3)));
-    engine
-        .view_mut(root)
-        .unwrap()
-        .editor_buf
-        .set_cursor(Cursor::new(2, 24));
+    // 3. 开启软折行后，超长行自动折为多条视觉行并保持选区渲染正常（1280px 宽画廊中编辑器内容区为 910px）
+    {
+        let ed = &mut engine.view_mut(root).unwrap().editor_buf;
+        ed.buffer_mut().set_wrap(Wrap::WordOrGlyph);
+        ed.set_cursor(Cursor::new(0, 0));
+        ed.insert_string(
+            "// long-line-for-soft-wrap-verification-across-wide-1280px-desktop-editor-viewport-0123456789-abcdefghijklmnopqrstuvwxyz-velox-cosmic-text-wrap-test-end\n",
+            None,
+        );
+        ed.set_selection(EditSelection::Normal(Cursor::new(0, 3)));
+        ed.set_cursor(Cursor::new(1, 24));
+    }
     let _ = engine.step_frame();
     assert!(
         engine
@@ -494,7 +490,7 @@ fn test_gallery_code_editor_cosmic_text_zero_jitter_and_wrap() {
 fn test_gallery_text_input_blink_alignment_drag_select_and_context_menu() {
     let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT);
     engine.view_mut(root).unwrap().active_story = GalleryStory::Inputs;
-    let _ = engine.step_frame_dt(16);
+    settle_entrance(&mut engine);
 
     // 1. 严格对齐验证：Clearable Input (1401)、Password Masked (1402)、NumberInput (1403)、Disabled (1404) 顶部与底部 100% 齐平
     let box_bounds = |eng: &VeloxEngine, id: u32| -> Region {
@@ -624,7 +620,7 @@ fn test_gallery_150dpi_caret_precision_and_zero_drift() {
 
     let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT);
     engine.view_mut(root).unwrap().active_story = GalleryStory::Inputs;
-    let _ = engine.step_frame_dt(16);
+    settle_entrance(&mut engine);
 
     let b1 = engine
         .cached_draw_ops()
@@ -721,7 +717,7 @@ fn test_gallery_inputs_gpui_base_calendar_slots_and_view_switching() {
 
     let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, 1100);
     engine.view_mut(root).unwrap().active_story = GalleryStory::Inputs;
-    let _ = engine.step_frame_dt(16);
+    settle_entrance(&mut engine);
 
     let find_text_center = |eng: &velox_kit::core::engine::VeloxEngine, needle: &str| -> (i16, i16) {
         let op = eng
@@ -936,12 +932,43 @@ fn test_software_vs_gpu_first_paint_pixel_parity() {
         );
     };
 
+    // 位图逐像素对齐阶段禁用 >=28px 的 Slug 2.0 解析曲线路由（Slug 2.0 与 fontdue 位图抗锯齿覆盖率存在自然亚像素差异）
+    let default_slug_threshold = offscreen.slug_text_threshold_px();
+    offscreen.set_slug_text_threshold_px(f32::INFINITY);
+
     // 1. Overview 首屏在 1.0x / 1.25x / 1.5x / 1.75x / 2.0x 全档位 DPI 下逐像素零跳变
     let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT);
     let _ = engine.step_frame_dt(16);
     for sf in [1.0f32, 1.25, 1.5, 1.75, 2.0] {
         assert_scene_parity("Overview-Dark", &mut engine, &mut offscreen, sf);
     }
+
+    // 1.5 恢复默认混合 Slug 2.0 路由（>=28px 标题走解析曲线），验证 1.75x / 2.0x 下整屏平均通道误差极低且无几何错位
+    offscreen.set_slug_text_threshold_px(default_slug_threshold);
+    for sf in [1.75f32, 2.0] {
+        engine.set_scale_factor(sf);
+        let vp = engine.viewport_region();
+        let pw = ((vp.w as f32) * sf).round() as usize;
+        let ph = ((vp.h as f32) * sf).round() as usize;
+        let mut sw_buf = vec![Xrgb8888(0xFF00_0000); pw * ph];
+        engine.rasterize_region(vp, &mut sw_buf);
+        assert!(offscreen.render_draw_ops_scaled(engine.cached_draw_ops(), vp, sf));
+        let gpu_rgba = &offscreen.rgba_buffer;
+        let mut sum_diff: u64 = 0;
+        for idx in 0..(pw * ph) {
+            let sc = sw_buf[idx].to_color();
+            let o = idx * 4;
+            sum_diff += sc.r().abs_diff(gpu_rgba[o]) as u64
+                + sc.g().abs_diff(gpu_rgba[o + 1]) as u64
+                + sc.b().abs_diff(gpu_rgba[o + 2]) as u64;
+        }
+        let mean_diff = (sum_diff as f64) / ((pw * ph * 3) as f64);
+        assert!(
+            mean_diff < 0.25,
+            "[Overview-Dark Hybrid-Slug @ sf={sf:.2}] mean channel diff too large: {mean_diff:.4}"
+        );
+    }
+    offscreen.set_slug_text_threshold_px(f32::INFINITY);
 
     // 2. Overlays + 亮色主题 + 弹出带高斯软阴影的 Dialog（1.5x 分数 DPI）
     engine.set_theme(ThemeMode::Light.to_theme());
@@ -951,7 +978,7 @@ fn test_software_vs_gpu_first_paint_pixel_parity() {
         v.active_story = GalleryStory::Overlays;
         v.demo_dialog_open = true;
     }
-    let _ = engine.step_frame_dt(16);
+    settle_entrance(&mut engine);
     assert_scene_parity("Overlays-Light-DialogShadow", &mut engine, &mut offscreen, 1.5);
 
     // 3. Code Editor（多行代码 + 1px 缩进参考线 + 光标，1.5x 分数 DPI）
@@ -962,7 +989,7 @@ fn test_software_vs_gpu_first_paint_pixel_parity() {
         v.active_story = GalleryStory::Editor;
         v.demo_dialog_open = false;
     }
-    let _ = engine.step_frame_dt(16);
+    settle_entrance(&mut engine);
     assert_scene_parity("Editor-Dark", &mut engine, &mut offscreen, 1.5);
 }
 
@@ -1052,7 +1079,7 @@ fn test_gallery_async_task_subview_lifecycle_cancel_and_l2_isolation() {
         "RAII Drop of Task must immediately cancel and reclaim foreground coroutine"
     );
 
-    for _ in 0..30 {
+    for _ in 0..60 {
         let _ = engine.step_frame_dt(16);
         if !engine.needs_redraw() {
             break;
@@ -1183,7 +1210,7 @@ fn test_gallery_tokio_reqwest_in_flight_cancel_by_task_drop() {
     assert_eq!(engine.view(async_h).unwrap().status, AsyncTaskStatus::Cancelled);
     assert_eq!(engine.active_async_task_count(), 0);
 
-    for _ in 0..30 {
+    for _ in 0..60 {
         let _ = engine.step_frame_dt(16);
         if !engine.needs_redraw() {
             break;
@@ -1209,7 +1236,7 @@ fn test_gallery_effects_story_interactions_and_dual_backend_render() {
     let (sx, sy) = text_center(&engine, "Effects & Shaders");
     assert!(engine.dispatch_click(sx, sy));
     assert_eq!(engine.view(root).unwrap().active_story, GalleryStory::Effects);
-    let _ = engine.step_frame();
+    settle_entrance(&mut engine);
 
     // 1. 验证绘制指令序列确实涵盖 StyledQuad + PushLayer + PopLayer 全套高级管线
     let ops = engine.cached_draw_ops();
@@ -1385,7 +1412,7 @@ fn test_gallery_motion_physics_and_engine_lab_stories() {
 
     // 1. 切换至 Motion & Physics 故事页并验证物理弹簧打断、冲量与自动 0% CPU 收敛
     engine.view_mut(root).unwrap().active_story = GalleryStory::Motion;
-    let _ = engine.step_frame_dt(16);
+    settle_entrance(&mut engine);
     assert!(
         engine
             .cached_draw_ops()
@@ -1419,7 +1446,7 @@ fn test_gallery_motion_physics_and_engine_lab_stories() {
 
     // 2. 切换至 Engine Lab 故事页并验证 RichText / DecodedImage / VectorCanvas / ObjectFit / HUD
     engine.view_mut(root).unwrap().active_story = GalleryStory::EngineLab;
-    let _ = engine.step_frame_dt(16);
+    settle_entrance(&mut engine);
     assert!(
         engine
             .cached_draw_ops()
@@ -1481,7 +1508,7 @@ fn test_gallery_motion_physics_and_engine_lab_stories() {
     let (hud_x, hud_y) = hit_center(&engine, 106);
     assert!(engine.dispatch_click(hud_x, hud_y));
     assert!(engine.view(root).unwrap().inspector_enabled);
-    let _ = engine.step_frame_dt(16);
+    settle_entrance(&mut engine);
     assert!(
         engine.cached_draw_ops().iter().any(|op| op.id == Some(860)),
         "DevTools HUD overlay must appear when toggled"
@@ -1603,7 +1630,7 @@ fn test_gallery_ai_chat_story_thinking_streaming_and_idle_settlement() {
 
     let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, 860);
     engine.view_mut(root).unwrap().active_story = GalleryStory::Chat;
-    let _ = engine.step_frame_dt(16);
+    settle_entrance(&mut engine);
     let initial_msgs = engine.view(root).unwrap().chat.messages.len();
     assert_eq!(initial_msgs, 3);
 
@@ -1786,7 +1813,7 @@ fn test_chart_gpui_kit_entrance_morph_animations_and_idle_settle() {
 fn test_otp_no_outer_border_and_password_eye_toggle() {
     let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, 1100);
     engine.view_mut(root).unwrap().active_story = GalleryStory::Inputs;
-    let _ = engine.step_frame_dt(16);
+    settle_entrance(&mut engine);
 
     // 1. 验证 Password Masked 默认显示密文（不泄露 "s3cr3t"），点击右侧小眼睛按钮后实时切换明文
     let shows_secret_initially = engine.cached_draw_ops().iter().any(|op| {
@@ -1855,7 +1882,7 @@ fn test_gallery_interactive_canvas_story_zoom_lod_presets_and_dual_backend() {
 
     let (mut engine, root) = create_desktop_app(DEFAULT_DESKTOP_WIDTH, 820);
     engine.view_mut(root).unwrap().active_story = GalleryStory::Canvas;
-    let _ = engine.step_frame_dt(16);
+    settle_entrance(&mut engine);
 
     // 1. 校验 SceneCanvas 已正确进入 DrawOp 且包含 2,000+ 弧形看台旋转座位与 Minimap
     let canvas_count = engine

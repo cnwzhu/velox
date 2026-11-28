@@ -32,7 +32,7 @@ pub use interop::{ExportedHandle, ExternalSyncHandle};
 pub use offscreen::WgpuOffscreenRenderer;
 pub use pipeline::{WgpuMemoryStats, WgpuRenderer};
 pub use shared_exporter::{SharedFrameLease, SharedSlot, WgpuSharedExportRenderer};
-pub use window::{PreparedWgpuContext, WgpuWindowRenderer};
+pub use window::{PreparedWgpuContext, SurfacePresentOutcome, WgpuWindowRenderer};
 
 use core::future::Future;
 use core::pin::pin;
@@ -42,7 +42,7 @@ use std::task::Wake;
 use std::vec::Vec;
 
 use crate::motion::{DrawOp, DrawPayload};
-use crate::renderers::software::compute_unoccluded_clip;
+use crate::renderers::software::{SpatialOcclusionGrid, compute_unoccluded_clip, with_spatial_occlusion};
 use crate::solver::Region;
 use crate::style::Color;
 
@@ -436,6 +436,18 @@ impl WgpuScene {
         if dirty_regions.is_empty() {
             return 0;
         }
+        with_spatial_occlusion(ops, |occlusion| {
+            self.record_visible_ops(ops, dpi_scale, dirty_regions, occlusion)
+        })
+    }
+
+    fn record_visible_ops(
+        &mut self,
+        ops: &[DrawOp<'_>],
+        dpi_scale: i16,
+        dirty_regions: &[Region],
+        occlusion: Option<&SpatialOcclusionGrid>,
+    ) -> usize {
         let s = (dpi_scale.max(1)) as f32;
         for &dirty in dirty_regions {
             if dirty.is_empty() {
@@ -446,7 +458,10 @@ impl WgpuScene {
                 if raw_clip.is_empty() {
                     continue;
                 }
-                let eff_clip = compute_unoccluded_clip(raw_clip, &ops[(idx + 1)..]);
+                let eff_clip = match occlusion {
+                    Some(grid) => grid.clip_region(raw_clip, idx),
+                    None => compute_unoccluded_clip(raw_clip, &ops[(idx + 1)..]),
+                };
                 if eff_clip.is_empty() {
                     continue;
                 }

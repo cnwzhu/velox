@@ -78,7 +78,7 @@ pub fn compute_sdf_coverage(px: i16, py: i16, box_reg: Region, r: i16) -> u8 {
 /// 计算单个 `DrawOp` 的 100% 不透明内切核心矩形（用于前向遮挡剔除 Front-to-Back Culling）。
 #[inline]
 pub fn opaque_core_rect(op: &DrawOp<'_>) -> Region {
-    match op.payload {
+    let core = match op.payload {
         DrawPayload::Quad {
             bg,
             bg_grad,
@@ -151,7 +151,18 @@ pub fn opaque_core_rect(op: &DrawOp<'_>) -> Region {
             }
         }
         _ => Region::EMPTY,
+    };
+    if core.is_empty() || op.clip_radius == 0 {
+        return core;
     }
+    // The corners of an ancestor's rounded clip are not opaque.
+    let inset = (op.clip_radius as i16).min(op.clip.w / 2).min(op.clip.h / 2);
+    core.intersect(Region::new(
+        op.clip.x.saturating_add(inset),
+        op.clip.y.saturating_add(inset),
+        op.clip.w - 2 * inset,
+        op.clip.h - 2 * inset,
+    ))
 }
 
 /// 用单个不透明遮挡矩形 `occ` 对 `clip` 执行单边剥离或全覆盖裁剪。
@@ -188,7 +199,7 @@ mod spatial_occlusion {
     use std::vec::Vec;
 
     use super::{apply_single_occluder, clip_against_opaque_rects, opaque_core_rect};
-    use crate::motion::{DrawOp, DrawPayload};
+    use crate::motion::DrawOp;
     use crate::solver::Region;
 
     /// 小图元阈值：遮挡体数不超过此值时直接线性扫描，零建桶开销。
@@ -205,7 +216,7 @@ mod spatial_occlusion {
     /// 必然包含 `clip` 的左上角 `TL = (clip.x, clip.y)` 或右下角 `BR = (clip.right()-1, clip.bottom()-1)`。
     /// 因此每次仅需检查 `bucket(TL) ∪ bucket(BR) ∪ large_occluders` 中 `op_idx > min_idx` 的有序候选，
     /// 选出实际改变 `clip` 且 `op_idx` 最小的遮挡体应用并推进 `min_idx`，数学上必然命中原升序算法的下一个有效遮挡体。
-    struct SpatialOcclusionGrid {
+    pub(crate) struct SpatialOcclusionGrid {
         occluders: Vec<(usize, Region)>,
         large_occluders: Vec<u32>,
         bucket_counts: Vec<u32>,
@@ -419,7 +430,7 @@ mod spatial_occlusion {
 
         /// 精确等价于 `compute_unoccluded_clip(clip, &ops[(idx + 1)..])`。
         #[inline]
-        fn clip_region(&self, mut clip: Region, mut min_idx: usize) -> Region {
+        pub(crate) fn clip_region(&self, mut clip: Region, mut min_idx: usize) -> Region {
             if self.occluders.is_empty() || clip.is_empty() {
                 return clip;
             }
@@ -481,32 +492,82 @@ mod spatial_occlusion {
             RefCell::new(SpatialOcclusionGrid::new());
     }
 
-    pub(super) fn precompute_spatial(ops: &mut [DrawOp<'_>]) {
-        TL_OCCLUSION_GRID.with(|cell| {
-            let mut grid = cell.borrow_mut();
+    #[cfg(any(feature = "gpu", not(target_arch = "wasm32")))]
+    pub(crate) fn with_spatial_occlusion<R>(
+        ops: &[DrawOp<'_>],
+        f: impl FnOnce(Option<&SpatialOcclusionGrid>) -> R,
+    ) -> R {
+        if ops.len() <= SMALL_OCCLUDER_THRESHOLD {
+            return f(None);
+        }
+        let mut f = Some(f);
+        let result = TL_OCCLUSION_GRID.try_with(|cell| {
+            let Ok(mut grid) = cell.try_borrow_mut() else {
+                return None;
+            };
             grid.build(ops);
+            f.take().map(|f| f(Some(&grid)))
+        });
+        match result {
+            Ok(Some(result)) => result,
+            _ => f.expect("occlusion callback has not run")(None),
+        }
+    }
 
-            let len = ops.len();
-            for idx in 0..len {
-                let base_clip = ops[idx].clip.intersect(ops[idx].bounds);
-                if base_clip.is_empty() {
-                    ops[idx].clip = Region::EMPTY;
-                    continue;
-                }
-                let unoccluded = grid.clip_region(base_clip, idx);
-                if unoccluded.is_empty() {
-                    ops[idx].clip = Region::EMPTY;
-                    continue;
-                }
-                let keep_parent_clip = matches!(ops[idx].payload, DrawPayload::TextRun { .. })
-                    || matches!(ops[idx].payload, DrawPayload::StyledQuad(sq) if sq.transform.is_some())
-                    || ops[idx].clip_radius > 0;
-                if keep_parent_clip {
-                    ops[idx].clip = grid.clip_region(ops[idx].clip, idx);
-                } else {
-                    ops[idx].clip = unoccluded;
-                }
+    pub(super) fn precompute_spatial(ops: &mut [DrawOp<'_>]) {
+        if ops.len() <= SMALL_OCCLUDER_THRESHOLD {
+            super::precompute_direct(ops);
+            return;
+        }
+        let used_grid = TL_OCCLUSION_GRID.try_with(|cell| {
+            let Ok(mut grid) = cell.try_borrow_mut() else {
+                return false;
+            };
+            grid.build(ops);
+            for (idx, op) in ops.iter_mut().enumerate() {
+                op.clip = super::occlusion_for_op(op, |clip| grid.clip_region(clip, idx));
             }
+            true
+        });
+        if !matches!(used_grid, Ok(true)) {
+            super::precompute_direct(ops);
+        }
+    }
+}
+
+#[cfg(any(feature = "gpu", not(target_arch = "wasm32")))]
+pub(crate) use spatial_occlusion::{SpatialOcclusionGrid, with_spatial_occlusion};
+
+#[inline]
+fn occlusion_for_op(op: &DrawOp<'_>, clip_region: impl Fn(Region) -> Region) -> Region {
+    let transformed =
+        matches!(op.payload, DrawPayload::StyledQuad(sq) if sq.transform.is_some());
+    let bounds_clip = if transformed {
+        op.clip
+    } else {
+        op.clip.intersect(op.bounds)
+    };
+    if bounds_clip.is_empty() {
+        return Region::EMPTY;
+    }
+    let visible = clip_region(bounds_clip);
+    if visible.is_empty() {
+        return Region::EMPTY;
+    }
+    // Trimming the parent rectangle would move the rounded clipping edge.
+    if op.clip_radius > 0 || transformed {
+        return op.clip;
+    }
+    if matches!(op.payload, DrawPayload::TextRun { .. }) {
+        return clip_region(op.clip);
+    }
+    visible
+}
+
+fn precompute_direct(ops: &mut [DrawOp<'_>]) {
+    for idx in 0..ops.len() {
+        ops[idx].clip = occlusion_for_op(&ops[idx], |clip| {
+            compute_unoccluded_clip(clip, &ops[(idx + 1)..])
         });
     }
 }

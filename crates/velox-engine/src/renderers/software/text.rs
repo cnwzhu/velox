@@ -287,8 +287,11 @@ fn rasterize_text_bitmap<P: PixelFormat>(
     let base_y = bounds.y + ((bounds.h - total_block_h).max(0) >> 1);
 
     for (line_idx, &(b_start, b_end, raw_line_w)) in lines.as_slice().iter().enumerate() {
-        let line_str = &text[b_start..b_end];
         let cur_y = base_y.saturating_add((line_idx as i16).saturating_mul(line_step));
+        if cur_y.saturating_add(char_h) <= clip.y || cur_y >= clip.bottom() {
+            continue;
+        }
+        let line_str = &text[b_start..b_end];
         let need_ellipsis = is_ellipsis && raw_line_w > bounds.w && bounds.w > dot_w * 3;
         let eff_line_w = if need_ellipsis {
             bounds.w
@@ -301,6 +304,9 @@ fn rasterize_text_bitmap<P: PixelFormat>(
         let max_x_before_dots = bounds.x.saturating_add(bounds.w).saturating_sub(dot_w * 3);
 
         for ch in line_str.chars() {
+            if cur_x >= clip.right() {
+                break;
+            }
             let char_w = measure_char_advance(ch, font_size);
             if need_ellipsis && cur_x.saturating_add(char_w) > max_x_before_dots {
                 for _ in 0..3 {
@@ -398,6 +404,19 @@ fn rasterize_text_ttf_q4<P: PixelFormat>(
         .saturating_add(bounds.h.saturating_sub(total_h).max(0) >> 1);
 
     for (line_idx, &(b_start, b_end, _raw_line_w_orig)) in lines.as_slice().iter().enumerate() {
+        let base_y = top_y
+            .saturating_add(ascent)
+            .saturating_add((line_idx as i16).saturating_mul(line_step));
+        // 行级垂直裁剪早跳过：留出完整 ascent/descent 余量，完全落在当前条带外的行零测宽、零 Kerning、零锁查表
+        let line_top = top_y
+            .saturating_add((line_idx as i16).saturating_mul(line_step))
+            .saturating_sub(char_h);
+        let line_bot = top_y
+            .saturating_add((line_idx as i16).saturating_mul(line_step))
+            .saturating_add(char_h.saturating_mul(2));
+        if line_bot <= clip.y || line_top >= clip.bottom() {
+            continue;
+        }
         let line_str = &text[b_start..b_end];
         let raw_line_w =
             (crate::display::measure_line_width_f32(line_str, logical_fs) * scale_ratio).ceil()
@@ -410,13 +429,14 @@ fn rasterize_text_ttf_q4<P: PixelFormat>(
         };
         let start_rel_x = align_offset_x(bounds.w, eff_w, text_flags);
         let mut pen_x = start_rel_x as f32;
-        let base_y = top_y
-            .saturating_add(ascent)
-            .saturating_add((line_idx as i16).saturating_mul(line_step));
         let max_x_before_dots_f = (bounds.w as f32) - dot_adv_f * 3.0;
+        let clip_right_guard = clip.right().saturating_add(char_h);
 
         let mut prev_ch: Option<char> = None;
         for ch in line_str.chars() {
+            if bounds.x.saturating_add(pen_x as i16) >= clip_right_guard {
+                break;
+            }
             if let Some(p) = prev_ch {
                 pen_x += measure_ttf_kerning_f32(p, ch, logical_fs) * scale_ratio;
             }

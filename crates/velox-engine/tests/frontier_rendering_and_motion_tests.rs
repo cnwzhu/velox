@@ -447,3 +447,1023 @@ fn test_small_text_subpixel_follows_spring_and_shared_slug_engine_with_canvas() 
         assert!(lit > 400, "RichText variable-font Slug pass must render visible pixels, got {lit}");
     }
 }
+
+#[test]
+fn test_hidpi_multistrip_precomputed_text_matches_single_strip_exact() {
+    struct MultiLineHiDpiView;
+    impl View for MultiLineHiDpiView {
+        fn render<'a>(&mut self, cx: &'a mut Scope<Self>) -> Element<'a> {
+            div()
+                .flex_col()
+                .size_full()
+                .bg(Color::rgb(16, 20, 30))
+                .p(12)
+                .gap(8)
+                .child(
+                    cx,
+                    div()
+                        .w(360)
+                        .h(44)
+                        .rounded(6)
+                        .bg(Color::rgb(28, 36, 52))
+                        .p(6)
+                        .child(cx, text("Velox HiDPI 2.0x Precomputed Text Metrics").size(16).color(Color::WHITE)),
+                )
+                .child(
+                    cx,
+                    div()
+                        .w(360)
+                        .h(120)
+                        .rounded(6)
+                        .bg(Color::rgb(24, 32, 46))
+                        .p(8)
+                        .child(
+                            cx,
+                            text("Multi-line paragraph across several 16px parallel raster strips with CJK 中英文混排折行与行裁剪验证 1234567890")
+                                .size(14)
+                                .color(Color::rgb(210, 224, 240)),
+                        ),
+                )
+                .into_element(cx)
+        }
+    }
+
+    for sf in [1.5f32, 2.0f32] {
+        let log_w: i16 = 400;
+        let log_h: i16 = 240;
+        let vp = Region::new(0, 0, log_w, log_h);
+        let phys_w = ((log_w as f32) * sf).ceil() as usize;
+        let phys_h = ((log_h as f32) * sf).ceil() as usize;
+
+        let mut engine = VeloxEngine::new(log_w, log_h);
+        engine.set_scale_factor(sf);
+        engine.mount_root(MultiLineHiDpiView);
+        let _ = engine.step_frame();
+
+        // 整屏触发并行 16px 多条带路径（含 precompute_scaled_text_boxes）
+        let mut fb_parallel = vec![Xrgb8888(0); phys_w * phys_h];
+        engine.rasterize_strip(vp, 0, 0, phys_w, &mut fb_parallel);
+
+        // 逐 12px 逻辑小块（面积 < 65_536，不触发并行池，走单线程保守裁剪路径）对比逐像素等价性
+        let mut fb_serial = vec![Xrgb8888(0); phys_w * phys_h];
+        for ly in (0..log_h).step_by(12) {
+            let lh = (log_h - ly).min(12);
+            engine.rasterize_strip(Region::new(0, ly, log_w, lh), 0, 0, phys_w, &mut fb_serial);
+        }
+
+        assert_eq!(
+            fb_parallel, fb_serial,
+            "HiDPI parallel precomputed text strips must match serial raster pixel-for-pixel at sf={sf}"
+        );
+    }
+}
+
+#[cfg(all(feature = "std", feature = "gpu"))]
+#[test]
+fn test_wgpu_dirty_scissor_filtered_with_copy_matches_full_frame_exact() {
+    use velox_engine::renderers::wgpu::{PreparedWgpuContext, WgpuRenderer};
+
+    let Some(prepared) = PreparedWgpuContext::init_headless() else {
+        return;
+    };
+    let device = prepared.device().clone();
+    let queue = prepared.queue().clone();
+    let w = 256u32;
+    let h = 160u32;
+    let vp = Region::new(0, 0, w as i16, h as i16);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut renderer = WgpuRenderer::new(&device, format);
+
+    let make_scene = |btn_color: Color, label: &'static str| -> Vec<DrawOp<'static>> {
+        vec![
+            DrawOp {
+                id: Some(1),
+                bounds: vp,
+                clip: vp,
+                clip_radius: 0,
+                subpx_q4: 0,
+                payload: DrawPayload::Quad {
+                    bg: Color::rgb(18, 22, 32),
+                    bg_grad: Color::rgb(18, 22, 32),
+                    border_color: Color::TRANSPARENT,
+                    rounded: 0,
+                    border_width: 0,
+                },
+            },
+            // 远端静态卡片（位于脏区外，应被脏区过滤跳过编码且完整保留于持久纹理）
+            DrawOp {
+                id: Some(2),
+                bounds: Region::new(10, 10, 80, 40),
+                clip: vp,
+                clip_radius: 0,
+                subpx_q4: 0,
+                payload: DrawPayload::Quad {
+                    bg: Color::rgb(40, 140, 90),
+                    bg_grad: Color::rgb(40, 140, 90),
+                    border_color: Color::TRANSPARENT,
+                    rounded: 6,
+                    border_width: 0,
+                },
+            },
+            // 局部变更按钮（位于脏区内）
+            DrawOp {
+                id: Some(3),
+                bounds: Region::new(130, 80, 100, 44),
+                clip: vp,
+                clip_radius: 0,
+                subpx_q4: 0,
+                payload: DrawPayload::Quad {
+                    bg: btn_color,
+                    bg_grad: btn_color,
+                    border_color: Color::TRANSPARENT,
+                    rounded: 8,
+                    border_width: 0,
+                },
+            },
+            DrawOp {
+                id: Some(4),
+                bounds: Region::new(140, 90, 80, 24),
+                clip: vp,
+                clip_radius: 0,
+                subpx_q4: 0,
+                payload: DrawPayload::TextRun {
+                    text: StrRef::Static(label),
+                    color: Color::WHITE,
+                    font_size: 14,
+                    text_flags: 0,
+                },
+            },
+        ]
+    };
+
+    let mk_tex = |usage: wgpu::TextureUsages| {
+        let t = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        });
+        let v = t.create_view(&wgpu::TextureViewDescriptor::default());
+        (t, v)
+    };
+    let (persistent_tex, persistent_view) = mk_tex(
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+    );
+    let (swap_tex, _swap_view) = mk_tex(
+        wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
+    );
+    let (ref_tex, ref_view) = mk_tex(
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+    );
+
+    let read_rgba = |tex: &wgpu::Texture| -> Vec<u8> {
+        let row_bytes = (w * 4) as usize;
+        let padded = row_bytes.div_ceil(256) * 256;
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (padded * h as usize) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        enc.copy_texture_to_buffer(
+            tex.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded as u32),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([enc.finish()]);
+        let slice = buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv().unwrap().unwrap();
+        let mapped = slice.get_mapped_range().unwrap();
+        let mut out = Vec::with_capacity(row_bytes * h as usize);
+        for y in 0..(h as usize) {
+            out.extend_from_slice(&mapped[y * padded..y * padded + row_bytes]);
+        }
+        drop(mapped);
+        buf.unmap();
+        out
+    };
+
+    let clear = wgpu::Color::BLACK;
+    let ops_f1 = make_scene(Color::rgb(50, 100, 220), "IDLE");
+    let ops_f2 = make_scene(Color::rgb(230, 80, 50), "HOT!");
+    let dirty_btn = Region::new(130, 80, 100, 44);
+
+    // 帧 1：整屏建持久目标
+    renderer.render_to_view(&device, &queue, &ops_f1, vp, 1.0, &persistent_view, w, h, clear);
+    // 帧 2：局部 Scissor 重绘 + 单 Encoder 拷贝到 swap_tex
+    let used_dirty = renderer.render_to_view_dirty_with_copy(
+        &device,
+        &queue,
+        &ops_f2,
+        vp,
+        1.0,
+        &persistent_view,
+        w,
+        h,
+        &[dirty_btn],
+        clear,
+        Some((&persistent_tex, &swap_tex)),
+    );
+    assert!(used_dirty, "persistent target dirty path must activate");
+    // 参考帧：整屏清屏重画帧 2
+    renderer.render_to_view(&device, &queue, &ops_f2, vp, 1.0, &ref_view, w, h, clear);
+
+    let got = read_rgba(&swap_tex);
+    let expected = read_rgba(&ref_tex);
+    assert_eq!(
+        got, expected,
+        "persistent target dirty scissor + single-encoder copy must match full-frame render pixel-for-pixel"
+    );
+
+    // 回归验证 P1-1：2x HiDPI 下窄布局框的长 nowrap 文本横向扩展至 parent_clip，
+    // 当局部脏区落在超出 op.bounds 的文本扩展区间内时，局刷绝不可擦除或丢失任何文字像素！
+    let w2 = 512u32;
+    let h2 = 160u32;
+    let vp2 = Region::new(0, 0, 256, 80); // sf = 2.0 -> 512x160 物理像素
+    let mk_tex2 = |usage: wgpu::TextureUsages| {
+        let t = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: w2,
+                height: h2,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        });
+        let v = t.create_view(&wgpu::TextureViewDescriptor::default());
+        (t, v)
+    };
+    let (p2_tex, p2_view) = mk_tex2(
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+    );
+    let (s2_tex, _) = mk_tex2(
+        wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
+    );
+    let (r2_tex, r2_view) = mk_tex2(
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+    );
+    let read_rgba2 = |tex: &wgpu::Texture| -> Vec<u8> {
+        let row_bytes = (w2 * 4) as usize;
+        let padded = row_bytes.div_ceil(256) * 256;
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (padded * h2 as usize) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        enc.copy_texture_to_buffer(
+            tex.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded as u32),
+                    rows_per_image: Some(h2),
+                },
+            },
+            wgpu::Extent3d {
+                width: w2,
+                height: h2,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([enc.finish()]);
+        let slice = buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv().unwrap().unwrap();
+        let mapped = slice.get_mapped_range().unwrap();
+        let mut out = Vec::with_capacity(row_bytes * h2 as usize);
+        for y in 0..(h2 as usize) {
+            out.extend_from_slice(&mapped[y * padded..y * padded + row_bytes]);
+        }
+        drop(mapped);
+        buf.unmap();
+        out
+    };
+
+    let long_text_ops = vec![
+        DrawOp {
+            id: Some(1),
+            bounds: vp2,
+            clip: vp2,
+            clip_radius: 0,
+            subpx_q4: 0,
+            payload: DrawPayload::Quad {
+                bg: Color::rgb(16, 20, 28),
+                bg_grad: Color::rgb(16, 20, 28),
+                border_color: Color::TRANSPARENT,
+                rounded: 0,
+                border_width: 0,
+            },
+        },
+        // 布局框极窄（w=32），但文本为 nowrap 且父裁剪框为整屏 vp2：在 2x HiDPI 下横向扩展到 x=240+
+        DrawOp {
+            id: Some(2),
+            bounds: Region::new(8, 24, 32, 20),
+            clip: vp2,
+            clip_radius: 0,
+            subpx_q4: 0,
+            payload: DrawPayload::TextRun {
+                text: StrRef::Static("Velox HiDPI 2x Long Nowrap Overflow Text Preservation"),
+                color: Color::WHITE,
+                font_size: 14,
+                text_flags: 0x08, // nowrap
+            },
+        },
+    ];
+    // 脏区刻意选在 x=100..220（完全位于 op.bounds [8..40] + 16px 之外，但正处于长文本扩展绘制区！）
+    let overflow_dirty = Region::new(100, 16, 120, 36);
+    renderer.render_to_view(&device, &queue, &long_text_ops, vp2, 2.0, &p2_view, w2, h2, clear);
+    let used2 = renderer.render_to_view_dirty_with_copy(
+        &device,
+        &queue,
+        &long_text_ops,
+        vp2,
+        2.0,
+        &p2_view,
+        w2,
+        h2,
+        &[overflow_dirty],
+        clear,
+        Some((&p2_tex, &s2_tex)),
+    );
+    assert!(used2);
+    renderer.render_to_view(&device, &queue, &long_text_ops, vp2, 2.0, &r2_view, w2, h2, clear);
+
+    let got2 = read_rgba2(&s2_tex);
+    let exp2 = read_rgba2(&r2_tex);
+    let diff2 = got2
+        .chunks_exact(4)
+        .zip(exp2.chunks_exact(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        diff2, 0,
+        "2x HiDPI dirty repaint over overflowed nowrap text must preserve every pixel (diff={diff2})"
+    );
+
+    // 回归验证 P1-2：2x HiDPI 下通过真实 VeloxEngine + DamageTracker 删除溢出布局框的长 nowrap 文本，
+    // 引擎产出的脏区必须覆盖全部扩展像素，局刷后 0 残留残影！
+    struct RemovableOverflowTextView {
+        show_text: bool,
+    }
+    impl View for RemovableOverflowTextView {
+        fn render<'a>(&mut self, cx: &'a mut Scope<Self>) -> Element<'a> {
+            let mut root = div().w(256).h(80).bg(Color::rgb(16, 20, 28));
+            if self.show_text {
+                root = root.child(
+                    cx,
+                    div()
+                        .id(42)
+                        .mt(24)
+                        .ml(8)
+                        .w(12)
+                        .h(20)
+                        .child(
+                            cx,
+                            text("Velox HiDPI 2x Delete Overflow Text Zero Ghosting")
+                                .size(14)
+                                .nowrap()
+                                .color(Color::WHITE),
+                        ),
+                );
+            }
+            root.into_element(cx)
+        }
+    }
+
+    let mut eng = VeloxEngine::new(256, 80);
+    eng.set_scale_factor(2.0);
+    let view_h = eng.mount_root(RemovableOverflowTextView { show_text: true });
+    let _ = eng.step_frame();
+    // 帧 1：将带溢出长文本的完整画面写入持久纹理 p2_view
+    renderer.render_to_view(
+        &device,
+        &queue,
+        eng.cached_draw_ops(),
+        vp2,
+        2.0,
+        &p2_view,
+        w2,
+        h2,
+        clear,
+    );
+
+    // 帧 2：删除溢出长文本，获取引擎 DamageTracker 产出的真实脏区
+    eng.view_mut(view_h).unwrap().show_text = false;
+    let del_damage: Vec<Region> = eng.step_frame().to_vec();
+    assert!(!del_damage.is_empty(), "deleting overflowed text must emit damage");
+    assert!(
+        del_damage.iter().any(|r| r.w > 100),
+        "damage for deleted overflowed nowrap text must expand beyond narrow 12px layout box, got {del_damage:?}"
+    );
+
+    let used_del = renderer.render_to_view_dirty_with_copy(
+        &device,
+        &queue,
+        eng.cached_draw_ops(),
+        vp2,
+        2.0,
+        &p2_view,
+        w2,
+        h2,
+        &del_damage,
+        clear,
+        Some((&p2_tex, &s2_tex)),
+    );
+    assert!(used_del);
+    renderer.render_to_view(
+        &device,
+        &queue,
+        eng.cached_draw_ops(),
+        vp2,
+        2.0,
+        &r2_view,
+        w2,
+        h2,
+        clear,
+    );
+
+    let got_del = read_rgba2(&s2_tex);
+    let exp_del = read_rgba2(&r2_tex);
+    let ghost_pixels = got_del
+        .chunks_exact(4)
+        .zip(exp_del.chunks_exact(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        ghost_pixels, 0,
+        "deleting overflowed nowrap text at 2x HiDPI must leave 0 ghost pixels after dirty repaint (got {ghost_pixels})"
+    );
+
+    // 回归验证 P1-3：125% 与 150% 分数 DPI 下删除与移动 1px 细线（绘制占 2 列物理像素），
+    // 物理 Scissor 必须完整覆盖细线扩宽与像素取整列，局刷后 0 残留像素！
+    for sf in [1.25f32, 1.5f32] {
+        let log_w = 160i16;
+        let log_h = 80i16;
+        let vp_s = Region::new(0, 0, log_w, log_h);
+        let pw_s = ((log_w as f32) * sf).round() as u32;
+        let ph_s = ((log_h as f32) * sf).round() as u32;
+        let mk_tex_s = |usage: wgpu::TextureUsages| {
+            let t = device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: pw_s,
+                    height: ph_s,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            });
+            let v = t.create_view(&wgpu::TextureViewDescriptor::default());
+            (t, v)
+        };
+        let (ps_tex, ps_view) =
+            mk_tex_s(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+        let (ss_tex, _) = mk_tex_s(
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+        );
+        let (rs_tex, rs_view) =
+            mk_tex_s(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+        let read_rgba_s = |tex: &wgpu::Texture| -> Vec<u8> {
+            let row_bytes = (pw_s * 4) as usize;
+            let padded = row_bytes.div_ceil(256) * 256;
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: (padded * ph_s as usize) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            enc.copy_texture_to_buffer(
+                tex.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buf,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded as u32),
+                        rows_per_image: Some(ph_s),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: pw_s,
+                    height: ph_s,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit([enc.finish()]);
+            let slice = buf.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            rx.recv().unwrap().unwrap();
+            let mapped = slice.get_mapped_range().unwrap();
+            let mut out = Vec::with_capacity(row_bytes * ph_s as usize);
+            for y in 0..(ph_s as usize) {
+                out.extend_from_slice(&mapped[y * padded..y * padded + row_bytes]);
+            }
+            drop(mapped);
+            buf.unmap();
+            out
+        };
+
+        struct HairlineView {
+            x: Option<i16>,
+        }
+        impl View for HairlineView {
+            fn render<'a>(&mut self, cx: &'a mut Scope<Self>) -> Element<'a> {
+                let mut root = div().w(160).h(80).bg(Color::rgb(16, 20, 28));
+                if let Some(lx) = self.x {
+                    root = root.child(
+                        cx,
+                        div()
+                            .id(77)
+                            .ml(lx)
+                            .mt(15)
+                            .w(1)
+                            .h(30)
+                            .bg(Color::rgb(255, 220, 80)),
+                    );
+                }
+                root.into_element(cx)
+            }
+        }
+
+        let mut eng_s = VeloxEngine::new(log_w, log_h);
+        eng_s.set_scale_factor(sf);
+        let h_s = eng_s.mount_root(HairlineView { x: Some(11) }); // 11 * 1.5 = 16.5 -> round=17, w=2 -> [17, 19)
+        let _ = eng_s.step_frame();
+        renderer.render_to_view(
+            &device,
+            &queue,
+            eng_s.cached_draw_ops(),
+            vp_s,
+            sf,
+            &ps_view,
+            pw_s,
+            ph_s,
+            clear,
+        );
+
+        // 步骤 A：将 1px 细线从 x=11 移动到 x=43
+        eng_s.view_mut(h_s).unwrap().x = Some(43);
+        let move_dmg: Vec<Region> = eng_s.step_frame().to_vec();
+        let used_move = renderer.render_to_view_dirty_with_copy(
+            &device,
+            &queue,
+            eng_s.cached_draw_ops(),
+            vp_s,
+            sf,
+            &ps_view,
+            pw_s,
+            ph_s,
+            &move_dmg,
+            clear,
+            Some((&ps_tex, &ss_tex)),
+        );
+        assert!(used_move);
+        renderer.render_to_view(
+            &device,
+            &queue,
+            eng_s.cached_draw_ops(),
+            vp_s,
+            sf,
+            &rs_view,
+            pw_s,
+            ph_s,
+            clear,
+        );
+        let move_diff = read_rgba_s(&ss_tex)
+            .chunks_exact(4)
+            .zip(read_rgba_s(&rs_tex).chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(
+            move_diff, 0,
+            "moving 1px hairline at sf={sf} must leave 0 ghost pixels (diff={move_diff})"
+        );
+
+        // 步骤 B：删除 1px 细线
+        eng_s.view_mut(h_s).unwrap().x = None;
+        let del_dmg: Vec<Region> = eng_s.step_frame().to_vec();
+        let used_del_line = renderer.render_to_view_dirty_with_copy(
+            &device,
+            &queue,
+            eng_s.cached_draw_ops(),
+            vp_s,
+            sf,
+            &ps_view,
+            pw_s,
+            ph_s,
+            &del_dmg,
+            clear,
+            Some((&ps_tex, &ss_tex)),
+        );
+        assert!(used_del_line);
+        renderer.render_to_view(
+            &device,
+            &queue,
+            eng_s.cached_draw_ops(),
+            vp_s,
+            sf,
+            &rs_view,
+            pw_s,
+            ph_s,
+            clear,
+        );
+        let del_diff = read_rgba_s(&ss_tex)
+            .chunks_exact(4)
+            .zip(read_rgba_s(&rs_tex).chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(
+            del_diff, 0,
+            "deleting 1px hairline at sf={sf} must leave 0 ghost pixels (diff={del_diff})"
+        );
+    }
+
+    // 回归验证 P1-4：1x 下圆角父裁剪（clip_radius > 0）中的 nowrap 文本溢出布局框，
+    // 更新文本溢出段下方背景后，局刷绝不可误剔除该文本！
+    let rounded_clip = Region::new(8, 8, 240, 64);
+    let make_rounded_parent_ops = |under_bg: Color| -> Vec<DrawOp<'static>> {
+        vec![
+            DrawOp {
+                id: Some(1),
+                bounds: vp,
+                clip: vp,
+                clip_radius: 0,
+                subpx_q4: 0,
+                payload: DrawPayload::Quad {
+                    bg: Color::rgb(16, 20, 28),
+                    bg_grad: Color::rgb(16, 20, 28),
+                    border_color: Color::TRANSPARENT,
+                    rounded: 0,
+                    border_width: 0,
+                },
+            },
+            // 位于文字溢出段（x=70..190）下方的可变背景块
+            DrawOp {
+                id: Some(2),
+                bounds: Region::new(70, 18, 120, 32),
+                clip: rounded_clip,
+                clip_radius: 12,
+                subpx_q4: 0,
+                payload: DrawPayload::Quad {
+                    bg: under_bg,
+                    bg_grad: under_bg,
+                    border_color: Color::TRANSPARENT,
+                    rounded: 4,
+                    border_width: 0,
+                },
+            },
+            // 窄布局框（w=24）的 1x nowrap 文本，位于圆角父裁剪 clip_radius=12 内，字形绘制延伸至 x=220+
+            DrawOp {
+                id: Some(3),
+                bounds: Region::new(16, 24, 24, 20),
+                clip: rounded_clip,
+                clip_radius: 12,
+                subpx_q4: 0,
+                payload: DrawPayload::TextRun {
+                    text: StrRef::Static("Velox 1x Rounded Parent Clip Nowrap Text"),
+                    color: Color::WHITE,
+                    font_size: 14,
+                    text_flags: 0x08, // nowrap
+                },
+            },
+        ]
+    };
+    let rp_ops1 = make_rounded_parent_ops(Color::rgb(35, 55, 95));
+    let rp_ops2 = make_rounded_parent_ops(Color::rgb(95, 45, 55));
+    let under_dirty = Region::new(70, 18, 120, 32);
+    renderer.render_to_view(&device, &queue, &rp_ops1, vp, 1.0, &persistent_view, w, h, clear);
+    let used_rp = renderer.render_to_view_dirty_with_copy(
+        &device,
+        &queue,
+        &rp_ops2,
+        vp,
+        1.0,
+        &persistent_view,
+        w,
+        h,
+        &[under_dirty],
+        clear,
+        Some((&persistent_tex, &swap_tex)),
+    );
+    assert!(used_rp);
+    renderer.render_to_view(&device, &queue, &rp_ops2, vp, 1.0, &ref_view, w, h, clear);
+    let rp_diff = read_rgba(&swap_tex)
+        .chunks_exact(4)
+        .zip(read_rgba(&ref_tex).chunks_exact(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        rp_diff, 0,
+        "1x dirty repaint under overflowed nowrap text inside rounded parent clip must match full frame (diff={rp_diff})"
+    );
+
+    // 回归验证 P1-5：350% 与 400% 高倍 DPI 下删除带最大 Q4 亚像素偏移（±7/16 逻辑 px -> ±1.75 物理 px）的 1px 细线，
+    // 按 sf 动态计算的物理 Scissor 余量必须完整覆盖偏移后的细线，局刷后 0 残留像素！
+    for (sf, subpx_q4) in [
+        (3.5f32, pack_subpx_q4(7, 7)),
+        (4.0f32, pack_subpx_q4(7, -7)),
+        (4.0f32, pack_subpx_q4(-7, 7)),
+    ] {
+        let log_w = 120i16;
+        let log_h = 60i16;
+        let vp_hi = Region::new(0, 0, log_w, log_h);
+        let pw_hi = ((log_w as f32) * sf).round() as u32;
+        let ph_hi = ((log_h as f32) * sf).round() as u32;
+        let mk_tex_hi = |usage: wgpu::TextureUsages| {
+            let t = device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: pw_hi,
+                    height: ph_hi,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            });
+            let v = t.create_view(&wgpu::TextureViewDescriptor::default());
+            (t, v)
+        };
+        let (ph_tex, ph_view) =
+            mk_tex_hi(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+        let (sh_tex, _) = mk_tex_hi(
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+        );
+        let (rh_tex, rh_view) =
+            mk_tex_hi(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+        let read_rgba_hi = |tex: &wgpu::Texture| -> Vec<u8> {
+            let row_bytes = (pw_hi * 4) as usize;
+            let padded = row_bytes.div_ceil(256) * 256;
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: (padded * ph_hi as usize) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            enc.copy_texture_to_buffer(
+                tex.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buf,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded as u32),
+                        rows_per_image: Some(ph_hi),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: pw_hi,
+                    height: ph_hi,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit([enc.finish()]);
+            let slice = buf.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            rx.recv().unwrap().unwrap();
+            let mapped = slice.get_mapped_range().unwrap();
+            let mut out = Vec::with_capacity(row_bytes * ph_hi as usize);
+            for y in 0..(ph_hi as usize) {
+                out.extend_from_slice(&mapped[y * padded..y * padded + row_bytes]);
+            }
+            drop(mapped);
+            buf.unmap();
+            out
+        };
+
+        let bg_op = DrawOp {
+            id: Some(1),
+            bounds: vp_hi,
+            clip: vp_hi,
+            clip_radius: 0,
+            subpx_q4: 0,
+            payload: DrawPayload::Quad {
+                bg: Color::rgb(16, 20, 28),
+                bg_grad: Color::rgb(16, 20, 28),
+                border_color: Color::TRANSPARENT,
+                rounded: 0,
+                border_width: 0,
+            },
+        };
+        let line_op = DrawOp {
+            id: Some(2),
+            bounds: Region::new(25, 10, 1, 20),
+            clip: vp_hi,
+            clip_radius: 0,
+            subpx_q4,
+            payload: DrawPayload::Quad {
+                bg: Color::rgb(255, 220, 80),
+                bg_grad: Color::rgb(255, 220, 80),
+                border_color: Color::TRANSPARENT,
+                rounded: 0,
+                border_width: 0,
+            },
+        };
+        let ops_with_line = vec![bg_op, line_op];
+        let ops_deleted = vec![bg_op];
+
+        // 使用仅含原始逻辑细线框 Region(25, 10, 1, 20) 作为脏区，验证按 sf 计算的物理余量能否彻底清除 ±1.75px 偏移残影
+        let raw_line_dirty = Region::new(25, 10, 1, 20);
+        renderer.render_to_view(
+            &device,
+            &queue,
+            &ops_with_line,
+            vp_hi,
+            sf,
+            &ph_view,
+            pw_hi,
+            ph_hi,
+            clear,
+        );
+        let used_hi = renderer.render_to_view_dirty_with_copy(
+            &device,
+            &queue,
+            &ops_deleted,
+            vp_hi,
+            sf,
+            &ph_view,
+            pw_hi,
+            ph_hi,
+            &[raw_line_dirty],
+            clear,
+            Some((&ph_tex, &sh_tex)),
+        );
+        assert!(used_hi);
+        renderer.render_to_view(
+            &device,
+            &queue,
+            &ops_deleted,
+            vp_hi,
+            sf,
+            &rh_view,
+            pw_hi,
+            ph_hi,
+            clear,
+        );
+        let hi_diff = read_rgba_hi(&sh_tex)
+            .chunks_exact(4)
+            .zip(read_rgba_hi(&rh_tex).chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(
+            hi_diff, 0,
+            "deleting 1px hairline with subpx_q4={subpx_q4:#x} at sf={sf} must leave 0 ghost pixels (diff={hi_diff})"
+        );
+    }
+
+    // 回归验证 P1-6：1x DPI 下删除圆角父容器中溢出布局框的 3 行多行文本，
+    // DamageTracker 生成的脏区必须覆盖全部 3 行溢出字形，局刷后 0 残留像素！
+    struct RoundedMultilineDeleteView {
+        show_text: bool,
+    }
+    impl View for RoundedMultilineDeleteView {
+        fn render<'a>(&mut self, cx: &'a mut Scope<Self>) -> Element<'a> {
+            let mut card = div()
+                .id(80)
+                .mt(8)
+                .ml(8)
+                .w(240)
+                .h(120)
+                .rounded(12)
+                .overflow_hidden()
+                .bg(Color::rgb(26, 34, 48))
+                .p(8);
+            if self.show_text {
+                // 刻意给文本节点极矮布局框 h=16、w=90，使其折成 3+ 行并纵向溢出布局框，同时被圆角父容器裁剪
+                card = card.child(
+                    cx,
+                    div().id(81).w(90).h(16).child(
+                        cx,
+                        text("First line wraps into second line and third overflow line inside rounded clip")
+                            .size(14)
+                            .color(Color::WHITE),
+                    ),
+                );
+            }
+            div()
+                .w(256)
+                .h(160)
+                .bg(Color::rgb(16, 20, 28))
+                .child(cx, card)
+                .into_element(cx)
+        }
+    }
+
+    let mut eng_ml = VeloxEngine::new(w as i16, h as i16);
+    eng_ml.set_scale_factor(1.0);
+    let h_ml = eng_ml.mount_root(RoundedMultilineDeleteView { show_text: true });
+    let _ = eng_ml.step_frame();
+    renderer.render_to_view(
+        &device,
+        &queue,
+        eng_ml.cached_draw_ops(),
+        vp,
+        1.0,
+        &persistent_view,
+        w,
+        h,
+        clear,
+    );
+
+    eng_ml.view_mut(h_ml).unwrap().show_text = false;
+    let ml_dmg: Vec<Region> = eng_ml.step_frame().to_vec();
+    assert!(!ml_dmg.is_empty());
+    assert!(
+        ml_dmg.iter().any(|r| r.h > 40),
+        "deleting overflowing 3-line text inside rounded clip must emit tall damage covering all lines, got {ml_dmg:?}"
+    );
+    let used_ml = renderer.render_to_view_dirty_with_copy(
+        &device,
+        &queue,
+        eng_ml.cached_draw_ops(),
+        vp,
+        1.0,
+        &persistent_view,
+        w,
+        h,
+        &ml_dmg,
+        clear,
+        Some((&persistent_tex, &swap_tex)),
+    );
+    assert!(used_ml);
+    renderer.render_to_view(
+        &device,
+        &queue,
+        eng_ml.cached_draw_ops(),
+        vp,
+        1.0,
+        &ref_view,
+        w,
+        h,
+        clear,
+    );
+    let ml_diff = read_rgba(&swap_tex)
+        .chunks_exact(4)
+        .zip(read_rgba(&ref_tex).chunks_exact(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        ml_diff, 0,
+        "deleting overflowing multiline text inside rounded parent clip at 1x must leave 0 ghost pixels (diff={ml_diff})"
+    );
+}

@@ -434,10 +434,10 @@ fn test_spatial_occlusion_matches_bruteforce_and_scales_linearly() {
                 ops[idx].clip = Region::EMPTY;
                 continue;
             }
-            let keep_parent_clip = matches!(ops[idx].payload, DrawPayload::TextRun { .. })
-                || matches!(ops[idx].payload, DrawPayload::StyledQuad(sq) if sq.transform.is_some())
-                || ops[idx].clip_radius > 0;
-            if keep_parent_clip {
+            if ops[idx].clip_radius > 0 {
+                continue;
+            }
+            if matches!(ops[idx].payload, DrawPayload::TextRun { .. }) {
                 ops[idx].clip = compute_unoccluded_clip(ops[idx].clip, &ops[(idx + 1)..]);
             } else {
                 ops[idx].clip = unoccluded;
@@ -667,6 +667,72 @@ fn test_gpu_incremental_instance_upload_and_dirty_readback() {
     // 验证未脏区域背景像素保持完好
     let bg_off = (700 * width + 1200) * 4;
     assert_eq!(&off.rgba_buffer[bg_off..bg_off + 4], &[16, 24, 38, 255]);
+}
+
+#[cfg(feature = "gpu")]
+#[test]
+#[cfg(target_endian = "little")]
+fn test_offscreen_software_rgba_reuses_output_buffer() {
+    use velox_engine::motion::{DrawOp, DrawPayload};
+    use velox_engine::renderers::wgpu::WgpuOffscreenRenderer;
+
+    let viewport = Region::new(0, 0, 64, 64);
+    let mut renderer = WgpuOffscreenRenderer::new(64, 64);
+    let op = DrawOp {
+        id: None,
+        bounds: viewport,
+        clip: viewport,
+        clip_radius: 0,
+        subpx_q4: 0,
+        payload: DrawPayload::Quad {
+            bg: Color::rgb(20, 60, 100),
+            bg_grad: Color::rgb(20, 60, 100),
+            border_color: Color::TRANSPARENT,
+            rounded: 0,
+            border_width: 0,
+        },
+    };
+    renderer.render_draw_ops(&[op], viewport, 1, &[viewport]);
+    assert_eq!(&renderer.rgba_buffer[..4], &[20, 60, 100, 255]);
+    assert_eq!(renderer.cpu_memory_bytes(), renderer.rgba_buffer.capacity());
+}
+
+#[cfg(feature = "gpu")]
+#[test]
+fn test_gpu_dirty_redraw_erases_removed_quad_on_transparent_target() {
+    use velox_engine::motion::{DrawOp, DrawPayload};
+    use velox_engine::renderers::wgpu::{PreparedWgpuContext, WgpuOffscreenRenderer};
+
+    let Some(ctx) = PreparedWgpuContext::init_headless() else {
+        return;
+    };
+    let mut renderer = WgpuOffscreenRenderer::from_shared_device(
+        ctx.device().clone(),
+        ctx.queue().clone(),
+        64,
+        64,
+    );
+    let viewport = Region::new(0, 0, 64, 64);
+    let removed = Region::new(5, 5, 8, 8);
+    let quad = DrawOp {
+        id: None,
+        bounds: removed,
+        clip: viewport,
+        clip_radius: 0,
+        subpx_q4: 0,
+        payload: DrawPayload::Quad {
+            bg: Color::WHITE,
+            bg_grad: Color::WHITE,
+            border_color: Color::TRANSPARENT,
+            rounded: 0,
+            border_width: 0,
+        },
+    };
+    renderer.render_draw_ops(&[quad], viewport, 1, &[viewport]);
+    let offset = (8 * 64 + 8) * 4;
+    assert_eq!(&renderer.rgba_buffer[offset..offset + 4], &[255; 4]);
+    renderer.render_draw_ops(&[], viewport, 1, &[removed]);
+    assert_eq!(&renderer.rgba_buffer[offset..offset + 4], &[0; 4]);
 }
 
 /// 回归探针 7：验证 `CanvasGpuEngine` 场景生命周期（显式释放 + 空闲老化/预算自动回收）及状态数组局部合并上传。

@@ -278,13 +278,33 @@ impl PreparedWgpuContext {
     }
 }
 
+/// 窗口 Swapchain 提交结果状态（用于区分正常呈现、可瞬态重试错误与持续遮挡以杜绝后台空转）。
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum SurfacePresentOutcome {
+    /// 本帧已成功提交至 Swapchain。
+    Presented,
+    /// 瞬态获取失败（如 `Timeout` / `Outdated` / `Lost`），已失效持久纹理，可有限次重试。
+    RetryableFailure,
+    /// 窗口处于遮挡或最小化状态（`Occluded`），已保留脏区并失效持久纹理，不应立即空转重试。
+    Occluded,
+}
+
 /// 面向桌面（`winit`）与移动端（`ANativeWindow` / `CAMetalLayer` / `OHNativeWindow`）的统一轻量级
 /// `wgpu` Swapchain 窗口渲染器。
 ///
-/// 直接渲染至 Swapchain 纹理，无中间全屏纹理与 Blit 开销。
+/// 支持 Slint 风格增量重绘策略：
+/// - 稳态局部更新（脏区面积 ≤ 60%、不透明底且无多 Pass 图层）时，惰性分配持久主纹理（`ReusedBuffer` 语义），
+///   仅对 `dirty_regions` 执行 `LoadOp::Load + set_scissor_rect` 局部重绘并在同一 `CommandEncoder` 内拷贝上屏；
+/// - 整屏刷新、尺寸变化、表面重建或透明/毛玻璃场景下自动退化为直出 Swapchain（`NewBuffer` 语义，0 额外拷屏成本），
+///   `trim_gpu_memory()` 时立即释放持久纹理显存。
 pub struct WgpuWindowRenderer {
     // 析构顺序：先释放管线/纹理/表面，再释放队列、设备与实例
     renderer: WgpuRenderer,
+    persistent_target: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
+    persistent_valid: bool,
+    persistent_target_enabled: bool,
+    surface_supports_copy_dst: bool,
+    last_frame_used_partial_repaint: bool,
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     queue: wgpu::Queue,
@@ -370,8 +390,14 @@ impl WgpuWindowRenderer {
 
         let w = width.max(1);
         let h = height.max(1);
+        let surface_supports_copy_dst = caps.usages.contains(wgpu::TextureUsages::COPY_DST);
+        let surface_usage = if surface_supports_copy_dst {
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST
+        } else {
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+        };
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: surface_usage,
             format,
             width: w,
             height: h,
@@ -410,6 +436,11 @@ impl WgpuWindowRenderer {
 
         Some(Self {
             renderer,
+            persistent_target: None,
+            persistent_valid: false,
+            persistent_target_enabled: true,
+            surface_supports_copy_dst,
+            last_frame_used_partial_repaint: false,
             surface,
             surface_config,
             queue,
@@ -467,8 +498,14 @@ impl WgpuWindowRenderer {
 
         let w = width.max(1);
         let h = height.max(1);
+        let surface_supports_copy_dst = caps.usages.contains(wgpu::TextureUsages::COPY_DST);
+        let surface_usage = if surface_supports_copy_dst {
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST
+        } else {
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+        };
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: surface_usage,
             format,
             width: w,
             height: h,
@@ -497,6 +534,11 @@ impl WgpuWindowRenderer {
 
         Some(Self {
             renderer,
+            persistent_target: None,
+            persistent_valid: false,
+            persistent_target_enabled: true,
+            surface_supports_copy_dst,
+            last_frame_used_partial_repaint: false,
             surface,
             surface_config,
             queue,
@@ -606,7 +648,7 @@ impl WgpuWindowRenderer {
         self.renderer.unregister_external_texture(id)
     }
 
-    /// 调整 Swapchain 表面物理像素尺寸（窗口缩小时自动回收大于新视口的空闲离屏纹理）。
+    /// 调整 Swapchain 表面物理像素尺寸（窗口缩小时自动回收大于新视口的空闲离屏纹理，并按 Slint `NewBuffer` 规则失效持久主纹理）。
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -616,14 +658,56 @@ impl WgpuWindowRenderer {
         }
         self.surface_config.width = width;
         self.surface_config.height = height;
+        self.persistent_target = None;
+        self.persistent_valid = false;
+        self.last_frame_used_partial_repaint = false;
         self.surface.configure(&self.device, &self.surface_config);
         self.renderer.on_viewport_resized(width, height);
     }
 
-    /// 后台化或内存压力时主动释放全部空闲离屏纹理与 SVG 遮罩显存。
+    /// 后台化或内存压力时主动释放全部空闲离屏纹理、持久渲染目标与 SVG 遮罩显存。
     #[inline]
     pub fn trim_gpu_memory(&mut self) {
+        self.persistent_target = None;
+        self.persistent_valid = false;
         self.renderer.trim_gpu_memory();
+    }
+
+    /// 启用或禁用窗口级持久渲染目标局部重绘（默认开启；关闭后立刻释放持久纹理显存）。
+    #[inline]
+    pub fn set_persistent_target_enabled(&mut self, enabled: bool) {
+        self.persistent_target_enabled = enabled;
+        if !enabled {
+            self.persistent_target = None;
+            self.persistent_valid = false;
+        }
+    }
+
+    /// 返回当前是否启用了窗口级持久渲染目标局部重绘。
+    #[inline]
+    pub const fn persistent_target_enabled(&self) -> bool {
+        self.persistent_target_enabled && self.surface_supports_copy_dst
+    }
+
+    /// 返回最近一帧是否实际命中了持久渲染目标的局部 Scissor 增量重绘（`ReusedBuffer` 语义）。
+    #[inline]
+    pub const fn last_frame_used_partial_repaint(&self) -> bool {
+        self.last_frame_used_partial_repaint
+    }
+
+    /// 返回当前常驻持久主纹理占用的估算显存字节数（惰性分配，未创建或已 `trim_gpu_memory` 时为 `0`）。
+    #[inline]
+    pub fn persistent_target_bytes(&self) -> usize {
+        self.persistent_target
+            .as_ref()
+            .map(|(_, _, w, h)| (*w as usize).saturating_mul(*h as usize).saturating_mul(4))
+            .unwrap_or(0)
+    }
+
+    /// 主动使持久主纹理缓存失效（下一帧强制按 `NewBuffer` 语义整屏重建）。
+    #[inline]
+    pub fn invalidate_persistent_target(&mut self) {
+        self.persistent_valid = false;
     }
 
     /// 返回当前离屏图层纹理池占用的估算显存字节数。
@@ -650,19 +734,71 @@ impl WgpuWindowRenderer {
         self.renderer.canvas_cache_bytes()
     }
 
-    fn acquire_surface_texture(&self) -> Option<wgpu::SurfaceTexture> {
+    fn ensure_persistent_target(&mut self) -> (&wgpu::Texture, &wgpu::TextureView) {
+        let w = self.surface_config.width.max(1);
+        let h = self.surface_config.height.max(1);
+        let needs_alloc = match &self.persistent_target {
+            Some((_, _, pw, ph)) => *pw != w || *ph != h,
+            None => true,
+        };
+        if needs_alloc {
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("velox_window_persistent_rt"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.surface_config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self.persistent_target = Some((tex, view, w, h));
+            self.persistent_valid = false;
+        }
+        let (tex, view, _, _) = self.persistent_target.as_ref().unwrap();
+        (tex, view)
+    }
+
+    fn acquire_surface_texture_status(&mut self) -> Result<wgpu::SurfaceTexture, SurfacePresentOutcome> {
         match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => Some(tex),
+            | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => Ok(tex),
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                self.persistent_valid = false;
+                self.last_frame_used_partial_repaint = false;
+                Err(SurfacePresentOutcome::Occluded)
+            }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                // Swapchain 重建后按 Slint `NewBuffer` 规则强制失效持久缓存
+                self.persistent_valid = false;
+                self.last_frame_used_partial_repaint = false;
                 self.surface.configure(&self.device, &self.surface_config);
                 match self.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(tex)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => Some(tex),
-                    _ => None,
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => Ok(tex),
+                    wgpu::CurrentSurfaceTexture::Occluded => {
+                        self.persistent_valid = false;
+                        self.last_frame_used_partial_repaint = false;
+                        Err(SurfacePresentOutcome::Occluded)
+                    }
+                    _ => {
+                        self.persistent_valid = false;
+                        self.last_frame_used_partial_repaint = false;
+                        Err(SurfacePresentOutcome::RetryableFailure)
+                    }
                 }
             }
-            _ => None,
+            _ => {
+                // Timeout / Validation 等瞬态获取失败：失效持久底帧并回报可有限重试状态
+                self.persistent_valid = false;
+                self.last_frame_used_partial_repaint = false;
+                Err(SurfacePresentOutcome::RetryableFailure)
+            }
         }
     }
 
@@ -687,9 +823,7 @@ impl WgpuWindowRenderer {
         self.render_scaled_with_clear_dirty(ops, viewport, scale_factor, clear, &[])
     }
 
-    /// 直接在 Swapchain 上以指定背景清屏色与本帧精确脏区切片 `dirty_regions` 执行渲染并提交显示。
-    ///
-    /// 传入 `dirty_regions` 后，多 Pass 管线中的 `backdrop-filter` 毛玻璃将自动启用脏区外扩交集剪枝与模糊小纹理复用。
+    /// 面向窗口 Swapchain 的统一提交入口，融合 Slint `NewBuffer` / `ReusedBuffer` 增量重绘规则。
     pub fn render_scaled_with_clear_dirty(
         &mut self,
         ops: &[DrawOp<'_>],
@@ -698,12 +832,26 @@ impl WgpuWindowRenderer {
         clear: Color,
         dirty_regions: &[Region],
     ) -> bool {
-        let Some(frame) = self.acquire_surface_texture() else {
-            return false;
+        self.render_scaled_with_clear_dirty_status(ops, viewport, scale_factor, clear, dirty_regions)
+            == SurfacePresentOutcome::Presented
+    }
+
+    /// 面向窗口 Swapchain 的带精确状态回传提交入口（区分 `Presented` / `Occluded` / `RetryableFailure` 防止窗口被遮挡时后台空转）：
+    /// - 当本帧为局部脏更新（面积占比 ≤ 60%、不透明全屏底、无多 Pass 毛玻璃或 `SceneCanvas`）且 Surface 支持 `COPY_DST` 时，
+    ///   惰性启用持久主纹理执行 `LoadOp::Load + set_scissor_rect` 局部重绘并在同一 `CommandEncoder` 内拷贝上屏；
+    /// - 当脏区 > 60%（整屏滚动/切换）或存在多 Pass 图层/透明底时，直接整屏直出 Swapchain（零多余拷屏开销）并自动失效持久底帧。
+    pub fn render_scaled_with_clear_dirty_status(
+        &mut self,
+        ops: &[DrawOp<'_>],
+        viewport: Region,
+        scale_factor: f32,
+        clear: Color,
+        dirty_regions: &[Region],
+    ) -> SurfacePresentOutcome {
+        let frame = match self.acquire_surface_texture_status() {
+            Ok(tex) => tex,
+            Err(status) => return status,
         };
-        let frame_view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
         let clear_color = if self.surface_config.format.is_srgb() {
             let srgb_to_lin = |c: u8| -> f64 {
                 let s = (c as f64) / 255.0;
@@ -727,6 +875,88 @@ impl WgpuWindowRenderer {
                 a: 1.0,
             }
         };
+
+        let w = self.surface_config.width;
+        let h = self.surface_config.height;
+
+        // 判定是否满足持久渲染目标局部增量重绘条件（Slint ReusedBuffer 边界 + 60% 面积拐点护栏）
+        let vp_area = (viewport.w.max(0) as u64).saturating_mul(viewport.h.max(0) as u64);
+        let dirty_area: u64 = dirty_regions
+            .iter()
+            .map(|r| {
+                let c = r.intersect(viewport);
+                (c.w.max(0) as u64).saturating_mul(c.h.max(0) as u64)
+            })
+            .sum();
+        let has_opaque_bg = ops.first().is_some_and(|op| {
+            matches!(
+                op.payload,
+                crate::motion::DrawPayload::Quad {
+                    rounded: 0,
+                    border_width: 0,
+                    ..
+                }
+            ) && op.clip_radius == 0
+                && crate::renderers::software::opaque_core_rect(op).intersect(viewport) == viewport
+        });
+        let can_use_persistent = self.persistent_target_enabled
+            && self.surface_supports_copy_dst
+            && vp_area > 0
+            && !dirty_regions.is_empty()
+            && dirty_area > 0
+            && dirty_area.saturating_mul(10) <= vp_area.saturating_mul(6)
+            && has_opaque_bg
+            && !crate::renderers::software::ops_have_layers_or_blend(ops)
+            && !ops
+                .iter()
+                .any(|op| matches!(op.payload, crate::motion::DrawPayload::SceneCanvas(_)));
+
+        if can_use_persistent {
+            let _ = self.ensure_persistent_target();
+            let (p_tex, p_view, _, _) = self.persistent_target.as_ref().unwrap();
+            if self.persistent_valid {
+                // 稳态 ReusedBuffer：在持久主纹理上局部 Scissor 重绘，并在同一 CommandEncoder 末尾拷入 Swapchain
+                let used_partial = self.renderer.render_to_view_dirty_with_copy(
+                    &self.device,
+                    &self.queue,
+                    ops,
+                    viewport,
+                    scale_factor,
+                    p_view,
+                    w,
+                    h,
+                    dirty_regions,
+                    clear_color,
+                    Some((p_tex, &frame.texture)),
+                );
+                self.persistent_valid = true;
+                self.last_frame_used_partial_repaint = used_partial;
+            } else {
+                // 首次建立持久主纹理（NewBuffer -> ReusedBuffer）：整屏写入持久纹理并拷入 Swapchain
+                let _ = self.renderer.render_to_view_dirty_with_copy(
+                    &self.device,
+                    &self.queue,
+                    ops,
+                    viewport,
+                    scale_factor,
+                    p_view,
+                    w,
+                    h,
+                    &[],
+                    clear_color,
+                    Some((p_tex, &frame.texture)),
+                );
+                self.persistent_valid = true;
+                self.last_frame_used_partial_repaint = false;
+            }
+            self.queue.present(frame);
+            return SurfacePresentOutcome::Presented;
+        }
+
+        // 大面积脏区 / 整屏首帧 / 多 Pass 毛玻璃 / SceneCanvas：直接渲染至 Swapchain，零拷屏开销
+        let frame_view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let hints = if dirty_regions.is_empty() {
             None
         } else {
@@ -739,13 +969,15 @@ impl WgpuWindowRenderer {
             viewport,
             scale_factor,
             &frame_view,
-            self.surface_config.width,
-            self.surface_config.height,
+            w,
+            h,
             clear_color,
             hints,
         );
+        self.persistent_valid = false;
+        self.last_frame_used_partial_repaint = false;
         self.queue.present(frame);
-        true
+        SurfacePresentOutcome::Presented
     }
 
     /// 等待已提交至 GPU 队列的渲染指令完成（用于首帧隐身提交后、显窗前的零白屏同步栅栏）。

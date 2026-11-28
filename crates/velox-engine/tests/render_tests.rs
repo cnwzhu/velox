@@ -71,6 +71,43 @@ fn test_front_to_back_occlusion_culling() {
     assert_eq!(trimmed, Region::new(0, 40, 320, 200));
 }
 
+#[test]
+fn test_rounded_parent_clip_keeps_background_and_preserves_geometry() {
+    use velox_engine::motion::{DrawOp, DrawPayload};
+    use velox_engine::renderers::software::precompute_occlusion_clips;
+
+    let viewport = Region::new(0, 0, 32, 32);
+    let quad = |bounds, clip_radius, color| DrawOp {
+        id: None,
+        bounds,
+        clip: viewport,
+        clip_radius,
+        subpx_q4: 0,
+        payload: DrawPayload::Quad {
+            bg: color,
+            bg_grad: color,
+            border_color: Color::TRANSPARENT,
+            rounded: 0,
+            border_width: 0,
+        },
+    };
+
+    let mut ops = [
+        quad(viewport, 0, Color::WHITE),
+        quad(viewport, 12, Color::rgb(190, 40, 40)),
+        quad(Region::new(0, 0, 4, 32), 0, Color::rgb(20, 120, 240)),
+    ];
+    let mut pixels = [Xrgb8888(0); 32 * 32];
+    let mut expected = pixels;
+    for op in &ops {
+        rasterize_region(core::slice::from_ref(op), viewport, 0, 0, 32, &mut expected);
+    }
+    precompute_occlusion_clips(&mut ops);
+    assert_eq!(ops[1].clip, viewport);
+    rasterize_region(&ops, viewport, 0, 0, 32, &mut pixels);
+    assert_eq!(pixels, expected);
+}
+
 struct BreathingView;
 
 impl View for BreathingView {
