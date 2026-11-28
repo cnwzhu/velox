@@ -1461,6 +1461,142 @@ impl WgpuRenderer {
                 });
             }
             DrawPayload::RichText(rt) => {
+                // 启用 `swash` 特性时，对携带可变字体轴或大字号的单行简单富文本直通 Swash -> 共享 Slug 2.0 曲线管线，
+                // 支持弹簧驱动连续可变字重（wght）与字宽（wdth）过渡，免除 CPU 反复光栅化与 SpriteAtlas 抖动。
+                #[cfg(feature = "swash")]
+                if use_ttf && clip_radius_px <= 0.0 && !rt.rtl_paragraph && !rt.spans.is_empty() {
+                    let has_var = rt.spans.iter().any(|sp| sp.has_variable_axes());
+                    let max_fs_px = rt
+                        .spans
+                        .iter()
+                        .map(|sp| sp.font_size.unwrap_or(rt.default_font_size).max(8) as f32 * sf)
+                        .fold(0.0f32, f32::max);
+                    let simple_single_line = (has_var
+                        || (self.slug_text_threshold_px.is_finite()
+                            && max_fs_px >= self.slug_text_threshold_px))
+                        && rt.spans.iter().all(|sp| {
+                            sp.bg_color.is_none()
+                                && sp.decoration.0 == 0
+                                && sp.letter_spacing_q4 == 0
+                                && !sp.text.as_str().contains('\n')
+                                && !sp.text.as_str().chars().any(crate::text_rich::is_emoji_char)
+                        });
+                    if simple_single_line {
+                        let mut shaped_runs: Vec<(
+                            std::sync::Arc<crate::swash_shaper::ShapedGlyphRun>,
+                            f32,
+                            [f32; 4],
+                            [Option<crate::swash_shaper::FontVariationAxis>; 2],
+                        )> = Vec::with_capacity(rt.spans.len());
+                        let mut total_adv = 0.0f32;
+                        let mut all_ok = true;
+                        for sp in rt.spans {
+                            let s = sp.text.as_str();
+                            if s.is_empty() {
+                                continue;
+                            }
+                            let span_fs =
+                                (sp.font_size.unwrap_or(rt.default_font_size).max(8) as f32) * sf;
+                            let mut vars: [Option<crate::swash_shaper::FontVariationAxis>; 2] =
+                                [None, None];
+                            let mut var_buf: [crate::swash_shaper::FontVariationAxis; 2] = [
+                                crate::swash_shaper::FontVariationAxis::weight(400.0),
+                                crate::swash_shaper::FontVariationAxis::width(100.0),
+                            ];
+                            let mut var_len = 0usize;
+                            if sp.var_weight_x10 != 0 {
+                                let ax = crate::swash_shaper::FontVariationAxis::weight(
+                                    (sp.var_weight_x10 as f32) * 0.1,
+                                );
+                                vars[var_len] = Some(ax);
+                                var_buf[var_len] = ax;
+                                var_len += 1;
+                            }
+                            if sp.var_width_x10 != 0 {
+                                let ax = crate::swash_shaper::FontVariationAxis::width(
+                                    (sp.var_width_x10 as f32) * 0.1,
+                                );
+                                vars[var_len] = Some(ax);
+                                var_buf[var_len] = ax;
+                                var_len += 1;
+                            }
+                            let Some(run) = crate::swash_shaper::shape_text_run_swash(
+                                s,
+                                sp.font,
+                                span_fs,
+                                sp.ligatures,
+                                &var_buf[..var_len],
+                            ) else {
+                                all_ok = false;
+                                break;
+                            };
+                            total_adv += run.total_advance;
+                            let col = color_to_f32(sp.color.unwrap_or(rt.default_color));
+                            shaped_runs.push((run, span_fs, col, vars));
+                        }
+                        let tol = (max_fs_px * 0.25).max(4.0);
+                        if all_ok
+                            && !shaped_runs.is_empty()
+                            && (rt.nowrap || total_adv <= sb_f[2] + tol)
+                        {
+                            if self.ui_slug_engine.is_none() {
+                                let raw_cache =
+                                    self.pipeline_cache.as_deref().map(|c| c.wgpu_cache());
+                                self.ui_slug_engine =
+                                    Some(super::slug_glyph::SlugTextEngine::new(
+                                        device,
+                                        self.target_format,
+                                        raw_cache,
+                                    ));
+                                if let Some(c) = &self.pipeline_cache {
+                                    c.persist();
+                                }
+                            }
+                            let is_srgb = self.target_is_srgb;
+                            let mut slug = self.ui_slug_engine.take().unwrap();
+                            let align_x = match rt.align {
+                                crate::style::TextAlign::Center => {
+                                    ((sb_f[2] - total_adv).max(0.0)) * 0.5
+                                }
+                                crate::style::TextAlign::Right => (sb_f[2] - total_adv).max(0.0),
+                                crate::style::TextAlign::Left => 0.0,
+                            };
+                            let ascent = crate::display::ttf_atlas::get_font_ascent_f32(max_fs_px)
+                                as f32;
+                            let baseline_y = shifted_sb[1] + ascent;
+                            let mut pen_x = shifted_sb[0] + align_x;
+                            let mut total_pushed = 0usize;
+                            for (run, span_fs, col, vars) in &shaped_runs {
+                                let mut var_buf: [crate::swash_shaper::FontVariationAxis; 2] = [
+                                    crate::swash_shaper::FontVariationAxis::weight(400.0),
+                                    crate::swash_shaper::FontVariationAxis::width(100.0),
+                                ];
+                                let mut var_len = 0usize;
+                                for v in vars.iter().flatten() {
+                                    var_buf[var_len] = *v;
+                                    var_len += 1;
+                                }
+                                total_pushed += slug.push_swash_run(
+                                    run,
+                                    pen_x,
+                                    baseline_y,
+                                    *span_fs,
+                                    &var_buf[..var_len],
+                                    shifted_sc,
+                                    *col,
+                                    target_w,
+                                    target_h,
+                                    is_srgb,
+                                );
+                                pen_x += run.total_advance;
+                            }
+                            self.ui_slug_engine = Some(slug);
+                            if total_pushed > 0 {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
                 let sb = snap_bounds_region_scaled(op.bounds, sf);
                 let sc = Region::new(
                     sc_f[0] as i16,
@@ -2002,6 +2138,83 @@ impl WgpuRenderer {
         target_w: u32,
         target_h: u32,
     ) -> bool {
+        let col_f32 = color_to_f32(color);
+        let render_fs = (font_size_q4.clamp(32, 1020) as f32) * 0.25;
+        let slug_offset_x = subpx_frac_x - origin_x;
+        let slug_offset_y = subpx_frac_y - origin_y;
+        let has_subpx = if subpx_frac_x != 0.0 || subpx_frac_y != 0.0 {
+            1.0
+        } else {
+            0.0
+        };
+        let route_to_slug = use_ttf
+            && clip_radius_px <= 0.0
+            && self.slug_text_threshold_px.is_finite()
+            && render_fs >= self.slug_text_threshold_px;
+
+        // 启用 `swash` 且命中单行 Slug 快路径时，直接绕过旧版 `get_or_build_text_layout` 避免重复排版
+        #[cfg(feature = "swash")]
+        if route_to_slug {
+            let is_ellipsis = (text_flags & 0x04) != 0;
+            let is_nowrap = (text_flags & 0x08) != 0;
+            if !is_ellipsis
+                && !text.contains('\n')
+                && !text.chars().any(crate::text_rich::is_emoji_char)
+            {
+                if let Some(run) = crate::swash_shaper::shape_text_run_swash(
+                    text,
+                    crate::text_rich::FontSpec::SANS,
+                    render_fs,
+                    true,
+                    &[],
+                ) {
+                    let tol = (render_fs * 0.25).max(4.0);
+                    if is_nowrap || run.total_advance <= (bounds.w as f32) + tol {
+                        if self.ui_slug_engine.is_none() {
+                            let raw_cache = self.pipeline_cache.as_deref().map(|c| c.wgpu_cache());
+                            self.ui_slug_engine = Some(super::slug_glyph::SlugTextEngine::new(
+                                device,
+                                self.target_format,
+                                raw_cache,
+                            ));
+                            if let Some(c) = &self.pipeline_cache {
+                                c.persist();
+                            }
+                        }
+                        let is_srgb = self.target_is_srgb;
+                        let mut slug = self.ui_slug_engine.take().unwrap();
+                        let line_h = (render_fs.round() as i16).max(8);
+                        let top_y = bounds
+                            .y
+                            .saturating_add(bounds.h.saturating_sub(line_h).max(0) >> 1);
+                        let eff_w = (run.total_advance.ceil() as i16).clamp(0, bounds.w);
+                        let align_x = align_offset_x(bounds.w, eff_w, text_flags) as f32;
+                        let ascent =
+                            crate::display::ttf_atlas::get_font_ascent_f32(render_fs) as i16;
+                        let baseline_y =
+                            (top_y.saturating_add(ascent) as f32) + slug_offset_y;
+                        let pen_x0 = (bounds.x as f32) + align_x + slug_offset_x;
+                        let pushed = slug.push_swash_run(
+                            &run,
+                            pen_x0,
+                            baseline_y,
+                            render_fs,
+                            &[],
+                            clip_f32,
+                            col_f32,
+                            target_w,
+                            target_h,
+                            is_srgb,
+                        );
+                        self.ui_slug_engine = Some(slug);
+                        if pushed > 0 {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
         let layout = self.get_or_build_text_layout(
             text,
             logical_font_size,
@@ -2016,14 +2229,6 @@ impl WgpuRenderer {
         let top_y = bounds
             .y
             .saturating_add(bounds.h.saturating_sub(layout.total_h).max(0) >> 1);
-        let col_f32 = color_to_f32(color);
-        let render_fs = (font_size_q4.clamp(32, 1020) as f32) * 0.25;
-        let slug_offset_x = subpx_frac_x - origin_x;
-        let slug_offset_y = subpx_frac_y - origin_y;
-        let route_to_slug = use_ttf
-            && clip_radius_px <= 0.0
-            && self.slug_text_threshold_px.is_finite()
-            && render_fs >= self.slug_text_threshold_px;
 
         if route_to_slug {
             if self.ui_slug_engine.is_none() {
@@ -2039,48 +2244,6 @@ impl WgpuRenderer {
             }
             let is_srgb = self.target_is_srgb;
             let mut slug = self.ui_slug_engine.take().unwrap();
-            #[cfg(feature = "swash")]
-            {
-                let is_ellipsis = (text_flags & 0x04) != 0;
-                if !is_ellipsis
-                    && !text.contains('\n')
-                    && !text.chars().any(crate::text_rich::is_emoji_char)
-                {
-                    if let Some(run) = crate::swash_shaper::shape_text_run_swash(
-                        text,
-                        crate::text_rich::FontSpec::SANS,
-                        render_fs,
-                        true,
-                        &[],
-                    ) {
-                        if run.total_advance <= (bounds.w as f32) + 1.0 {
-                            let eff_w = (run.total_advance.ceil() as i16).clamp(0, bounds.w);
-                            let align_x = align_offset_x(bounds.w, eff_w, text_flags) as f32;
-                            let ascent =
-                                crate::display::ttf_atlas::get_font_ascent_f32(render_fs) as i16;
-                            let baseline_y =
-                                (top_y.saturating_add(ascent) as f32) + slug_offset_y;
-                            let pen_x0 = (bounds.x as f32) + align_x + slug_offset_x;
-                            let pushed = slug.push_swash_run(
-                                &run,
-                                pen_x0,
-                                baseline_y,
-                                render_fs,
-                                &[],
-                                clip_f32,
-                                col_f32,
-                                target_w,
-                                target_h,
-                                is_srgb,
-                            );
-                            if pushed > 0 {
-                                self.ui_slug_engine = Some(slug);
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
             let mut ok = true;
             for g in &layout.glyphs {
                 let pen_x = (bounds.x.saturating_add(g.rel_x) as f32) + slug_offset_x;
@@ -2128,7 +2291,7 @@ impl WgpuRenderer {
                                 color1: [0.0; 4],
                                 border_color: [0.0; 4],
                                 params: [0.0, 0.0, KIND_GLYPH, 0.0],
-                                extra: [clip_radius_px, 0.0, 0.0, 0.0],
+                                extra: [clip_radius_px, has_subpx, 0.0, 0.0],
                                 radii: [0.0; 4],
                                 grad_a: [0.0; 4],
                                 grad_b: [0.0; 4],
@@ -2165,11 +2328,6 @@ impl WgpuRenderer {
                 let greg = Region::new(gx, gy, entry.width, entry.height);
                 if !clip.intersect(greg).is_empty() {
                     // 透传 Q4 亚像素残差（运动帧启用防渗色双线性亚像素采样同步外框无“框动字跳”，静止帧自动为 0.0 走 Nearest 保整像素锐度）
-                    let has_subpx = if subpx_frac_x != 0.0 || subpx_frac_y != 0.0 {
-                        1.0
-                    } else {
-                        0.0
-                    };
                     self.primitives.push(GpuPrimitive {
                         bounds: [
                             (gx as f32) + subpx_frac_x,

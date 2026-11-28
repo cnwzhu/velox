@@ -83,7 +83,7 @@ pub fn dir_from_deg(deg10: u16) -> (i32, i32) {
     (sin_v, -cos_v)
 }
 
-/// 32 位整数平方根（纯整数位运算，适配无 FPU 的 Cortex-M0/M3/M4）。
+/// 32 位整数平方根（利用硬件 `CLZ` / `leading_zeros` 跳过前导零空转，适配无 FPU 的 Cortex-M0/M3/M4/M7）。
 #[inline(always)]
 pub fn isqrt_i32(n: i32) -> i32 {
     if n <= 0 {
@@ -91,13 +91,11 @@ pub fn isqrt_i32(n: i32) -> i32 {
     }
     let mut x = n as u32;
     let mut res = 0u32;
-    let mut bit = 1u32 << 30;
-    while bit > x {
-        bit >>= 2;
-    }
+    let mut bit = 1u32 << ((31 - x.leading_zeros()) & !1);
     while bit != 0 {
-        if x >= res + bit {
-            x -= res + bit;
+        let t = res + bit;
+        if x >= t {
+            x -= t;
             res = (res >> 1) + bit;
         } else {
             res >>= 1;
@@ -107,7 +105,7 @@ pub fn isqrt_i32(n: i32) -> i32 {
     res as i32
 }
 
-/// 64 位整数平方根（防止大坐标距离平方溢出 `i32`）。
+/// 64 位整数平方根（防止大坐标距离平方溢出 `i32`，利用前导零直达最高有效偶次位）。
 #[inline(always)]
 pub const fn isqrt_i64(n: i64) -> i32 {
     if n <= 0 {
@@ -115,13 +113,11 @@ pub const fn isqrt_i64(n: i64) -> i32 {
     }
     let mut x = n as u64;
     let mut res = 0u64;
-    let mut bit = 1u64 << 62;
-    while bit > x {
-        bit >>= 2;
-    }
+    let mut bit = 1u64 << ((63 - x.leading_zeros()) & !1);
     while bit != 0 {
-        if x >= res + bit {
-            x -= res + bit;
+        let t = res + bit;
+        if x >= t {
+            x -= t;
             res = (res >> 1) + bit;
         } else {
             res >>= 1;

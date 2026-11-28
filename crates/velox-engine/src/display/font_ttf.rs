@@ -481,6 +481,12 @@ pub(crate) fn with_font_bytes_by_key<R>(font_key: u64, f: impl FnOnce(&[u8]) -> 
             }
         }
     }
+    #[cfg(target_arch = "wasm32")]
+    if let Some(Some(font)) = WASM_FONT.get() {
+        if (font.bytes.as_ptr() as usize as u64) == font_key {
+            return Some(f(font.bytes));
+        }
+    }
     if let Some(map) = CUSTOM_FONTS.get() {
         if let Ok(r) = map.read() {
             for cf in r.values() {

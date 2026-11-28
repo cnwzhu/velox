@@ -178,6 +178,10 @@ pub struct TextSpan<'a> {
     pub ligatures: bool,
     /// 可选交互链接 ID（供业务标识可点击超链接片段）。
     pub link_id: Option<u32>,
+    /// 可选 OpenType 可变字体字重轴（`wght × 10`，`0` 表示未覆写；启用 `swash` 时可由弹簧驱动连续字重过渡）。
+    pub var_weight_x10: u16,
+    /// 可选 OpenType 可变字体字宽轴（`wdth × 10`，`0` 表示未覆写）。
+    pub var_width_x10: u16,
 }
 
 impl<'a> TextSpan<'a> {
@@ -194,6 +198,8 @@ impl<'a> TextSpan<'a> {
             letter_spacing_q4: 0,
             ligatures: false,
             link_id: None,
+            var_weight_x10: 0,
+            var_width_x10: 0,
         }
     }
 
@@ -275,6 +281,40 @@ impl<'a> TextSpan<'a> {
         self.link_id = Some(id);
         self
     }
+
+    /// 设置 OpenType 可变字体字重轴（`wght`，通常 `100.0 ~ 900.0`，支持弹簧连续过渡）。
+    #[inline(always)]
+    pub const fn var_weight(mut self, wght: f32) -> Self {
+        let clamped = if wght < 1.0 {
+            1.0
+        } else if wght > 1000.0 {
+            1000.0
+        } else {
+            wght
+        };
+        self.var_weight_x10 = (clamped * 10.0 + 0.5) as u16;
+        self
+    }
+
+    /// 设置 OpenType 可变字体字宽轴（`wdth`，通常 `50.0 ~ 200.0`）。
+    #[inline(always)]
+    pub const fn var_width(mut self, wdth: f32) -> Self {
+        let clamped = if wdth < 25.0 {
+            25.0
+        } else if wdth > 400.0 {
+            400.0
+        } else {
+            wdth
+        };
+        self.var_width_x10 = (clamped * 10.0 + 0.5) as u16;
+        self
+    }
+
+    /// 是否携带任意 OpenType 可变字体变化轴覆写。
+    #[inline(always)]
+    pub const fn has_variable_axes(&self) -> bool {
+        self.var_weight_x10 != 0 || self.var_width_x10 != 0
+    }
 }
 
 /// 富文本段落完整规格（分配于 `ScratchArena`，通过 8B 引用挂入 `DrawPayload::RichText`）。
@@ -319,6 +359,12 @@ impl<'a> RichTextSpec<'a> {
             mix(sp.decoration.0);
             mix(sp.letter_spacing_q4 as u8);
             mix(if sp.ligatures { 1 } else { 0 });
+            for b in sp.var_weight_x10.to_le_bytes() {
+                mix(b);
+            }
+            for b in sp.var_width_x10.to_le_bytes() {
+                mix(b);
+            }
             if let Some(c) = sp.color {
                 mix(1);
                 for b in c.0.to_le_bytes() {

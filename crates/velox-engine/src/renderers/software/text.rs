@@ -1,8 +1,6 @@
 //! 文本多行折行切分、对齐偏移与点阵/TrueType 矢量软件文字光栅化。
 
-use crate::display::{
-    measure_char_advance, measure_line_width_px, sample_glyph_coverage, PixelFormat,
-};
+use crate::display::{measure_char_advance, measure_line_width_px, PixelFormat};
 use crate::solver::Region;
 use crate::style::Color;
 
@@ -342,22 +340,12 @@ fn rasterize_single_bitmap_glyph<P: PixelFormat>(
 ) {
     let glyph_reg = Region::new(cur_x, cur_y, char_w, char_h);
     let glyph_clip = clip.intersect(glyph_reg);
-    if !glyph_clip.is_empty() {
-        for py in glyph_clip.y..glyph_clip.bottom() {
-            let row_offset = ((py - origin_y) as usize) * stride;
-            let rel_y = py - cur_y;
-            for px in glyph_clip.x..glyph_clip.right() {
-                let rel_x = px - cur_x;
-                let cov = sample_glyph_coverage(ch, rel_x, rel_y, char_w, char_h);
-                if cov > 0 {
-                    let idx = row_offset + ((px - origin_x) as usize);
-                    if let Some(dst) = target.get_mut(idx) {
-                        *dst = dst.blend(color, cov);
-                    }
-                }
-            }
-        }
+    if glyph_clip.is_empty() || char_w <= 0 || char_h <= 0 {
+        return;
     }
+    crate::display::rasterize_bitmap_glyph_fast(
+        ch, cur_x, cur_y, char_w, char_h, glyph_clip, color, origin_x, origin_y, stride, target,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

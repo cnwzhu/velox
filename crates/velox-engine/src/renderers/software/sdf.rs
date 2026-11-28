@@ -741,13 +741,43 @@ pub(crate) fn rasterize_quad_precise<P: PixelFormat>(
 
     let h_denom = bounds.h.max(1) as i32;
     let w_denom = bounds.w.max(1) as i32;
-    // 圆角与边框内侧的 100% 满覆盖平坦核心水平跨度 [flat_x0, flat_x1)
+    // 水平渐变步长行外预计算（Q16 定点累加，消除内层每像素 32 位除法）
+    let tx_step_q16: i64 = if has_grad && grad_horiz {
+        (256i64 << 16) / (w_denom as i64)
+    } else {
+        0
+    };
+    let tx_base_q16: i64 = if has_grad && grad_horiz {
+        let start_dx = (clip.x - bounds.x).max(0) as i64;
+        ((start_dx * 2 + 1) * (128i64 << 16)) / (w_denom as i64)
+    } else {
+        0
+    };
+
+    // 循环外预计算 SDF 几何常量，消除每像素重复计算
+    let (cx_f, cy_f, r_f, hx_f, hy_f) = {
+        let hw = (bounds.w as f32) * 0.5;
+        let hh = (bounds.h as f32) * 0.5;
+        let cx = (bounds.x as f32) + hw;
+        let cy = (bounds.y as f32) + hh;
+        let r = ((rounded_16.max(0) as f32) * (1.0 / 16.0)).clamp(0.0, hw.min(hh));
+        (cx, cy, r, hw - r, hh - r)
+    };
+
+    // 两档平坦核心区（100% 满覆盖，无需逐像素 SDF）：
+    // - 圆角上下带：左右缩进 `rounded_ceil + border_width + 1`；
+    // - 中间直边带（`py ∈ [mid_y0, mid_y1)`）：圆弧已结束，左右仅缩进 `border_width + 1`，大幅扩大 `slice.fill()` 面积。
     let rounded_ceil = ((rounded_16.max(0) + 15) >> 4) as i16;
-    let edge_inset = rounded_ceil.saturating_add(border_width).saturating_add(1);
-    let flat_y0 = bounds.y.saturating_add(edge_inset);
-    let flat_y1 = bounds.bottom().saturating_sub(edge_inset);
-    let flat_x0 = bounds.x.saturating_add(edge_inset).max(clip.x);
-    let flat_x1 = bounds.right().saturating_sub(edge_inset).min(clip.right());
+    let bw_inset = border_width.saturating_add(1);
+    let corner_inset = rounded_ceil.saturating_add(bw_inset);
+    let inner_y0 = bounds.y.saturating_add(bw_inset);
+    let inner_y1 = bounds.bottom().saturating_sub(bw_inset);
+    let mid_y0 = bounds.y.saturating_add(corner_inset);
+    let mid_y1 = bounds.bottom().saturating_sub(corner_inset);
+    let corner_flat_x0 = bounds.x.saturating_add(corner_inset).max(clip.x);
+    let corner_flat_x1 = bounds.right().saturating_sub(corner_inset).min(clip.right());
+    let mid_flat_x0 = bounds.x.saturating_add(bw_inset).max(clip.x);
+    let mid_flat_x1 = bounds.right().saturating_sub(bw_inset).min(clip.right());
 
     for py in clip.y..clip.bottom() {
         let row_offset = ((py - origin_y) as usize) * stride;
@@ -759,10 +789,24 @@ pub(crate) fn rasterize_quad_precise<P: PixelFormat>(
             bg
         };
 
-        // 垂直平坦核心区内且非水平渐变时，中间连续段 [flat_x0, flat_x1) 覆盖率恒为 255，可整段填充无需逐像素计算 SDF
-        let use_flat_span =
-            py >= flat_y0 && py < flat_y1 && flat_x0 < flat_x1 && !(has_grad && grad_horiz);
+        // 按行所在区段选择最大水平平坦核心跨度 [flat_x0, flat_x1)
+        let (flat_x0, flat_x1) = if py >= mid_y0 && py < mid_y1 {
+            (mid_flat_x0, mid_flat_x1)
+        } else if py >= inner_y0 && py < inner_y1 {
+            (corner_flat_x0, corner_flat_x1)
+        } else {
+            (0, 0)
+        };
+        let use_flat_span = flat_x0 < flat_x1 && !(has_grad && grad_horiz);
 
+        // 行级 SDF Y 常量预计算
+        let (qy_f, oy_f, oy2_f) = {
+            let qy = ((py as f32 + 0.5) - cy_f).abs() - hy_f;
+            let oy = qy.max(0.0);
+            (qy, oy, oy * oy)
+        };
+
+        let mut tx_q16 = tx_base_q16;
         let mut px = clip.x;
         let px_end = clip.right();
         while px < px_end {
@@ -781,9 +825,11 @@ pub(crate) fn rasterize_quad_precise<P: PixelFormat>(
                         }
                     }
                 } else if row_bg.a() > 0 {
-                    for fpx in flat_x0..flat_x1 {
-                        let idx = row_offset + ((fpx - origin_x) as usize);
-                        if let Some(dst) = target.get_mut(idx) {
+                    let s_col = (flat_x0 - origin_x) as usize;
+                    let e_col = (flat_x1 - origin_x) as usize;
+                    if let Some(slice) = target.get_mut((row_offset + s_col)..(row_offset + e_col))
+                    {
+                        for dst in slice.iter_mut() {
                             *dst = dst.blend(row_bg, 255);
                         }
                     }
@@ -793,21 +839,22 @@ pub(crate) fn rasterize_quad_precise<P: PixelFormat>(
             }
 
             let (outer_cov, sd_outer_f32) = {
-                let half_w = (bounds.w as f32) * 0.5;
-                let half_h = (bounds.h as f32) * 0.5;
-                let cx = (bounds.x as f32) + half_w;
-                let cy = (bounds.y as f32) + half_h;
-                let r = ((rounded_16.max(0) as f32) * (1.0 / 16.0)).clamp(0.0, half_w.min(half_h));
-                let qx = ((px as f32 + 0.5) - cx).abs() - (half_w - r);
-                let qy = ((py as f32 + 0.5) - cy).abs() - (half_h - r);
+                let qx = ((px as f32 + 0.5) - cx_f).abs() - hx_f;
                 let ox = qx.max(0.0);
-                let oy = qy.max(0.0);
-                let sd = (ox * ox + oy * oy).sqrt() + qx.max(qy).min(0.0) - r;
+                let out_d = if ox == 0.0 {
+                    oy_f
+                } else if oy_f == 0.0 {
+                    ox
+                } else {
+                    (ox * ox + oy2_f).sqrt()
+                };
+                let sd = out_d + qx.max(qy_f).min(0.0) - r_f;
                 let cov = ((0.5 - sd).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
                 (cov, sd)
             };
             if outer_cov == 0 {
                 px += 1;
+                tx_q16 += tx_step_q16;
                 continue;
             }
 
@@ -815,12 +862,12 @@ pub(crate) fn rasterize_quad_precise<P: PixelFormat>(
             let idx = row_offset + ((px - origin_x) as usize);
             let Some(dst) = target.get_mut(idx) else {
                 px += 1;
+                tx_q16 += tx_step_q16;
                 continue;
             };
 
             let cur_bg = if has_grad && grad_horiz {
-                let tx_256 = ((((px - bounds.x).max(0) as i32 * 2 + 1) * 128) / w_denom)
-                    .clamp(0, 256) as u16;
+                let tx_256 = (tx_q16 >> 16).clamp(0, 256) as u16;
                 bg.lerp(bg_grad, tx_256)
             } else {
                 row_bg
@@ -886,6 +933,7 @@ pub(crate) fn rasterize_quad_precise<P: PixelFormat>(
                 }
             }
             px += 1;
+            tx_q16 += tx_step_q16;
         }
     }
 }

@@ -102,7 +102,42 @@ impl PixelFormat for Rgb565 {
         let b = (b5 << 3) | (b5 >> 2);
         Color::rgb(r, g, b)
     }
+
+    /// 面向嵌入式 MCU 榨干级特化：32-bit 隔槽 SWAR 单乘法 RGB565 Alpha 混合（**0 次除法**、2 次 32-bit 乘法）。
+    ///
+    /// 将 16 位 RGB565 展开到 `0x07E0_F81F`（`00000_GGGGGG_00000_RRRRR_000000_BBBBB`），
+    /// 三个通道间留有 ≥5 bit 隔离防进位间隙，量化 `a5 ∈ 0..=32` 后一次并行完成 R/G/B 三通道混合。
+    #[inline(always)]
+    fn blend(self, fg: Color, coverage: u8) -> Self {
+        let fg_a = fg.a() as u32;
+        if fg_a == 0 || coverage == 0 {
+            return self;
+        }
+        let alpha = if fg_a == 255 {
+            coverage as u32
+        } else {
+            (((fg_a * (coverage as u32)) + 128) * 257) >> 16
+        };
+        if alpha == 0 {
+            return self;
+        }
+        let fg565 = Self::from_color(fg).0 as u32;
+        let a5 = (alpha + 4) >> 3; // 0..=32
+        if a5 >= 32 {
+            return Self(fg565 as u16);
+        }
+        if a5 == 0 {
+            return self;
+        }
+        let bg = self.0 as u32;
+        let bg_sp = (bg | (bg << 16)) & 0x07E0_F81F;
+        let fg_sp = (fg565 | (fg565 << 16)) & 0x07E0_F81F;
+        let inv = 32 - a5;
+        let res = ((bg_sp * inv + fg_sp * a5) >> 5) & 0x07E0_F81F;
+        Self((res | (res >> 16)) as u16)
+    }
 }
+
 
 /// 32 位 `XRGB8888` 像素格式（面向 Linux Wayland `wl_shm` 与桌面窗口）。
 #[repr(transparent)]

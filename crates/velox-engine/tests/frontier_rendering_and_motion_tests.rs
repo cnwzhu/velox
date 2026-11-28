@@ -379,4 +379,71 @@ fn test_small_text_subpixel_follows_spring_and_shared_slug_engine_with_canvas() 
         stats.slug_last_drawn_glyphs, 10,
         "both UI heading (5) and SceneCanvas label (5) must draw in same frame"
     );
+
+    // 3. 当启用 `swash` 特性时，验证 RichText + TextSpan::var_weight 可变字体轴直通共享 Slug 2.0 曲线渲染
+    #[cfg(feature = "swash")]
+    {
+        let spans = [
+            TextSpan::new("Spring ")
+                .size(34)
+                .var_weight(420.0)
+                .color(Color::WHITE),
+            TextSpan::new("Weight 你好")
+                .size(34)
+                .var_weight(760.0)
+                .color(Color::rgb(96, 165, 250)),
+        ];
+        let rt_spec = RichTextSpec {
+            spans: &spans,
+            default_color: Color::WHITE,
+            default_font_size: 34,
+            line_height_pct: 130,
+            align: TextAlign::Left,
+            rtl_paragraph: false,
+            max_lines: 1,
+            nowrap: true,
+        };
+        let rt_ops = [
+            DrawOp {
+                id: None,
+                bounds: vp,
+                clip: vp,
+                clip_radius: 0,
+                subpx_q4: 0,
+                payload: DrawPayload::Quad {
+                    bg: Color::rgb(12, 16, 24),
+                    bg_grad: Color::TRANSPARENT,
+                    border_color: Color::TRANSPARENT,
+                    rounded: 0,
+                    border_width: 0,
+                },
+            },
+            DrawOp {
+                id: None,
+                bounds: Region::new(16, 20, 440, 60),
+                clip: vp,
+                clip_radius: 0,
+                subpx_q4: 0,
+                payload: DrawPayload::RichText(&rt_spec),
+            },
+        ];
+        let mut rt_off = WgpuOffscreenRenderer::new_lazy(480, 200);
+        assert!(rt_off.ensure_gpu());
+        let mut rt_fb = vec![Rgba8888(0); 480 * 200];
+        let _ = rt_off.render_draw_ops_rgba8888_into(&rt_ops, vp, 1, &[vp], &mut rt_fb);
+        let rt_stats = rt_off.gpu_memory_stats().unwrap();
+        assert!(
+            rt_stats.slug_last_drawn_glyphs >= 14,
+            "RichText with variable font axes must route through Swash -> Slug 2.0, got {} drawn glyphs",
+            rt_stats.slug_last_drawn_glyphs
+        );
+        let lit = rt_fb
+            .iter()
+            .filter(|px| {
+                let c = px.to_color();
+                c.r() > 140 || c.b() > 180
+            })
+            .count();
+        assert!(lit > 400, "RichText variable-font Slug pass must render visible pixels, got {lit}");
+    }
 }

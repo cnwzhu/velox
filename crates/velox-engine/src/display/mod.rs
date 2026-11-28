@@ -400,3 +400,95 @@ pub fn sample_glyph_coverage(ch: char, rel_x: i16, rel_y: i16, char_w: i16, char
         font_bitmap::sample_16x16_bilinear(font_bitmap::fallback_unihan_bitmap(ch), gx_fp, gy_fp)
     }
 }
+
+/// 面向 MCU / `#![no_std]` 的字符级高速光栅化（每字仅查字库表 1 次，0 内层除法）：
+/// 1. 优先命中 `active_static_font_atlas()` / `prebaked_font_atlas()` 走 1:1 字节流直读或增量步长；
+/// 2. 命中内建 `font_sdf` 矢量字符时跳过字库查找直接评估 SDF；
+/// 3. 回退 8×16 / 16×16 点阵时字符级外提位图数组 + 定点步长增量，消除每像素除法与查表。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rasterize_bitmap_glyph_fast<P: PixelFormat>(
+    ch: char,
+    cur_x: i16,
+    cur_y: i16,
+    char_w: i16,
+    char_h: i16,
+    glyph_clip: Region,
+    color: crate::style::Color,
+    origin_x: i16,
+    origin_y: i16,
+    stride: usize,
+    target: &mut [P],
+) {
+    if glyph_clip.is_empty() || char_w <= 0 || char_h <= 0 {
+        return;
+    }
+
+
+    if font_sdf::sample_vector_sdf_char(ch, 0, 0, char_w, char_h).is_some() {
+        for py in glyph_clip.y..glyph_clip.bottom() {
+            let row_offset = ((py - origin_y) as usize) * stride;
+            let rel_y = py - cur_y;
+            for px in glyph_clip.x..glyph_clip.right() {
+                let rel_x = px - cur_x;
+                if let Some(cov) = font_sdf::sample_vector_sdf_char(ch, rel_x, rel_y, char_w, char_h)
+                {
+                    if cov > 0 {
+                        let idx = row_offset + ((px - origin_x) as usize);
+                        if let Some(dst) = target.get_mut(idx) {
+                            *dst = dst.blend(color, cov);
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    let start_rx = (glyph_clip.x - cur_x) as i32;
+    let start_ry = (glyph_clip.y - cur_y) as i32;
+    let step_y_q12 = (16i32 << 12) / (char_h as i32);
+
+    if ch.is_ascii() {
+        let rows = font_bitmap::ascii_or_deg_bitmap(ch);
+        let step_x_q12 = (8i32 << 12) / (char_w as i32);
+        let mut gy_q12 = start_ry * step_y_q12;
+        for py in glyph_clip.y..glyph_clip.bottom() {
+            let gy_fp = gy_q12 >> 8;
+            gy_q12 += step_y_q12;
+            let row_offset = ((py - origin_y) as usize) * stride;
+            let mut gx_q12 = start_rx * step_x_q12;
+            for px in glyph_clip.x..glyph_clip.right() {
+                let gx_fp = gx_q12 >> 8;
+                gx_q12 += step_x_q12;
+                let cov = font_bitmap::sample_8x16_bilinear(rows, gx_fp, gy_fp);
+                if cov > 0 {
+                    let idx = row_offset + ((px - origin_x) as usize);
+                    if let Some(dst) = target.get_mut(idx) {
+                        *dst = dst.blend(color, cov);
+                    }
+                }
+            }
+        }
+    } else {
+        let rows = font_bitmap::fallback_unihan_bitmap(ch);
+        let step_x_q12 = (16i32 << 12) / (char_w as i32);
+        let mut gy_q12 = start_ry * step_y_q12;
+        for py in glyph_clip.y..glyph_clip.bottom() {
+            let gy_fp = gy_q12 >> 8;
+            gy_q12 += step_y_q12;
+            let row_offset = ((py - origin_y) as usize) * stride;
+            let mut gx_q12 = start_rx * step_x_q12;
+            for px in glyph_clip.x..glyph_clip.right() {
+                let gx_fp = gx_q12 >> 8;
+                gx_q12 += step_x_q12;
+                let cov = font_bitmap::sample_16x16_bilinear(rows, gx_fp, gy_fp);
+                if cov > 0 {
+                    let idx = row_offset + ((px - origin_x) as usize);
+                    if let Some(dst) = target.get_mut(idx) {
+                        *dst = dst.blend(color, cov);
+                    }
+                }
+            }
+        }
+    }
+}
