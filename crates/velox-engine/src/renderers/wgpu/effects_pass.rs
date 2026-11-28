@@ -94,6 +94,13 @@ pub(crate) enum GpuPassStep {
         prim_start: u32,
         prim_end: u32,
     },
+    /// 将全局 UI `SlugTextEngine` 实例区间 `slug_start..slug_end` 渲染至 `target_idx` 离屏纹理（严格保持 Z-order）。
+    DrawSlugBatch {
+        target_idx: usize,
+        clear: Option<wgpu::Color>,
+        slug_start: u32,
+        slug_end: u32,
+    },
     /// 在两张离屏池纹理之间拷贝局部矩形（用于安全获取 `dst_tex` 背景快照，规避读写冲突）。
     CopyRect {
         src_idx: usize,
@@ -404,18 +411,18 @@ impl GpuEffectsEngine {
         };
         let step_offset = (blur_px / ((1u32 << levels) as f32) * 1.15).clamp(0.5, 4.0);
 
-        let mut chain: Vec<(usize, u32, u32)> = Vec::with_capacity(levels + 1);
-        chain.push((src_idx, active_w, active_h));
-
-        // 1. Downsample 金字塔
+        // 1. Downsample 金字塔：每下采样一级生成 `dst_idx` 后立即释放前一级中间纹理，
+        //    整个金字塔最多仅并发占用 2 张乒乓小纹理，避免同时占住全部中间级导致离屏池膨胀。
+        let mut dims: Vec<(u32, u32)> = Vec::with_capacity(levels + 1);
+        dims.push((active_w, active_h));
+        let mut cur_idx = src_idx;
         let mut cur_w = active_w;
         let mut cur_h = active_h;
         for _ in 0..levels {
             let next_w = (cur_w / 2).max(1);
             let next_h = (cur_h / 2).max(1);
             let dst_idx = self.pool.acquire(device, next_w, next_h);
-            let (prev_idx, pw, ph) = *chain.last().unwrap();
-            let src_tex_sz = (self.pool.get(prev_idx).width, self.pool.get(prev_idx).height);
+            let src_tex_sz = (self.pool.get(cur_idx).width, self.pool.get(cur_idx).height);
             let dst_tex_sz = (self.pool.get(dst_idx).width, self.pool.get(dst_idx).height);
 
             let mut u = EffectUniform::default();
@@ -426,7 +433,7 @@ impl GpuEffectsEngine {
                 src_tex_sz.1 as f32,
             ];
             u.dst_rect = [0.0, 0.0, next_w as f32, next_h as f32];
-            u.src_rect = [0.0, 0.0, pw as f32, ph as f32];
+            u.src_rect = [0.0, 0.0, cur_w as f32, cur_h as f32];
             u.params = [1.0, 0.0, EFFECT_KIND_KAWASE_DOWN, step_offset];
             u.flags[3] = if is_srgb { 1.0 } else { 0.0 };
             let slot = self.push_slot(u);
@@ -434,23 +441,26 @@ impl GpuEffectsEngine {
                 dst_idx,
                 clear_dst: false,
                 dont_care_scissor: Some([0, 0, next_w, next_h]),
-                src_idx: prev_idx,
-                dst_snap_idx: prev_idx,
+                src_idx: cur_idx,
+                dst_snap_idx: cur_idx,
                 mask_path: None,
                 effect_slot: slot,
                 use_hw_blend: false,
             });
-            chain.push((dst_idx, next_w, next_h));
+            if cur_idx != src_idx {
+                self.pool.release(cur_idx);
+            }
+            cur_idx = dst_idx;
             cur_w = next_w;
             cur_h = next_h;
+            dims.push((cur_w, cur_h));
         }
 
-        // 2. Upsample 金字塔（回升至原始 active_w × active_h）
-        let mut cur_idx = chain.last().unwrap().0;
-        let mut cw = chain.last().unwrap().1;
-        let mut ch = chain.last().unwrap().2;
+        // 2. Upsample 金字塔（回升至原始 active_w × active_h，每级完成后立即释放上一级小纹理）
+        let mut cw = cur_w;
+        let mut ch = cur_h;
         for lvl in (0..levels).rev() {
-            let (_, target_w, target_h) = chain[lvl];
+            let (target_w, target_h) = dims[lvl];
             let out_idx = self.pool.acquire(device, target_w, target_h);
             let src_tex_sz = (self.pool.get(cur_idx).width, self.pool.get(cur_idx).height);
             let dst_tex_sz = (self.pool.get(out_idx).width, self.pool.get(out_idx).height);
@@ -485,13 +495,6 @@ impl GpuEffectsEngine {
             cw = target_w;
             ch = target_h;
         }
-
-        // 释放中间降采样级纹理（跳过 lvl 0 原输入和最后已释放的顶层）
-        for &(idx, _, _) in chain.iter().skip(1) {
-            if idx != cur_idx && idx != src_idx {
-                self.pool.release(idx);
-            }
-        }
         cur_idx
     }
 
@@ -511,6 +514,7 @@ impl GpuEffectsEngine {
         >,
         ops: &[crate::motion::DrawOp<'_>],
         canvas_engine: &mut Option<super::canvas_pipeline::CanvasGpuEngine>,
+        ui_slug_engine: Option<&super::slug_glyph::SlugTextEngine>,
         pipeline_cache: Option<&wgpu::PipelineCache>,
         target_format: wgpu::TextureFormat,
         target_view: &wgpu::TextureView,
@@ -577,6 +581,38 @@ impl GpuEffectsEngine {
                         rpass.set_pipeline(main_pipeline);
                         rpass.set_bind_group(0, main_bind_group, &[*viewport_slot * 256]);
                         rpass.draw(0..6, *prim_start..*prim_end);
+                    }
+                }
+
+                GpuPassStep::DrawSlugBatch {
+                    target_idx,
+                    clear,
+                    slug_start,
+                    slug_end,
+                } => {
+                    let view = &self.pool.get(*target_idx).view;
+                    let load = match *clear {
+                        Some(c) => wgpu::LoadOp::Clear(c),
+                        None => wgpu::LoadOp::Load,
+                    };
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("velox_layer_slug_batch"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                        multiview_mask: None,
+                    });
+                    if let Some(slug) = ui_slug_engine {
+                        slug.draw_range(&mut rpass, *slug_start, *slug_end);
                     }
                 }
 

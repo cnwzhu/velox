@@ -46,14 +46,14 @@ pub(crate) struct CachedPathMask {
 
 const MAX_POOLED_TARGETS: usize = 32;
 const MAX_CACHED_MASKS: usize = 64;
-/// 默认空闲离屏纹理池显存预算（32 MiB：4K 单张约 31.9 MiB，多张特效页切回普通页时立即压回预算内）。
-pub(crate) const DEFAULT_IDLE_TARGET_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+/// 默认空闲离屏纹理池显存预算（16 MiB：兼顾热点毛玻璃/离屏复用与低显存占用，多特效页切换时立即压回预算内）。
+pub(crate) const DEFAULT_IDLE_TARGET_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 /// 默认空闲离屏纹理最大滞留帧数（切回普通页约 1 秒 @60fps 后自动全部释放）。
 pub(crate) const DEFAULT_IDLE_TARGET_MAX_AGE_FRAMES: u64 = 60;
 /// 默认 SVG Path `R8Unorm` 遮罩缓存字节预算（8 MiB）。
 pub(crate) const DEFAULT_MASK_BUDGET_BYTES: usize = 8 * 1024 * 1024;
-/// 默认跨帧毛玻璃模糊小纹理缓存字节预算（16 MiB）。
-pub(crate) const DEFAULT_BACKDROP_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
+/// 默认跨帧毛玻璃模糊小纹理缓存字节预算（8 MiB）。
+pub(crate) const DEFAULT_BACKDROP_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 
 #[inline]
 fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> usize {

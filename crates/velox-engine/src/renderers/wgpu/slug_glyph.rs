@@ -456,6 +456,59 @@ impl SlugTextEngine {
         self.glyphs.len()
     }
 
+    /// 返回当前帧已累计的 Slug 字形实例数量（用于 Z-order 分段交错绘制）。
+    #[inline]
+    pub(crate) fn instance_count(&self) -> u32 {
+        self.instances.len() as u32
+    }
+
+    /// 为常规 UI `text()` 提交单个 Slug 曲线字形实例（位于物理坐标 `(pen_x, baseline_y)`、字号 `font_px`）。
+    /// 若该字符无矢量轮廓（如空白或彩色 Emoji），返回 `false` 供上层自动回退至 `GlyphAtlas`。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn push_ui_glyph(
+        &mut self,
+        ch: char,
+        pen_x: f32,
+        baseline_y: f32,
+        font_px: f32,
+        clip_rect: [f32; 4],
+        color: [f32; 4],
+        target_w: u32,
+        target_h: u32,
+        is_srgb: bool,
+    ) -> bool {
+        let Some(g) = self.ensure_glyph(ch) else {
+            return false;
+        };
+        if !g.has_outline {
+            return false;
+        }
+        let srgb_f = if is_srgb { 1.0 } else { 0.0 };
+        self.instances.push(SlugGlyphInstance {
+            xform_row0: [font_px, 0.0, pen_x, baseline_y],
+            xform_row1: [0.0, -font_px, 1.5, srgb_f],
+            em_bounds: g.em_bounds,
+            clip_rect,
+            color,
+            band_info: [
+                g.h_band_offset,
+                g.num_h_bands,
+                g.v_band_offset,
+                g.num_v_bands,
+            ],
+            viewport_info: [target_w.max(1) as f32, target_h.max(1) as f32, font_px, 0.0],
+        });
+        true
+    }
+
+    /// 帧编码结束后将本帧全部 UI Slug 字形与新增曲线增量同步至 GPU 缓冲，并更新统计计数。
+    pub(crate) fn sync_and_finalize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        self.last_drawn_glyphs = self.instances.len();
+        if !self.instances.is_empty() {
+            self.sync_gpu_buffers(device, queue);
+        }
+    }
+
     /// 返回最近一帧由 Slug GPU 管线绘制的字形实例总数。
     #[inline]
     pub(crate) fn last_drawn_glyphs(&self) -> usize {

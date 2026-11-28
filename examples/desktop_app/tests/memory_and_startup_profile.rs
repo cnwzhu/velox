@@ -91,6 +91,27 @@ fn os_process_memory() -> (usize, usize) {
             return (pmc.working_set_size, pmc.private_usage);
         }
     }
+    #[cfg(target_os = "linux")]
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        let mut rss_kb = 0usize;
+        let mut data_kb = 0usize;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                rss_kb = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0);
+            } else if let Some(rest) = line.strip_prefix("VmData:") {
+                data_kb = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0);
+            }
+        }
+        return (rss_kb.saturating_mul(1024), data_kb.saturating_mul(1024));
+    }
     (0, 0)
 }
 
@@ -564,5 +585,124 @@ fn profile_p0_p1_p2_p3_end_to_end() {
                 let _ = write_uncompressed_png(path_str, 800, 400, &xrgb);
             }
         }
+    }
+
+    println!("\n==================== Part 5: 全局 UI text() 分层自适应 Slug 2.0 路由验证 ====================");
+    {
+        struct HybridTextView;
+        impl View for HybridTextView {
+            fn render<'a>(&mut self, cx: &'a mut Scope<Self>) -> Element<'a> {
+                div()
+                    .w(800)
+                    .h(320)
+                    .p(24)
+                    .gap(16)
+                    .bg(Color::rgb(14, 18, 28))
+                    .flex_col()
+                    .child(
+                        cx,
+                        text("Velox Hybrid Slug 2.0 标题渲染")
+                            .size(40)
+                            .color(Color::rgb(248, 250, 252)),
+                    )
+                    .child(
+                        cx,
+                        text("大字号 >= 28px 自动零图集矢量直出 123456")
+                            .size(32)
+                            .color(Color::rgb(96, 165, 250)),
+                    )
+                    .child(
+                        cx,
+                        text("Small 14px UI body text stays crisp on 512x512 GlyphAtlas.")
+                            .size(14)
+                            .color(Color::rgb(203, 213, 225)),
+                    )
+                    .into_element(cx)
+            }
+        }
+
+        let mut engine = VeloxEngine::new(800, 320);
+        let _ = engine.mount_root(HybridTextView);
+        let dirty: Vec<Region> = engine.step_frame_dt(16).to_vec();
+
+        let mut off = WgpuOffscreenRenderer::new_lazy(800, 320);
+        assert!(off.ensure_gpu());
+        assert_eq!(off.slug_text_threshold_px(), 28.0);
+        let mut fb = vec![Rgba8888(0); 800 * 320];
+
+        // 1. 默认分层模式（阈值 28px）：40px / 32px 标题走 Slug 2.0，14px 正文走 GlyphAtlas
+        let _ = off.render_draw_ops_rgba8888_into(
+            engine.cached_draw_ops(),
+            engine.viewport_region(),
+            1,
+            &dirty,
+            &mut fb,
+        );
+        let st_hybrid = off.gpu_memory_stats().unwrap();
+        let lit_hybrid = fb
+            .iter()
+            .filter(|px| {
+                let c = px.to_color();
+                c.r() > 120 || c.b() > 160
+            })
+            .count();
+
+        // 2. 全量 Slug A/B 模式（阈值 0.0px）：所有常规 UI text() 均走 Slug 2.0
+        off.set_slug_text_threshold_px(0.0);
+        let fonts_before_all = font_memory_stats();
+        let _ = off.render_draw_ops_rgba8888_into(
+            engine.cached_draw_ops(),
+            engine.viewport_region(),
+            1,
+            &dirty,
+            &mut fb,
+        );
+        let fonts_after_all = font_memory_stats();
+        let st_all_slug = off.gpu_memory_stats().unwrap();
+        let lit_all_slug = fb
+            .iter()
+            .filter(|px| {
+                let c = px.to_color();
+                c.r() > 120 || c.b() > 160
+            })
+            .count();
+
+        println!(
+            "  [默认分层 >=28px] slug_drawn={}, glyph_atlas_entries={}, slug_gpu={:.1} KiB, ink_pixels={}",
+            st_hybrid.slug_last_drawn_glyphs,
+            st_hybrid.glyph_atlas_entries,
+            kb(st_hybrid.slug_gpu_bytes),
+            lit_hybrid,
+        );
+        println!(
+            "  [全量 Slug >=0px] slug_drawn={}, glyph_atlas_entries={}, slug_gpu={:.1} KiB, ink_pixels={}, CPU GlyphCache增量=+{}",
+            st_all_slug.slug_last_drawn_glyphs,
+            st_all_slug.glyph_atlas_entries,
+            kb(st_all_slug.slug_gpu_bytes),
+            lit_all_slug,
+            fonts_after_all
+                .glyph_cache_entries
+                .saturating_sub(fonts_before_all.glyph_cache_entries),
+        );
+
+        assert!(
+            st_hybrid.slug_last_drawn_glyphs >= 30,
+            "32px/40px headings must route to Slug 2.0, got {}",
+            st_hybrid.slug_last_drawn_glyphs
+        );
+        assert!(
+            st_hybrid.glyph_atlas_entries >= 10,
+            "14px body text must stay on GlyphAtlas, got {}",
+            st_hybrid.glyph_atlas_entries
+        );
+        assert!(
+            st_all_slug.slug_last_drawn_glyphs > st_hybrid.slug_last_drawn_glyphs + 20,
+            "threshold=0.0 must route small body text to Slug as well"
+        );
+        assert_eq!(
+            fonts_after_all.glyph_cache_entries, fonts_before_all.glyph_cache_entries,
+            "threshold=0.0 full Slug mode must add ZERO CPU bitmap GlyphCache entries"
+        );
+        assert!(lit_hybrid > 1000 && lit_all_slug > 1000);
     }
 }

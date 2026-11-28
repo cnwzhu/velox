@@ -418,6 +418,27 @@ impl WgpuOffscreenRenderer {
         self.gpu.as_ref().map(|g| g.renderer.memory_stats())
     }
 
+    /// 配置全局 UI `text()` 自动路由至 Slug 2.0 矢量字形的物理字号阈值（默认 `28.0 px`）。
+    ///
+    /// - 默认 `28.0`：大字号标题（`>= 28px`）走零图集 Slug 曲线渲染，小字号正文走 `GlyphAtlas`；
+    /// - 设为 `0.0`：全部常规 UI `text()` 走 Slug 矢量渲染（可用于 A/B 清晰度与性能对比）；
+    /// - 设为 `f32::INFINITY`：全部回退至位图图集。
+    #[inline]
+    pub fn set_slug_text_threshold_px(&mut self, threshold_px: f32) {
+        if let Some(g) = &mut self.gpu {
+            g.renderer.set_slug_text_threshold_px(threshold_px);
+        }
+    }
+
+    /// 查询当前全局 UI `text()` 路由至 Slug 2.0 矢量字形的物理字号阈值（像素）。
+    #[inline]
+    pub fn slug_text_threshold_px(&self) -> f32 {
+        self.gpu
+            .as_ref()
+            .map(|g| g.renderer.slug_text_threshold_px())
+            .unwrap_or(super::pipeline::DEFAULT_SLUG_TEXT_THRESHOLD_PX)
+    }
+
     /// 显式启动后台子管线（Effects / Canvas）异步预热线程。
     #[inline]
     pub fn spawn_background_pipeline_warmup(&mut self) {

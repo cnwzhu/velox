@@ -246,6 +246,12 @@ impl WgpuMemoryStats {
     }
 }
 
+/// 默认全局 UI `text()` 自动切换至 Slug 2.0 GPU 曲线字形的物理像素字号阈值。
+///
+/// 小于该阈值的常规小字号 UI 正文继续走 `512×512` `GlyphAtlas`（兼顾片元吞吐与像素网格锐度）；
+/// 大于等于该阈值的大字号标题与缩放文本自动走零图集 Slug 2.0 曲线管线，避免撑爆字形图集与触发重光栅化。
+pub const DEFAULT_SLUG_TEXT_THRESHOLD_PX: f32 = 28.0;
+
 /// 自研轻量级 `wgpu` 2D SDF 渲染管线核心（绑定任意目标 `TextureView` 即可渲染）。
 pub struct WgpuRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -263,6 +269,12 @@ pub struct WgpuRenderer {
     ramp_atlas: GradientRampAtlas,
     effects: Option<GpuEffectsEngine>,
     canvas_engine: Option<super::canvas_pipeline::CanvasGpuEngine>,
+    /// 面向全局 UI `text()` 的懒初始化 Slug 2.0 GPU 曲线字形子引擎（默认物理字号 `>= 28px` 启用）。
+    ui_slug_engine: Option<super::slug_glyph::SlugTextEngine>,
+    /// 全局 UI `text()` 路由至 Slug 2.0 的物理字号阈值（像素）。
+    slug_text_threshold_px: f32,
+    /// 单 Pass 路径的 Z-order 交错分段：`(prim_start, prim_end, slug_start, slug_end)`（无 Slug 文本时为空，零开销）。
+    ui_slug_segments: Vec<(u32, u32, u32, u32)>,
     pipeline_cache: Option<Arc<super::pso_cache::DiskPipelineCache>>,
     bg_effects_rx: Option<std::sync::mpsc::Receiver<GpuEffectsEngine>>,
     bg_canvas_rx: Option<std::sync::mpsc::Receiver<super::canvas_pipeline::CanvasGpuEngine>>,
@@ -479,6 +491,9 @@ impl WgpuRenderer {
             ramp_atlas,
             effects: None,
             canvas_engine: None,
+            ui_slug_engine: None,
+            slug_text_threshold_px: DEFAULT_SLUG_TEXT_THRESHOLD_PX,
+            ui_slug_segments: Vec::new(),
             pipeline_cache,
             bg_effects_rx: None,
             bg_canvas_rx: None,
@@ -838,9 +853,25 @@ impl WgpuRenderer {
             .unwrap_or((0, 0))
     }
 
-    /// 返回当前 `WgpuRenderer` 各子池（字形/精灵/渐变图集、实例缓冲、离屏图层池、Canvas 场景缓冲）完整内存快照。
+    /// 配置全局 UI `text()` 自动路由至 Slug 2.0 矢量字形的物理像素字号阈值（默认 `28.0 px`）。
+    ///
+    /// - 默认 `28.0`：大字号标题（`>= 28px`）走零图集 Slug 2.0 曲线管线，小字号正文保留 `GlyphAtlas`；
+    /// - 设为 `0.0`：全部常规 UI `text()` 走 Slug 2.0 渲染（便于全量矢量 A/B 对比）；
+    /// - 设为 `f32::INFINITY`：全部回退至位图图集。
+    #[inline]
+    pub fn set_slug_text_threshold_px(&mut self, threshold_px: f32) {
+        self.slug_text_threshold_px = threshold_px.max(0.0);
+    }
+
+    /// 查询当前全局 UI `text()` 路由至 Slug 2.0 矢量字形的物理字号阈值（像素）。
+    #[inline]
+    pub const fn slug_text_threshold_px(&self) -> f32 {
+        self.slug_text_threshold_px
+    }
+
+    /// 返回当前 `WgpuRenderer` 各子池（字形/精灵/渐变图集、实例缓冲、离屏图层池、Canvas 场景缓冲与 Slug 曲线池）完整内存快照。
     pub fn memory_stats(&self) -> WgpuMemoryStats {
-        let (canvas_scenes, canvas_gpu_bytes, slug_cached_glyphs, slug_gpu_bytes, slug_last_drawn_glyphs) =
+        let (canvas_scenes, canvas_gpu_bytes, c_slug_glyphs, c_slug_bytes, c_slug_drawn) =
             self.canvas_engine
                 .as_ref()
                 .map(|c| {
@@ -848,6 +879,14 @@ impl WgpuRenderer {
                     (c.scene_count(), c.total_gpu_bytes(), sg, sb, sd)
                 })
                 .unwrap_or((0, 0, 0, 0, 0));
+        let (u_slug_glyphs, u_slug_bytes, u_slug_drawn) = self
+            .ui_slug_engine
+            .as_ref()
+            .map(|s| (s.cached_glyph_count(), s.gpu_bytes(), s.last_drawn_glyphs()))
+            .unwrap_or((0, 0, 0));
+        let slug_cached_glyphs = c_slug_glyphs.saturating_add(u_slug_glyphs);
+        let slug_gpu_bytes = c_slug_bytes.saturating_add(u_slug_bytes);
+        let slug_last_drawn_glyphs = c_slug_drawn.saturating_add(u_slug_drawn);
         let (backdrop_blur_cache_hits, backdrop_blur_cache_misses) = self.backdrop_blur_cache_stats();
         WgpuMemoryStats {
             glyph_atlas_size: self.glyph_atlas.width,
@@ -1128,10 +1167,12 @@ impl WgpuRenderer {
         h
     }
 
-    /// 将单条非图层 `DrawOp` 编码追加到 `self.primitives`，并将所有屏幕坐标减去 `(origin_x, origin_y)`。
+    /// 将单条非图层 `DrawOp` 编码追加到 `self.primitives`（或大字号文本自动路由至 `ui_slug_engine`），
+    /// 并将所有屏幕坐标减去 `(origin_x, origin_y)`。
     #[allow(clippy::too_many_arguments)]
     fn encode_single_op(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         op: &DrawOp<'_>,
         eff_clip: Region,
@@ -1140,6 +1181,8 @@ impl WgpuRenderer {
         use_ttf: bool,
         origin_x: f32,
         origin_y: f32,
+        target_w: u32,
+        target_h: u32,
     ) -> Result<(), AtlasGrowNeed> {
         let mut sb_f = snap_bounds(op.bounds, sf);
         if op.subpx_q4 != 0 {
@@ -1275,8 +1318,11 @@ impl WgpuRenderer {
                     adj_sc.right() as f32 - origin_x,
                     adj_sc.bottom() as f32 - origin_y,
                 ];
+                let subpx_frac_x = sb_f[0] - (sb_f[0] as i16 as f32);
+                let subpx_frac_y = sb_f[1] - (sb_f[1] as i16 as f32);
                 let prim_before = self.primitives.len();
                 if !self.encode_text_run(
+                    device,
                     queue,
                     adj_bounds,
                     adj_sc,
@@ -1288,6 +1334,10 @@ impl WgpuRenderer {
                     fs_q4,
                     adj_flags,
                     use_ttf,
+                    subpx_frac_x - origin_x,
+                    subpx_frac_y - origin_y,
+                    target_w,
+                    target_h,
                 ) {
                     return Err(AtlasGrowNeed {
                         glyph_full: true,
@@ -1692,21 +1742,30 @@ impl WgpuRenderer {
         Ok(())
     }
 
-    /// 单 Pass 无图层快路径：将 `DrawOp` 编码为 `self.primitives` 并按需上传字形、精灵与渐变图集。
+    /// 单 Pass 无图层快路径：将 `DrawOp` 编码为 `self.primitives`（大字号文本自动路由至 Slug 2.0 并记录 Z-order 分段），
+    /// 并按需上传字形、精灵与渐变图集。
     fn try_encode_ops(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         ops: &[DrawOp<'_>],
         viewport: Region,
         scale_factor: f32,
+        phys_w: u32,
+        phys_h: u32,
     ) -> Result<(), AtlasGrowNeed> {
         self.primitives.clear();
+        self.ui_slug_segments.clear();
+        if let Some(slug) = &mut self.ui_slug_engine {
+            slug.begin_frame();
+        }
         if viewport.is_empty() {
             return Ok(());
         }
 
         let sf = scale_factor.clamp(0.5, 4.0);
         let use_ttf = crate::display::ttf_atlas::has_system_font();
+        let mut batch_prim_start = 0u32;
 
         for (idx, op) in ops.iter().enumerate() {
             let raw_clip = match op.payload {
@@ -1720,7 +1779,35 @@ impl WgpuRenderer {
             if eff_clip.is_empty() {
                 continue;
             }
-            self.encode_single_op(queue, op, eff_clip, viewport, sf, use_ttf, 0.0, 0.0)?;
+            let prim_before = self.primitives.len() as u32;
+            let slug_before = self
+                .ui_slug_engine
+                .as_ref()
+                .map(|s| s.instance_count())
+                .unwrap_or(0);
+            self.encode_single_op(
+                device, queue, op, eff_clip, viewport, sf, use_ttf, 0.0, 0.0, phys_w, phys_h,
+            )?;
+            let slug_after = self
+                .ui_slug_engine
+                .as_ref()
+                .map(|s| s.instance_count())
+                .unwrap_or(0);
+            if slug_after > slug_before {
+                self.ui_slug_segments.push((
+                    batch_prim_start,
+                    prim_before,
+                    slug_before,
+                    slug_after,
+                ));
+                batch_prim_start = prim_before;
+            }
+        }
+        if !self.ui_slug_segments.is_empty() {
+            let final_prim = self.primitives.len() as u32;
+            if final_prim > batch_prim_start {
+                self.ui_slug_segments.push((batch_prim_start, final_prim, 0, 0));
+            }
         }
         Ok(())
     }
@@ -1898,6 +1985,7 @@ impl WgpuRenderer {
     #[allow(clippy::too_many_arguments)]
     fn encode_text_run(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         bounds: Region,
         clip: Region,
@@ -1909,6 +1997,10 @@ impl WgpuRenderer {
         font_size_q4: u16,
         text_flags: u8,
         use_ttf: bool,
+        slug_offset_x: f32,
+        slug_offset_y: f32,
+        target_w: u32,
+        target_h: u32,
     ) -> bool {
         let layout = self.get_or_build_text_layout(
             text,
@@ -1925,6 +2017,86 @@ impl WgpuRenderer {
             .y
             .saturating_add(bounds.h.saturating_sub(layout.total_h).max(0) >> 1);
         let col_f32 = color_to_f32(color);
+        let render_fs = (font_size_q4.clamp(32, 1020) as f32) * 0.25;
+        let route_to_slug = use_ttf
+            && clip_radius_px <= 0.0
+            && self.slug_text_threshold_px.is_finite()
+            && render_fs >= self.slug_text_threshold_px;
+
+        if route_to_slug {
+            if self.ui_slug_engine.is_none() {
+                let raw_cache = self.pipeline_cache.as_deref().map(|c| c.wgpu_cache());
+                self.ui_slug_engine = Some(super::slug_glyph::SlugTextEngine::new(
+                    device,
+                    self.target_format,
+                    raw_cache,
+                ));
+                if let Some(c) = &self.pipeline_cache {
+                    c.persist();
+                }
+            }
+            let is_srgb = self.target_is_srgb;
+            let mut slug = self.ui_slug_engine.take().unwrap();
+            let mut ok = true;
+            for g in &layout.glyphs {
+                let pen_x = (bounds.x.saturating_add(g.rel_x) as f32) + slug_offset_x;
+                let baseline_y = (top_y.saturating_add(g.rel_y) as f32) + slug_offset_y;
+                if !slug.push_ui_glyph(
+                    g.ch,
+                    pen_x,
+                    baseline_y,
+                    render_fs,
+                    clip_f32,
+                    col_f32,
+                    target_w,
+                    target_h,
+                    is_srgb,
+                ) {
+                    // 无 TTF 矢量轮廓字符（例如彩色 Emoji）自动回退单字到位图字形图集，绝不丢字
+                    let Some(entry) = self
+                        .glyph_atlas
+                        .get_or_insert(queue, g.ch, font_size_q4, use_ttf)
+                    else {
+                        ok = false;
+                        break;
+                    };
+                    if entry.width > 0 && entry.height > 0 {
+                        let gx = bounds
+                            .x
+                            .saturating_add(g.rel_x)
+                            .saturating_add(entry.xmin);
+                        let gy = top_y
+                            .saturating_add(g.rel_y)
+                            .saturating_sub(entry.height)
+                            .saturating_sub(entry.ymin);
+                        let greg = Region::new(gx, gy, entry.width, entry.height);
+                        if !clip.intersect(greg).is_empty() {
+                            self.primitives.push(GpuPrimitive {
+                                bounds: [
+                                    gx as f32,
+                                    gy as f32,
+                                    entry.width as f32,
+                                    entry.height as f32,
+                                ],
+                                clip: clip_f32,
+                                uv: entry.uv,
+                                color0: col_f32,
+                                color1: [0.0; 4],
+                                border_color: [0.0; 4],
+                                params: [0.0, 0.0, KIND_GLYPH, 0.0],
+                                extra: [clip_radius_px, 0.0, 0.0, 0.0],
+                                radii: [0.0; 4],
+                                grad_a: [0.0; 4],
+                                grad_b: [0.0; 4],
+                                xform: IDENTITY_XFORM,
+                            });
+                        }
+                    }
+                }
+            }
+            self.ui_slug_engine = Some(slug);
+            return ok;
+        }
 
         for g in &layout.glyphs {
             let Some(entry) = self
@@ -2077,7 +2249,15 @@ impl WgpuRenderer {
 
         let mut bind_group_dirty = false;
         for _attempt in 0..4 {
-            match self.try_encode_ops(queue, ops, viewport, scale_factor) {
+            match self.try_encode_ops(
+                device,
+                queue,
+                ops,
+                viewport,
+                scale_factor,
+                phys_width.max(1),
+                phys_height.max(1),
+            ) {
                 Ok(()) => break,
                 Err(need) => {
                     let (dirty, can_retry) = self.handle_atlas_grow(device, need);
@@ -2089,6 +2269,9 @@ impl WgpuRenderer {
                     }
                 }
             }
+        }
+        if let Some(slug) = &mut self.ui_slug_engine {
+            slug.sync_and_finalize(device, queue);
         }
 
         if self.primitives.len() > self.instance_capacity {
@@ -2132,10 +2315,25 @@ impl WgpuRenderer {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            if !self.primitives.is_empty() {
-                rpass.set_pipeline(&self.pipeline);
-                rpass.set_bind_group(0, &self.bind_group, &[0]);
-                rpass.draw(0..6, 0..(self.primitives.len() as u32));
+            if self.ui_slug_segments.is_empty() {
+                if !self.primitives.is_empty() {
+                    rpass.set_pipeline(&self.pipeline);
+                    rpass.set_bind_group(0, &self.bind_group, &[0]);
+                    rpass.draw(0..6, 0..(self.primitives.len() as u32));
+                }
+            } else {
+                for &(p_start, p_end, s_start, s_end) in &self.ui_slug_segments {
+                    if p_end > p_start {
+                        rpass.set_pipeline(&self.pipeline);
+                        rpass.set_bind_group(0, &self.bind_group, &[0]);
+                        rpass.draw(0..6, p_start..p_end);
+                    }
+                    if s_end > s_start {
+                        if let Some(slug) = &self.ui_slug_engine {
+                            slug.draw_range(&mut rpass, s_start, s_end);
+                        }
+                    }
+                }
             }
         }
         queue.submit([encoder.finish()]);
@@ -2217,7 +2415,7 @@ impl WgpuRenderer {
 
         let mut bind_group_dirty = false;
         for _attempt in 0..4 {
-            match self.try_encode_ops(queue, ops, viewport, sf) {
+            match self.try_encode_ops(device, queue, ops, viewport, sf, pw, ph) {
                 Ok(()) => break,
                 Err(need) => {
                     let (dirty, can_retry) = self.handle_atlas_grow(device, need);
@@ -2229,6 +2427,9 @@ impl WgpuRenderer {
                     }
                 }
             }
+        }
+        if let Some(slug) = &mut self.ui_slug_engine {
+            slug.sync_and_finalize(device, queue);
         }
         if self.primitives.len() > self.instance_capacity {
             self.instance_capacity = self.primitives.len().next_power_of_two();
@@ -2271,9 +2472,7 @@ impl WgpuRenderer {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            if !self.primitives.is_empty() {
-                rpass.set_pipeline(&self.pipeline);
-                rpass.set_bind_group(0, &self.bind_group, &[0]);
+            if !self.primitives.is_empty() || !self.ui_slug_segments.is_empty() {
                 for &d in dirty_regions {
                     let pd = snap_clip_region_scaled(d.intersect(viewport), sf);
                     let sx = (pd.x.max(0) as u32).min(pw);
@@ -2282,7 +2481,24 @@ impl WgpuRenderer {
                     let sh = (pd.h.max(0) as u32).min(ph.saturating_sub(sy));
                     if sw > 0 && sh > 0 {
                         rpass.set_scissor_rect(sx, sy, sw, sh);
-                        rpass.draw(0..6, 0..(self.primitives.len() as u32));
+                        if self.ui_slug_segments.is_empty() {
+                            rpass.set_pipeline(&self.pipeline);
+                            rpass.set_bind_group(0, &self.bind_group, &[0]);
+                            rpass.draw(0..6, 0..(self.primitives.len() as u32));
+                        } else {
+                            for &(p_start, p_end, s_start, s_end) in &self.ui_slug_segments {
+                                if p_end > p_start {
+                                    rpass.set_pipeline(&self.pipeline);
+                                    rpass.set_bind_group(0, &self.bind_group, &[0]);
+                                    rpass.draw(0..6, p_start..p_end);
+                                }
+                                if s_end > s_start {
+                                    if let Some(slug) = &self.ui_slug_engine {
+                                        slug.draw_range(&mut rpass, s_start, s_end);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2358,6 +2574,10 @@ impl WgpuRenderer {
             }
         }
 
+        if let Some(slug) = &mut self.ui_slug_engine {
+            slug.sync_and_finalize(device, queue);
+        }
+
         if self.primitives.len() > self.instance_capacity {
             self.instance_capacity = self.primitives.len().next_power_of_two();
             self.instance_buf = Self::create_instance_buffer(device, self.instance_capacity);
@@ -2394,6 +2614,7 @@ impl WgpuRenderer {
                 &self.external_textures,
                 ops,
                 &mut self.canvas_engine,
+                self.ui_slug_engine.as_ref(),
                 raw_cache,
                 self.target_format,
                 target_view,
@@ -2446,6 +2667,9 @@ impl WgpuRenderer {
 
         self.primitives.clear();
         self.viewport_slots.clear();
+        if let Some(slug) = &mut self.ui_slug_engine {
+            slug.begin_frame();
+        }
         let mut fx = self.effects.take().expect("effects engine initialized");
         fx.begin_frame();
 
@@ -3060,6 +3284,7 @@ impl WgpuRenderer {
                         };
                         let pstart = self.primitives.len() as u32;
                         self.encode_single_op(
+                            device,
                             queue,
                             &tmp_op,
                             op.clip,
@@ -3068,6 +3293,8 @@ impl WgpuRenderer {
                             use_ttf,
                             buf_rect.x as f32,
                             buf_rect.y as f32,
+                            tmp_sz.0,
+                            tmp_sz.1,
                         )?;
                         let pend = self.primitives.len() as u32;
                         fx.steps.push(GpuPassStep::DrawBatch {
@@ -3242,12 +3469,13 @@ impl WgpuRenderer {
                                 payload: DrawPayload::StyledQuad(&fallback_sq),
                                 ..*op
                             };
-                            let (ox, oy) = {
+                            let (ox, oy, tw, th) = {
                                 let top = stack.last().unwrap();
-                                (top.origin_x, top.origin_y)
+                                let t = fx.pool.get(top.tex_idx);
+                                (top.origin_x, top.origin_y, t.width, t.height)
                             };
                             self.encode_single_op(
-                                queue, &tmp_op, raw_clip, viewport, sf, use_ttf, ox, oy,
+                                device, queue, &tmp_op, raw_clip, viewport, sf, use_ttf, ox, oy, tw, th,
                             )?;
                         }
                     }
@@ -3317,11 +3545,41 @@ impl WgpuRenderer {
                         if raw_clip.is_empty() {
                             continue;
                         }
-                        let (ox, oy) = {
+                        let (ox, oy, tw, th) = {
                             let top = stack.last().unwrap();
-                            (top.origin_x, top.origin_y)
+                            let t = fx.pool.get(top.tex_idx);
+                            (top.origin_x, top.origin_y, t.width, t.height)
                         };
-                        self.encode_single_op(queue, op, raw_clip, viewport, sf, use_ttf, ox, oy)?;
+                        let prim_before = self.primitives.len() as u32;
+                        let slug_before = self
+                            .ui_slug_engine
+                            .as_ref()
+                            .map(|s| s.instance_count())
+                            .unwrap_or(0);
+                        self.encode_single_op(
+                            device, queue, op, raw_clip, viewport, sf, use_ttf, ox, oy, tw, th,
+                        )?;
+                        let slug_after = self
+                            .ui_slug_engine
+                            .as_ref()
+                            .map(|s| s.instance_count())
+                            .unwrap_or(0);
+                        if slug_after > slug_before {
+                            flush_top(&mut stack, &mut fx, prim_before);
+                            let top = stack.last_mut().unwrap();
+                            let clear = if !top.cleared {
+                                top.cleared = true;
+                                Some(top.clear_col)
+                            } else {
+                                None
+                            };
+                            fx.steps.push(GpuPassStep::DrawSlugBatch {
+                                target_idx: top.tex_idx,
+                                clear,
+                                slug_start: slug_before,
+                                slug_end: slug_after,
+                            });
+                        }
                     }
                 }
             }
@@ -3363,6 +3621,7 @@ impl WgpuRenderer {
     ) {
         enum InterleavedStep {
             UiBatch(u32, u32),
+            UiSlugBatch(u32, u32),
             Canvas {
                 op_idx: usize,
                 bounds_phys: [f32; 4],
@@ -3381,6 +3640,9 @@ impl WgpuRenderer {
         for _attempt in 0..4 {
             self.primitives.clear();
             steps.clear();
+            if let Some(slug) = &mut self.ui_slug_engine {
+                slug.begin_frame();
+            }
             let mut batch_start = 0u32;
             let mut err_need: Option<AtlasGrowNeed> = None;
 
@@ -3440,11 +3702,31 @@ impl WgpuRenderer {
                         err_need = Some(need);
                         break;
                     }
-                } else if let Err(need) = self.encode_single_op(
-                    queue, op, raw_clip, viewport, sf, use_ttf, 0.0, 0.0,
-                ) {
-                    err_need = Some(need);
-                    break;
+                } else {
+                    let prim_before = self.primitives.len() as u32;
+                    let slug_before = self
+                        .ui_slug_engine
+                        .as_ref()
+                        .map(|s| s.instance_count())
+                        .unwrap_or(0);
+                    if let Err(need) = self.encode_single_op(
+                        device, queue, op, raw_clip, viewport, sf, use_ttf, 0.0, 0.0, pw, ph,
+                    ) {
+                        err_need = Some(need);
+                        break;
+                    }
+                    let slug_after = self
+                        .ui_slug_engine
+                        .as_ref()
+                        .map(|s| s.instance_count())
+                        .unwrap_or(0);
+                    if slug_after > slug_before {
+                        if prim_before > batch_start {
+                            steps.push(InterleavedStep::UiBatch(batch_start, prim_before));
+                        }
+                        steps.push(InterleavedStep::UiSlugBatch(slug_before, slug_after));
+                        batch_start = prim_before;
+                    }
                 }
             }
 
@@ -3463,6 +3745,9 @@ impl WgpuRenderer {
                 }
                 break;
             }
+        }
+        if let Some(slug) = &mut self.ui_slug_engine {
+            slug.sync_and_finalize(device, queue);
         }
 
         if self.primitives.len() > self.instance_capacity {
@@ -3533,6 +3818,33 @@ impl WgpuRenderer {
                         rpass.set_pipeline(&self.pipeline);
                         rpass.set_bind_group(0, &self.bind_group, &[0]);
                         rpass.draw(0..6, start..end);
+                    }
+                }
+                InterleavedStep::UiSlugBatch(start, end) => {
+                    let load = if !cleared {
+                        cleared = true;
+                        wgpu::LoadOp::Clear(clear_color)
+                    } else {
+                        wgpu::LoadOp::Load
+                    };
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("velox_canvas_ui_slug_batch"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: target_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                        multiview_mask: None,
+                    });
+                    if let Some(slug) = &self.ui_slug_engine {
+                        slug.draw_range(&mut rpass, start, end);
                     }
                 }
                 InterleavedStep::Canvas {
