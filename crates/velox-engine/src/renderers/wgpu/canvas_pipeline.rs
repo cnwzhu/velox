@@ -98,7 +98,6 @@ pub(crate) struct CanvasGpuEngine {
     idle_budget_bytes: usize,
     idle_max_age_frames: u64,
     last_state_upload_bytes: usize,
-    slug: super::slug_glyph::SlugTextEngine,
 }
 
 // SAFETY: `CanvasGpuEngine` 仅持有 `wgpu` 跨线程安全句柄与独占容器，支持后台预热线程移交至渲染主线程。
@@ -244,8 +243,6 @@ impl CanvasGpuEngine {
             mapped_at_creation: false,
         });
 
-        let slug = super::slug_glyph::SlugTextEngine::new(device, target_format, pipeline_cache);
-
         Self {
             mesh_pipeline,
             inst_pipeline,
@@ -261,7 +258,6 @@ impl CanvasGpuEngine {
             idle_budget_bytes: DEFAULT_CANVAS_IDLE_BUDGET_BYTES,
             idle_max_age_frames: DEFAULT_CANVAS_IDLE_MAX_AGE_FRAMES,
             last_state_upload_bytes: 0,
-            slug,
         }
     }
 
@@ -355,7 +351,6 @@ impl CanvasGpuEngine {
     pub(crate) fn tick_frame_reclaim(&mut self) {
         self.next_uniform_slot = 0;
         self.uniform_staging.clear();
-        self.slug.begin_frame();
         self.frame_index = self.frame_index.saturating_add(1);
         self.reclaim_idle_scenes();
     }
@@ -408,16 +403,6 @@ impl CanvasGpuEngine {
     #[inline]
     pub(crate) fn last_state_upload_bytes(&self) -> usize {
         self.last_state_upload_bytes
-    }
-
-    /// 返回 Slug 曲线字形引擎的统计信息 `(cached_glyphs, gpu_bytes, last_drawn_glyphs)`。
-    #[inline]
-    pub(crate) fn slug_stats(&self) -> (usize, usize, usize) {
-        (
-            self.slug.cached_glyph_count(),
-            self.slug.gpu_bytes(),
-            self.slug.last_drawn_glyphs(),
-        )
     }
 
     #[inline]
@@ -639,6 +624,7 @@ impl CanvasGpuEngine {
         scale_factor: f32,
         is_srgb: bool,
         spec: &SceneCanvasSpec<'_>,
+        slug: &mut super::slug_glyph::SlugTextEngine,
     ) {
         if scissor.is_empty() || spec.opacity == 0 {
             return;
@@ -666,7 +652,7 @@ impl CanvasGpuEngine {
             uniform.palette[i] = color_to_f32(c);
         }
         let dyn_offset = self.alloc_uniform_slot(device, queue, uniform);
-        let (slug_start, slug_end) = self.slug.prepare_canvas_labels(
+        let (slug_start, slug_end) = slug.prepare_canvas_labels(
             device,
             queue,
             spec,
@@ -778,9 +764,9 @@ impl CanvasGpuEngine {
             }
         }
 
-        // 4. Slug (2026 Public Domain) GPU 二次贝塞尔曲线字形标签（同 RenderPass 零位图图集直出）
+        // 4. Slug (2026 Public Domain) GPU 二次贝塞尔曲线字形标签（同 RenderPass 零位图图集直出，与 UI 共享唯一曲线缓冲）
         if slug_end > slug_start {
-            self.slug.draw_range(&mut rpass, slug_start, slug_end);
+            slug.draw_range(&mut rpass, slug_start, slug_end);
         }
 
         // 5. 前景自定义 WGSL 着色器

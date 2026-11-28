@@ -514,7 +514,7 @@ impl GpuEffectsEngine {
         >,
         ops: &[crate::motion::DrawOp<'_>],
         canvas_engine: &mut Option<super::canvas_pipeline::CanvasGpuEngine>,
-        ui_slug_engine: Option<&super::slug_glyph::SlugTextEngine>,
+        slug_engine: &mut Option<super::slug_glyph::SlugTextEngine>,
         pipeline_cache: Option<&wgpu::PipelineCache>,
         target_format: wgpu::TextureFormat,
         target_view: &wgpu::TextureView,
@@ -611,7 +611,7 @@ impl GpuEffectsEngine {
                         timestamp_writes: None,
                         multiview_mask: None,
                     });
-                    if let Some(slug) = ui_slug_engine {
+                    if let Some(slug) = slug_engine.as_ref() {
                         slug.draw_range(&mut rpass, *slug_start, *slug_end);
                     }
                 }
@@ -891,6 +891,13 @@ impl GpuEffectsEngine {
                                     pipeline_cache,
                                 )
                             });
+                            let slug_eng = slug_engine.get_or_insert_with(|| {
+                                super::slug_glyph::SlugTextEngine::new(
+                                    device,
+                                    target_format,
+                                    pipeline_cache,
+                                )
+                            });
                             let dst = self.pool.get(*target_idx);
                             canvas_eng.render_canvas(
                                 device,
@@ -905,6 +912,7 @@ impl GpuEffectsEngine {
                                 *sf,
                                 *is_srgb,
                                 spec,
+                                slug_eng,
                             );
                         }
                     }

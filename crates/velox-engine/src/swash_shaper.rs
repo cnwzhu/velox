@@ -1,17 +1,16 @@
-//! 可选零拷贝 OpenType GSUB/GPOS 高级文本塑形、可变字体轴（Variable Fonts）与跨折行 Run 缓存
-//! （仅在启用 `--features swash` 时编译）。
+//! 可选零拷贝 OpenType GSUB/GPOS 高级文本塑形、多字体 Itemizer、可变字体轴（Variable Fonts）
+//! 与双代轮转 Run 缓存（仅在启用 `--features swash` 时编译）。
 //!
 //! 设计要点：
+//! - **多字体覆盖切分（Itemizer）**：逐字符检测所属已映射字体身份键 `font_key`，自动把中英混排
+//!   （如 `"Hello 你好 Velox"`）按字体边界切分为多个连续 Run 分别塑形再拼装，彻底消除 CJK/符号
+//!   变 `.notdef` 豆腐块问题；
 //! - **零拷贝共享底层字体字节**：直接复用 `display::font_ttf` 中已通过 OS 只读 `mmap` /
 //!   `MapViewOfFile` 映射的系统字体及自定义注册字体切片，不重复读取磁盘或二次分配字节缓冲区；
-//! - **OpenType GSUB/GPOS 完整支持**：标准连字（`liga` / `clig` / `calt`）、精确字距（`kern`）、
-//!   复杂标记定位（`mark` / `mkmk`）以及阿拉伯文/印地语等复杂脚本连写；
-//! - **可变字体轴（Variable Fonts）**：支持动态传入 `wght`（字重）、`wdth`（字宽）、`slnt`（倾斜）、
-//!   `opsz`（光学字号）等任意 OpenType 变化轴，可由弹簧物理引擎驱动字重与字宽的丝滑过渡；
-//! - **跨折行塑形 Run 缓存**：以 `(text_hash, font_spec, font_size_q4, ligatures, variations_hash)`
-//!   缓存 `Arc<ShapedGlyphRun>`，窗口 Resize 或多次测量同一文本时零重复塑形；
-//! - **线程本地零瞬态分配上下文**：每线程复用 `swash::shape::ShapeContext` 与
-//!   `swash::scale::ScaleContext`，避免每次塑形/光栅化重新分配内部工作缓冲。
+//! - **OpenType GSUB/GPOS 与可变字体轴**：支持标准连字（`liga`/`clig`/`calt`）、精确字距（`kern`）
+//!   及动态可变字体轴（`wght`/`wdth`/`slnt`/`opsz`），并支持提取经可变轴插值后的矢量轮廓直出 Slug 2.0；
+//! - **双代轮转 `SwashRunCache`**：使用 `hot` + `cold` 两代 `HashMap` 轮转淘汰，命中 `cold` 自动
+//!   提升回 `hot`，彻底消除固定上限全量 `clear()` 造成的周期性重塑形尖峰。
 
 use core::cell::RefCell;
 use std::collections::HashMap;
@@ -21,10 +20,12 @@ use std::vec::Vec;
 
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::shape::ShapeContext;
+#[cfg(feature = "gpu")]
+use swash::zeno::PathData;
 use swash::zeno::Format;
 use swash::{tag_from_bytes, FontRef, Setting};
 
-use crate::display::font_ttf::{with_styled_font_bytes, CachedGlyph};
+use crate::display::font_ttf::{with_font_bytes_by_key, with_styled_font_bytes, CachedGlyph};
 use crate::text_rich::FontSpec;
 
 /// 单个 OpenType 可变字体轴设置（如 `wght=650.0`、`wdth=100.0`、`slnt=-8.0`、`opsz=24.0`）。
@@ -68,7 +69,7 @@ impl FontVariationAxis {
     }
 
     #[inline]
-    fn to_setting(self) -> Setting<f32> {
+    pub(crate) fn to_setting(self) -> Setting<f32> {
         Setting {
             tag: tag_from_bytes(&self.tag),
             value: self.value,
@@ -76,11 +77,13 @@ impl FontVariationAxis {
     }
 }
 
-/// 经 OpenType GSUB/GPOS 塑形后的单个字形位置与步进信息。
+/// 经 OpenType GSUB/GPOS 塑形后的单个字形位置、步进与所属字体身份信息。
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct SwashShapedGlyph {
     /// 字体内的真实 `GlyphId`（已包含连字替换、变体替换等 GSUB 结果）。
     pub glyph_id: u16,
+    /// 该字形所属底层字体只读切片的稳定身份键（中英混排时每个字形精确指向对应拉丁/CJK 字体）。
+    pub font_key: u64,
     /// 相对当前游标的水平微调偏移（像素，来自 GPOS `kern` / `mark` 等）。
     pub x_offset: f32,
     /// 相对基线的垂直微调偏移（像素，正值向上）。
@@ -91,20 +94,20 @@ pub struct SwashShapedGlyph {
     pub cluster: u32,
 }
 
-/// 一次 OpenType 塑形输出的完整字形序列与行度量（支持跨折行缓存复用）。
+/// 一次 OpenType 多字体塑形输出的完整字形序列与行度量（支持双代轮转缓存跨折行复用）。
 #[derive(Clone, Debug)]
 pub struct ShapedGlyphRun {
-    /// 塑形后的有序字形序列。
+    /// 塑形后的有序字形序列（已按多字体 Itemizer 拼接并重定位 `cluster` 字节偏移）。
     pub glyphs: Vec<SwashShapedGlyph>,
     /// 整段文本的总水平前进宽度（像素）。
     pub total_advance: f32,
-    /// 字体升部高度（像素）。
+    /// 字体升部高度（像素，取参与塑形各字体的最大值）。
     pub ascent: f32,
-    /// 字体降部深度（像素，正值表示向下延伸）。
+    /// 字体降部深度（像素，正值表示向下延伸，取最大值）。
     pub descent: f32,
     /// 建议行距附加值（像素）。
     pub leading: f32,
-    /// 底层字体内存映射身份键（与 `font_ttf` 指针一致，可用于区分字体变体）。
+    /// 首个参与塑形字体的身份键（单字体段可直接据此判断）。
     pub font_key: u64,
 }
 
@@ -116,7 +119,7 @@ pub struct SwashRunCacheStats {
     pub misses: u64,
 }
 
-const MAX_SWASH_RUN_CACHE_ENTRIES: usize = 1024;
+const MAX_SWASH_RUN_CACHE_GEN_ENTRIES: usize = 1024;
 
 #[derive(Clone, Eq, PartialEq, Hash)]
 struct SwashRunCacheKey {
@@ -128,8 +131,56 @@ struct SwashRunCacheKey {
     variations_hash: u64,
 }
 
-static SWASH_RUN_CACHE: OnceLock<RwLock<HashMap<SwashRunCacheKey, Arc<ShapedGlyphRun>>>> =
-    OnceLock::new();
+/// 双代轮转缓存：`hot` 满 `MAX_SWASH_RUN_CACHE_GEN_ENTRIES` 时整体降级为 `cold` 并开启新 `hot`，
+/// 避免全量 `clear()` 带来的周期性冷启动重塑形尖峰。
+struct TwoGenRunCache {
+    hot: HashMap<SwashRunCacheKey, Arc<ShapedGlyphRun>>,
+    cold: HashMap<SwashRunCacheKey, Arc<ShapedGlyphRun>>,
+}
+
+impl TwoGenRunCache {
+    fn new() -> Self {
+        Self {
+            hot: HashMap::with_capacity(128),
+            cold: HashMap::new(),
+        }
+    }
+
+    #[inline]
+    fn get_hot(&self, key: &SwashRunCacheKey) -> Option<Arc<ShapedGlyphRun>> {
+        self.hot.get(key).map(Arc::clone)
+    }
+
+    #[inline]
+    fn contains_cold(&self, key: &SwashRunCacheKey) -> bool {
+        self.cold.contains_key(key)
+    }
+
+    fn promote_from_cold(&mut self, key: &SwashRunCacheKey) -> Option<Arc<ShapedGlyphRun>> {
+        let entry = self.cold.remove(key)?;
+        self.insert(key.clone(), Arc::clone(&entry));
+        Some(entry)
+    }
+
+    fn insert(&mut self, key: SwashRunCacheKey, val: Arc<ShapedGlyphRun>) {
+        if self.hot.len() >= MAX_SWASH_RUN_CACHE_GEN_ENTRIES {
+            self.cold = core::mem::take(&mut self.hot);
+        }
+        self.hot.insert(key, val);
+    }
+
+    fn clear(&mut self) {
+        self.hot.clear();
+        self.cold.clear();
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.hot.len() + self.cold.len()
+    }
+}
+
+static SWASH_RUN_CACHE: OnceLock<RwLock<TwoGenRunCache>> = OnceLock::new();
 static SWASH_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 static SWASH_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 
@@ -147,16 +198,23 @@ fn fnv1a_bytes(mut h: u64, bytes: &[u8]) -> u64 {
     h
 }
 
+/// 计算可变字体轴数组的稳定量化哈希（量化至 `1/16` 轴单位，空切片固定返回 `0`）。
 #[inline]
-fn hash_variations(variations: &[FontVariationAxis]) -> u64 {
+pub(crate) fn hash_variations(variations: &[FontVariationAxis]) -> u64 {
+    if variations.is_empty() {
+        return 0;
+    }
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for v in variations {
         h = fnv1a_bytes(h, &v.tag);
-        // 量化至 1/16 轴单位以避免微弱浮点噪声击穿缓存，同时保留动画精度
         let q = (v.value * 16.0).round() as i32;
         h = fnv1a_bytes(h, &q.to_le_bytes());
     }
-    h
+    if h == 0 {
+        1
+    } else {
+        h
+    }
 }
 
 #[inline]
@@ -228,6 +286,7 @@ pub fn shape_text_run_with_font_bytes(
             for g in cluster.glyphs {
                 glyphs.push(SwashShapedGlyph {
                     glyph_id: g.id,
+                    font_key,
                     x_offset: g.x,
                     y_offset: g.y,
                     advance: g.advance,
@@ -249,10 +308,54 @@ pub fn shape_text_run_with_font_bytes(
     })
 }
 
-/// 零拷贝 OpenType GSUB/GPOS 文本塑形（带跨帧/跨折行 `Arc<ShapedGlyphRun>` 缓存与可变字体轴支持）。
+/// 多字体 Itemizer：将混合脚本字符串按连续相同底层字体身份键 `font_key` 切分为 `(byte_start, byte_end, sample_char)`。
 ///
-/// 底层自动从 `display::font_ttf` 借用已内存映射的字体字节（系统字体或通过 `register_font_*`
-/// 注册的自定义字体），不额外拷贝或重读磁盘。
+/// 空白字符优先继承前一段活跃字体，保持英文词间连贯性并避免无意义断段。
+fn itemize_font_runs(text: &str, font_spec: FontSpec) -> Vec<(usize, usize, char, u64)> {
+    let mut runs: Vec<(usize, usize, char, u64)> = Vec::with_capacity(4);
+    let mut cur_start = 0usize;
+    let mut cur_key: Option<u64> = None;
+    let mut cur_sample = 'A';
+
+    for (byte_idx, ch) in text.char_indices() {
+        let ch_key = if ch.is_whitespace() {
+            if let Some(k) = cur_key {
+                k
+            } else {
+                with_styled_font_bytes(ch, font_spec, |_, k| k).unwrap_or(0)
+            }
+        } else {
+            with_styled_font_bytes(ch, font_spec, |_, k| k).unwrap_or(0)
+        };
+        match cur_key {
+            None => {
+                cur_start = byte_idx;
+                cur_key = Some(ch_key);
+                cur_sample = ch;
+            }
+            Some(k) if k == ch_key => {
+                if cur_sample.is_whitespace() && !ch.is_whitespace() {
+                    cur_sample = ch;
+                }
+            }
+            Some(k) => {
+                runs.push((cur_start, byte_idx, cur_sample, k));
+                cur_start = byte_idx;
+                cur_key = Some(ch_key);
+                cur_sample = ch;
+            }
+        }
+    }
+    if let Some(k) = cur_key {
+        runs.push((cur_start, text.len(), cur_sample, k));
+    }
+    runs
+}
+
+/// 零拷贝多字体 OpenType GSUB/GPOS 文本塑形（带双代轮转 `Arc<ShapedGlyphRun>` 缓存与可变字体轴支持）。
+///
+/// 内置多字体 Itemizer：对中英/符号混排（如 `"Hello 你好 Velox"`）自动按字体覆盖边界切分 Run
+/// 分别塑形再拼装，每个 [`SwashShapedGlyph`] 均精确携带其真实的 `font_key` 与 `cluster` 字节偏移。
 pub fn shape_text_run_swash(
     text: &str,
     font_spec: FontSpec,
@@ -272,28 +375,119 @@ pub fn shape_text_run_swash(
     }
 
     let key = make_cache_key(text, font_spec, font_size, ligatures, variations);
-    let cache = SWASH_RUN_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    let cache = SWASH_RUN_CACHE.get_or_init(|| RwLock::new(TwoGenRunCache::new()));
+    let mut found_in_cold = false;
     if let Ok(read_guard) = cache.read() {
-        if let Some(hit) = read_guard.get(&key) {
+        if let Some(hit) = read_guard.get_hot(&key) {
             SWASH_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
-            return Some(Arc::clone(hit));
+            return Some(hit);
+        }
+        found_in_cold = read_guard.contains_cold(&key);
+    }
+    if found_in_cold {
+        if let Ok(mut write_guard) = cache.write() {
+            if let Some(promoted) = write_guard.promote_from_cold(&key) {
+                SWASH_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+                return Some(promoted);
+            }
         }
     }
 
-    let sample_char = text.chars().find(|c| !c.is_whitespace()).unwrap_or('A');
-    let run = with_styled_font_bytes(sample_char, font_spec, |bytes, _font_key| {
-        shape_text_run_with_font_bytes(text, bytes, 0, font_size, ligatures, variations)
-    })??;
+    let segments = itemize_font_runs(text, font_spec);
+    if segments.is_empty() {
+        return None;
+    }
+
+    let run = if segments.len() == 1 {
+        let (_, _, sample_char, _) = segments[0];
+        with_styled_font_bytes(sample_char, font_spec, |bytes, _| {
+            shape_text_run_with_font_bytes(text, bytes, 0, font_size, ligatures, variations)
+        })??
+    } else {
+        let mut combined_glyphs = Vec::with_capacity(text.chars().count());
+        let mut total_advance = 0.0f32;
+        let mut max_ascent = 0.0f32;
+        let mut max_descent = 0.0f32;
+        let mut max_leading = 0.0f32;
+        let mut primary_key = 0u64;
+
+        for (b_start, b_end, sample_char, _seg_key) in segments {
+            let sub = &text[b_start..b_end];
+            let sub_run_opt = with_styled_font_bytes(sample_char, font_spec, |bytes, _| {
+                shape_text_run_with_font_bytes(sub, bytes, 0, font_size, ligatures, variations)
+            })
+            .flatten();
+            if let Some(sub_run) = sub_run_opt {
+                if primary_key == 0 {
+                    primary_key = sub_run.font_key;
+                }
+                total_advance += sub_run.total_advance;
+                max_ascent = max_ascent.max(sub_run.ascent);
+                max_descent = max_descent.max(sub_run.descent);
+                max_leading = max_leading.max(sub_run.leading);
+                for mut g in sub_run.glyphs {
+                    g.cluster = g.cluster.saturating_add(b_start as u32);
+                    combined_glyphs.push(g);
+                }
+            }
+        }
+        if combined_glyphs.is_empty() {
+            return None;
+        }
+        ShapedGlyphRun {
+            glyphs: combined_glyphs,
+            total_advance,
+            ascent: max_ascent,
+            descent: max_descent,
+            leading: max_leading,
+            font_key: primary_key,
+        }
+    };
 
     let arc_run = Arc::new(run);
     SWASH_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut write_guard) = cache.write() {
-        if write_guard.len() >= MAX_SWASH_RUN_CACHE_ENTRIES {
-            write_guard.clear();
-        }
         write_guard.insert(key, Arc::clone(&arc_run));
     }
     Some(arc_run)
+}
+
+/// 供共享 `SlugTextEngine` 提取经可变字体轴插值后的标准 EM 归一化矢量轮廓命令序列
+/// （返回 `(units_per_em, advance_em, commands)`，零拷贝借用已映射字体切片）。
+#[cfg(feature = "gpu")]
+pub(crate) fn extract_swash_glyph_outline_em(
+    font_key: u64,
+    glyph_id: u16,
+    variations: &[FontVariationAxis],
+) -> Option<(u16, f32, Vec<swash::zeno::Command>)> {
+    with_font_bytes_by_key(font_key, |bytes| {
+        let font = FontRef::from_index(bytes, 0)?;
+        let upem = font.metrics(&[]).units_per_em.max(1);
+        let mut settings: Vec<Setting<f32>> = Vec::with_capacity(variations.len());
+        for v in variations {
+            settings.push(v.to_setting());
+        }
+        let coords: Vec<swash::NormalizedCoord> = font
+            .variations()
+            .normalized_coords(settings.iter().copied())
+            .collect();
+        let raw_adv = font.glyph_metrics(&coords).advance_width(glyph_id);
+        let advance_em = raw_adv / (upem as f32);
+
+        TLS_SCALE_CTX.with(|cell| {
+            let mut ctx = cell.borrow_mut();
+            // size(0.0) 在 swash 中表示直接以原始字体单位（Font Units / unscaled EM）输出轮廓，
+            // 与字号无关，可被 SlugTextEngine 缓存一次后任意 0.1x~1000x 缩放复用。
+            let mut builder = ctx.builder(font).size(0.0).hint(false);
+            if !variations.is_empty() {
+                builder = builder.variations(variations.iter().copied().map(|v| v.to_setting()));
+            }
+            let mut scaler = builder.build();
+            let outline = scaler.scale_outline(glyph_id)?;
+            let cmds: Vec<swash::zeno::Command> = outline.path().commands().collect();
+            Some((upem, advance_em, cmds))
+        })
+    })?
 }
 
 /// 按 `GlyphId` 与可变字体轴直接光栅化单个字形为 [`CachedGlyph`]（支持彩色 Emoji 与可变字重轮廓）。
@@ -396,7 +590,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn swash_shapes_latin_and_cjk_with_run_cache_hits() {
+    fn swash_shapes_latin_and_cjk_mixed_without_notdef_and_hits_cache() {
         clear_swash_run_cache();
         let before = swash_run_cache_stats();
 
@@ -415,12 +609,59 @@ mod tests {
         assert!(after.hits > before.hits);
         assert!(after.entries >= 1);
 
-        // CJK 回退字体零拷贝借用塑形
-        let cjk = shape_text_run_swash("你好世界 Velox", FontSpec::SANS, 16.0, true, &[]);
-        if let Some(cjk_run) = cjk {
-            assert!(!cjk_run.glyphs.is_empty());
-            assert!(cjk_run.total_advance > 30.0);
+        // 关键回归：中英混排 `"Hello 你好 Velox 世界"` 必须经多字体 Itemizer 切分，绝不能把中文塑形成 .notdef (gid=0)！
+        let mixed = shape_text_run_swash("Hello 你好 Velox 世界", FontSpec::SANS, 16.0, true, &[])
+            .expect("mixed Latin+CJK shaping");
+        assert!(mixed.glyphs.len() >= 14);
+        assert!(
+            mixed.glyphs.iter().all(|g| g.glyph_id != 0),
+            "mixed Latin+CJK run must not contain .notdef (glyph_id=0): {:?}",
+            mixed.glyphs
+        );
+        // 验证 cluster 字节偏移单调不减且覆盖中文字节区间
+        let mut last_cluster = 0u32;
+        for g in &mixed.glyphs {
+            assert!(g.cluster >= last_cluster);
+            last_cluster = g.cluster;
         }
+        assert!(last_cluster >= 12);
+    }
+
+    #[test]
+    fn swash_two_gen_cache_rotates_without_full_cliff() {
+        let mut cache = TwoGenRunCache::new();
+        let dummy = Arc::new(ShapedGlyphRun {
+            glyphs: Vec::new(),
+            total_advance: 0.0,
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            font_key: 1,
+        });
+        for i in 0..(MAX_SWASH_RUN_CACHE_GEN_ENTRIES + 10) {
+            let k = SwashRunCacheKey {
+                text_hash: i as u64,
+                text_len: 4,
+                font_spec_packed: 0,
+                font_size_q4: 64,
+                ligatures: true,
+                variations_hash: 0,
+            };
+            cache.insert(k, Arc::clone(&dummy));
+        }
+        // 触发一次代际轮转后，cold 仍保留上一代全部 1024 条，不发生全量清空尖峰
+        assert_eq!(cache.hot.len(), 10);
+        assert_eq!(cache.cold.len(), MAX_SWASH_RUN_CACHE_GEN_ENTRIES);
+        let old_key = SwashRunCacheKey {
+            text_hash: 42,
+            text_len: 4,
+            font_spec_packed: 0,
+            font_size_q4: 64,
+            ligatures: true,
+            variations_hash: 0,
+        };
+        assert!(cache.promote_from_cold(&old_key).is_some());
+        assert_eq!(cache.hot.len(), 11);
     }
 
     #[test]
@@ -442,7 +683,6 @@ mod tests {
             &[FontVariationAxis::weight(700.0)],
         )
         .expect("bold run");
-        // 不同可变字体轴值必须映射到不同的缓存条目
         assert!(!Arc::ptr_eq(&regular, &bold));
 
         let first_gid = regular.glyphs[0].glyph_id;

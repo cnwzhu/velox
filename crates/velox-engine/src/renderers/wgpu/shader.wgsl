@@ -408,10 +408,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let eff_cov = clamp(cov + dither * 0.5, 0.0, 1.0);
         return vec4<f32>(col.rgb * col.a, col.a) * eff_cov;
     } else if (kind < 2.5) {
-        // Glyph: R8Unorm 动态字形图集（像素对齐锐利采样）
+        // Glyph: R8Unorm 动态字形图集（静止帧走 Nearest 像素对齐锐利采样；弹簧亚像素运动帧走半纹素钳位 Linear 滤波消除“框动字跳”）
         let local_uv = clamp((p - prim.bounds.xy) / max(prim.bounds.zw, vec2<f32>(1.0)), vec2<f32>(0.0), vec2<f32>(1.0));
         let atlas_uv = mix(prim.uv.xy, prim.uv.zw, local_uv);
-        let cov = textureSampleLevel(glyph_tex, atlas_sampler, atlas_uv, 0.0).r * clip_cov;
+        var cov_raw = 0.0;
+        if (prim.extra.y > 0.5) {
+            let g_tex_size = vec2<f32>(textureDimensions(glyph_tex));
+            let g_half = vec2<f32>(0.5) / max(g_tex_size, vec2<f32>(1.0));
+            let g_min = prim.uv.xy + g_half;
+            let g_max = max(prim.uv.zw - g_half, g_min);
+            cov_raw = textureSampleLevel(glyph_tex, linear_sampler, clamp(atlas_uv, g_min, g_max), 0.0).r;
+        } else {
+            cov_raw = textureSampleLevel(glyph_tex, atlas_sampler, atlas_uv, 0.0).r;
+        }
+        let cov = cov_raw * clip_cov;
         if (cov <= 0.0) {
             discard;
         }

@@ -227,4 +227,156 @@ fn test_swash_feature_shaping_and_variable_axes_integration() {
     .expect("cached run");
     assert!(std::sync::Arc::ptr_eq(&run, &cached));
     assert!(swash_run_cache_stats().hits >= 1);
+
+    // 多字体 Itemizer 回归：中英混排绝不能出现 .notdef (glyph_id == 0)
+    let mixed = shape_text_run_swash("Hello 你好 Velox 世界", FontSpec::SANS, 20.0, true, &[])
+        .expect("mixed script run");
+    assert!(mixed.glyphs.len() >= 14);
+    assert!(
+        mixed.glyphs.iter().all(|g| g.glyph_id != 0),
+        "mixed Latin+CJK run must not produce .notdef tofu glyphs"
+    );
+}
+
+#[cfg(feature = "gpu")]
+#[test]
+fn test_small_text_subpixel_follows_spring_and_shared_slug_engine_with_canvas() {
+    use velox_engine::canvas_scene::{
+        CanvasAsciiLabel, CanvasItemState, CanvasStaticGeom, SceneCanvasSpec, StaticSceneId,
+        Viewport2D,
+    };
+    use velox_engine::renderers::wgpu::WgpuOffscreenRenderer;
+
+    let mut off = WgpuOffscreenRenderer::new_lazy(480, 200);
+    if !off.ensure_gpu() {
+        return;
+    }
+
+    // 1. 验证小字号（< 28px）在非零负 subpx_q4 偏移下正确保留浮点亚像素位移（无“框动字跳”）
+    let vp = Region::new(0, 0, 480, 200);
+    let make_ops = |subpx_q4: u8| {
+        [
+            DrawOp {
+                id: None,
+                bounds: vp,
+                clip: vp,
+                clip_radius: 0,
+                subpx_q4: 0,
+                payload: DrawPayload::Quad {
+                    bg: Color::rgb(12, 16, 24),
+                    bg_grad: Color::TRANSPARENT,
+                    border_color: Color::TRANSPARENT,
+                    rounded: 0,
+                    border_width: 0,
+                },
+            },
+            DrawOp {
+                id: Some(11),
+                bounds: Region::new(20, 20, 260, 28),
+                clip: vp,
+                clip_radius: 0,
+                subpx_q4,
+                payload: DrawPayload::TextRun {
+                    text: StrRef::Static("Button Label 14px"),
+                    color: Color::WHITE,
+                    font_size: 14,
+                    text_flags: 0,
+                },
+            },
+        ]
+    };
+    let mut fb_zero = vec![Rgba8888(0); 480 * 200];
+    let mut fb_sub = vec![Rgba8888(0); 480 * 200];
+    let ops0 = make_ops(0);
+    let ops_neg = make_ops(pack_subpx_q4(-4, 4)); // -0.25px X, +0.25px Y
+    let _ = off.render_draw_ops_rgba8888_into(&ops0, vp, 1, &[vp], &mut fb_zero);
+    let _ = off.render_draw_ops_rgba8888_into(&ops_neg, vp, 1, &[vp], &mut fb_sub);
+    let diff_pixels = fb_zero
+        .iter()
+        .zip(fb_sub.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(
+        diff_pixels > 20,
+        "14px small text must smoothly shift with Q4 subpixel residual (got {diff_pixels} differing pixels)"
+    );
+
+    // 2. 验证同帧混用大字号 UI text() 与 SceneCanvas 标签时共享唯一 SlugTextEngine，不重复缓存曲线
+    let geoms = [CanvasStaticGeom::rounded_rect_rotated(
+        100.0, 50.0, 120.0, 40.0, 1.0, 0.0, 6.0,
+    )];
+    let states = [CanvasItemState::new(0)];
+    let palette = [Color::rgb(30, 41, 59)];
+    let labels = [CanvasAsciiLabel {
+        wx: 100.0,
+        wy: 50.0,
+        text: "VELOX",
+        font_px: 34.0,
+        color: Color::WHITE,
+    }];
+    let spec = SceneCanvasSpec {
+        id: 7001,
+        width: 480,
+        height: 120,
+        opacity: 255,
+        bg: Color::rgb(10, 14, 22),
+        scene_id: StaticSceneId(7001),
+        viewport: Viewport2D::new(0.0, 0.0, 1.0),
+        geoms: &geoms,
+        states: &states,
+        geom_revision: 1,
+        state_revision: 1,
+        palette: &palette,
+        mesh_verts: &[],
+        mesh_indices: &[],
+        mesh_revision: 0,
+        visible_ranges: &[],
+        labels: &labels,
+        marquee: None,
+        marquee_color: Color::TRANSPARENT,
+        dirty_screen_rects: &[],
+        zooming: false,
+        bg_shaders: &[],
+        fg_shaders: &[],
+        software_bg_fallback: None,
+        software_fg_fallback: None,
+    };
+    let mut shared_off = WgpuOffscreenRenderer::new_lazy(480, 200);
+    assert!(shared_off.ensure_gpu());
+    let shared_ops = [
+        DrawOp {
+            id: None,
+            bounds: Region::new(0, 0, 480, 64),
+            clip: vp,
+            clip_radius: 0,
+            subpx_q4: 0,
+            payload: DrawPayload::TextRun {
+                text: StrRef::Static("VELOX"),
+                color: Color::WHITE,
+                font_size: 36,
+                text_flags: 0,
+            },
+        },
+        DrawOp {
+            id: None,
+            bounds: Region::new(0, 70, 480, 120),
+            clip: vp,
+            clip_radius: 0,
+            subpx_q4: 0,
+            payload: DrawPayload::SceneCanvas(&spec),
+        },
+    ];
+    let mut fb_shared = vec![Rgba8888(0); 480 * 200];
+    let _ = shared_off.render_draw_ops_rgba8888_into(&shared_ops, vp, 1, &[vp], &mut fb_shared);
+    let stats = shared_off.gpu_memory_stats().unwrap();
+    // "VELOX" 仅 5 个独立字符：若 UI 与 Canvas 共享唯一 SlugTextEngine，缓存字形数必须精确为 5（而非双份 10！）
+    assert_eq!(
+        stats.slug_cached_glyphs, 5,
+        "UI heading and SceneCanvas must share one SlugTextEngine curve cache (expected 5 unique glyphs, got {})",
+        stats.slug_cached_glyphs
+    );
+    assert_eq!(
+        stats.slug_last_drawn_glyphs, 10,
+        "both UI heading (5) and SceneCanvas label (5) must draw in same frame"
+    );
 }

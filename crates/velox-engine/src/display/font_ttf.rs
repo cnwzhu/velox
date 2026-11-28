@@ -456,6 +456,44 @@ pub(crate) fn with_styled_font_bytes<R>(
     }
 }
 
+/// 按字形所属稳定字体键 `font_key` 零拷贝反查对应的只读字体字节切片（供 Swash → Slug 轮廓提取使用）。
+#[cfg(feature = "swash")]
+pub(crate) fn with_font_bytes_by_key<R>(font_key: u64, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+    if font_key == 0 {
+        return None;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let slots: [&OnceLock<Option<LoadedFont>>; 7] = [
+            &PRIMARY_FONT,
+            &FALLBACK_CJK_FONT,
+            &BOLD_FONT,
+            &ITALIC_FONT,
+            &MONO_FONT,
+            &MONO_BOLD_FONT,
+            &SERIF_FONT,
+        ];
+        for slot in slots {
+            if let Some(Some(font)) = slot.get() {
+                if (font.bytes.as_ptr() as usize as u64) == font_key {
+                    return Some(f(font.bytes));
+                }
+            }
+        }
+    }
+    if let Some(map) = CUSTOM_FONTS.get() {
+        if let Ok(r) = map.read() {
+            for cf in r.values() {
+                let bytes = cf.raw_bytes();
+                if (bytes.as_ptr() as usize as u64) == font_key {
+                    return Some(f(bytes));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// 获取指定精确浮点字号（`fs`）在单行行盒内的光学垂直居中基线偏移（像素），
 /// 基于字体真实 `capital_height`（大写字母高度，缺省回退 `0.70 * upem`）居中，避免 `hhea.ascender` 过大导致按钮文字偏下。
 pub fn get_font_ascent_f32(fs: f32) -> i32 {

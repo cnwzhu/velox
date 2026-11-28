@@ -264,7 +264,7 @@ pub(crate) struct SlugTextEngine {
     instances_capacity: usize,
     instances_uploaded: usize,
 
-    glyphs: HashMap<(u64, u16), CachedSlugGlyph>,
+    glyphs: HashMap<(u64, u16, u64), CachedSlugGlyph>,
     last_drawn_glyphs: usize,
 }
 
@@ -515,28 +515,10 @@ impl SlugTextEngine {
         self.last_drawn_glyphs
     }
 
-    /// 按字符提取（首次）或查表获取与字号无关的 Slug 二次贝塞尔曲线与双轴条带元数据。
-    fn ensure_glyph(&mut self, ch: char) -> Option<CachedSlugGlyph> {
-        let mut extracted: Option<(u64, u16, f32, OutlineCollector)> = None;
-        let lookup_key = crate::display::ttf_atlas::with_char_face_and_glyph(ch, |face, gid, fk| {
-            let key = (fk, gid.0);
-            if !self.glyphs.contains_key(&key) {
-                let upem = face.units_per_em().max(1);
-                let adv = face.glyph_hor_advance(gid).unwrap_or(upem / 2) as f32 / (upem as f32);
-                let mut collector = OutlineCollector::new(upem);
-                let _ = face.outline_glyph(gid, &mut collector);
-                extracted = Some((fk, gid.0, adv, collector));
-            }
-            key
-        })?;
-
-        if let Some(&hit) = self.glyphs.get(&lookup_key) {
-            return Some(hit);
-        }
-
-        let (fk, gid_raw, advance_em, collector) = extracted?;
+    /// 将已提取的 EM 归一化 `OutlineCollector` 曲线编译为 16 B `f16` 曲线与双轴加速条带并写入 GPU 暂存数组。
+    fn compile_collector(&mut self, advance_em: f32, collector: OutlineCollector) -> CachedSlugGlyph {
         if collector.curves.is_empty() || !collector.min_x.is_finite() {
-            let empty = CachedSlugGlyph {
+            return CachedSlugGlyph {
                 em_bounds: [0.0; 4],
                 advance_em,
                 h_band_offset: 0,
@@ -545,8 +527,6 @@ impl SlugTextEngine {
                 num_v_bands: 0,
                 has_outline: false,
             };
-            self.glyphs.insert((fk, gid_raw), empty);
-            return Some(empty);
         }
 
         let curve_base = self.curves.len() as u32;
@@ -582,7 +562,6 @@ impl SlugTextEngine {
         let h_band_offset = self.bands.len() as u32;
         let mut h_buckets: Vec<Vec<(u32, f32)>> = (0..num_bands).map(|_| Vec::new()).collect();
         for (i, &(p0, p1, p2)) in collector.curves.iter().enumerate() {
-            // 纯水平线段对水平射线无绕数贡献
             if (p0[1] - p1[1]).abs() < 1e-6 && (p1[1] - p2[1]).abs() < 1e-6 {
                 continue;
             }
@@ -615,7 +594,6 @@ impl SlugTextEngine {
         let v_band_offset = self.bands.len() as u32;
         let mut v_buckets: Vec<Vec<(u32, f32)>> = (0..num_bands).map(|_| Vec::new()).collect();
         for (i, &(p0, p1, p2)) in collector.curves.iter().enumerate() {
-            // 纯垂直线段对垂直射线无绕数贡献
             if (p0[0] - p1[0]).abs() < 1e-6 && (p1[0] - p2[0]).abs() < 1e-6 {
                 continue;
             }
@@ -643,7 +621,7 @@ impl SlugTextEngine {
             self.bands.push(SlugBand { start, count });
         }
 
-        let entry = CachedSlugGlyph {
+        CachedSlugGlyph {
             em_bounds: [min_x, min_y, max_x, max_y],
             advance_em,
             h_band_offset,
@@ -651,9 +629,114 @@ impl SlugTextEngine {
             v_band_offset,
             num_v_bands: num_bands,
             has_outline: true,
-        };
-        self.glyphs.insert((fk, gid_raw), entry);
+        }
+    }
+
+    /// 按字符提取（首次）或查表获取与字号无关的 Slug 二次贝塞尔曲线与双轴条带元数据。
+    fn ensure_glyph(&mut self, ch: char) -> Option<CachedSlugGlyph> {
+        let mut extracted: Option<(u64, u16, f32, OutlineCollector)> = None;
+        let lookup_key = crate::display::ttf_atlas::with_char_face_and_glyph(ch, |face, gid, fk| {
+            let key = (fk, gid.0, 0u64);
+            if !self.glyphs.contains_key(&key) {
+                let upem = face.units_per_em().max(1);
+                let adv = face.glyph_hor_advance(gid).unwrap_or(upem / 2) as f32 / (upem as f32);
+                let mut collector = OutlineCollector::new(upem);
+                let _ = face.outline_glyph(gid, &mut collector);
+                extracted = Some((fk, gid.0, adv, collector));
+            }
+            key
+        })?;
+
+        if let Some(&hit) = self.glyphs.get(&lookup_key) {
+            return Some(hit);
+        }
+
+        let (fk, gid_raw, advance_em, collector) = extracted?;
+        let entry = self.compile_collector(advance_em, collector);
+        self.glyphs.insert((fk, gid_raw, 0u64), entry);
         Some(entry)
+    }
+
+    /// 供 `swash` OpenType GSUB/GPOS + 可变字体轴全链路按 `(font_key, glyph_id, variation_hash)` 提取并缓存 Slug 2.0 曲线。
+    #[cfg(feature = "swash")]
+    fn ensure_swash_glyph(
+        &mut self,
+        font_key: u64,
+        glyph_id: u16,
+        variations: &[crate::swash_shaper::FontVariationAxis],
+    ) -> Option<CachedSlugGlyph> {
+        let var_hash = crate::swash_shaper::hash_variations(variations);
+        let key = (font_key, glyph_id, var_hash);
+        if let Some(&hit) = self.glyphs.get(&key) {
+            return Some(hit);
+        }
+        let (upem, advance_em, cmds) =
+            crate::swash_shaper::extract_swash_glyph_outline_em(font_key, glyph_id, variations)?;
+        let mut collector = OutlineCollector::new(upem);
+        for cmd in cmds {
+            match cmd {
+                swash::zeno::Command::MoveTo(p) => collector.move_to(p.x, p.y),
+                swash::zeno::Command::LineTo(p) => collector.line_to(p.x, p.y),
+                swash::zeno::Command::QuadTo(c, p) => collector.quad_to(c.x, c.y, p.x, p.y),
+                swash::zeno::Command::CurveTo(c1, c2, p) => {
+                    collector.curve_to(c1.x, c1.y, c2.x, c2.y, p.x, p.y)
+                }
+                swash::zeno::Command::Close => collector.close(),
+            }
+        }
+        let entry = self.compile_collector(advance_em, collector);
+        self.glyphs.insert(key, entry);
+        Some(entry)
+    }
+
+    /// 将经 `swash_shaper` 多字体 Itemizer + OpenType GSUB/GPOS + 可变字体轴塑形后的 [`ShapedGlyphRun`]
+    /// 直接编码为 Slug 2.0 GPU 曲线字形实例（支持 GSUB 无码位连字、精确 GPOS 字距与可变字重轮廓）。
+    #[cfg(feature = "swash")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn push_swash_run(
+        &mut self,
+        run: &crate::swash_shaper::ShapedGlyphRun,
+        origin_x: f32,
+        baseline_y: f32,
+        font_px: f32,
+        variations: &[crate::swash_shaper::FontVariationAxis],
+        clip_rect: [f32; 4],
+        color: [f32; 4],
+        target_w: u32,
+        target_h: u32,
+        is_srgb: bool,
+    ) -> usize {
+        let srgb_f = if is_srgb { 1.0 } else { 0.0 };
+        let mut pen_x = origin_x;
+        let mut pushed = 0usize;
+        for g in &run.glyphs {
+            if let Some(cached) = self.ensure_swash_glyph(g.font_key, g.glyph_id, variations) {
+                if cached.has_outline {
+                    self.instances.push(SlugGlyphInstance {
+                        xform_row0: [font_px, 0.0, pen_x + g.x_offset, baseline_y - g.y_offset],
+                        xform_row1: [0.0, -font_px, 1.5, srgb_f],
+                        em_bounds: cached.em_bounds,
+                        clip_rect,
+                        color,
+                        band_info: [
+                            cached.h_band_offset,
+                            cached.num_h_bands,
+                            cached.v_band_offset,
+                            cached.num_v_bands,
+                        ],
+                        viewport_info: [
+                            target_w.max(1) as f32,
+                            target_h.max(1) as f32,
+                            font_px,
+                            0.0,
+                        ],
+                    });
+                    pushed += 1;
+                }
+            }
+            pen_x += g.advance;
+        }
+        pushed
     }
 
     /// 将当前 `SceneCanvasSpec` 的全部可见世界标签编码为 Slug 实例，同步静态曲线缓冲并返回本批次实例区间 `(start, end)`。
