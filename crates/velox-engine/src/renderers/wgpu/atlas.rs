@@ -90,6 +90,21 @@ impl GuillotinePacker {
 
         Some((fx, fy))
     }
+
+    #[inline]
+    fn occupancy_ratio(&self) -> f32 {
+        let total = (self.width as u64).saturating_mul(self.height as u64);
+        if total == 0 {
+            return 0.0;
+        }
+        let free: u64 = self
+            .free_rects
+            .iter()
+            .map(|r| (r[2] as u64).saturating_mul(r[3] as u64))
+            .sum();
+        let used = total.saturating_sub(free.min(total));
+        (used as f32) / (total as f32)
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -160,6 +175,21 @@ impl GlyphAtlas {
             self.packer.reset(self.width, self.height);
             false
         }
+    }
+
+    #[inline]
+    pub(crate) fn gpu_bytes(&self) -> usize {
+        (self.width as usize).saturating_mul(self.height as usize)
+    }
+
+    #[inline]
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[inline]
+    pub(crate) fn occupancy_ratio(&self) -> f32 {
+        self.packer.occupancy_ratio()
     }
 
     /// 画布缩放防抖（Zoom Font Lock）与短 ASCII 编号（座位号/集装箱号）`O(1)` 数组查表通道：
@@ -396,6 +426,23 @@ impl SpriteAtlas {
         let uv = self.entries.get(&key).copied()?;
         self.cache_hits = self.cache_hits.wrapping_add(1);
         Some(uv)
+    }
+
+    #[inline]
+    pub(crate) fn gpu_bytes(&self) -> usize {
+        (self.width as usize)
+            .saturating_mul(self.height as usize)
+            .saturating_mul(4)
+    }
+
+    #[inline]
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[inline]
+    pub(crate) fn occupancy_ratio(&self) -> f32 {
+        self.packer.occupancy_ratio()
     }
 
     /// 扩容或清空已满的精灵图集；返回 `(texture_recreated, can_retry)`。

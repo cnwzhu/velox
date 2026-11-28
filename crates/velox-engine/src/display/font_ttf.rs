@@ -28,9 +28,217 @@ pub struct CachedGlyph {
     pub color_rgba: Option<Vec<u8>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+enum SystemFontBacking {
+    #[cfg(target_os = "windows")]
+    WinMapped {
+        ptr: *const u8,
+        len: usize,
+        mapping: *mut core::ffi::c_void,
+        _file: std::fs::File,
+    },
+    #[cfg(unix)]
+    UnixMapped {
+        ptr: *const u8,
+        len: usize,
+    },
+    Heap(Box<[u8]>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+// SAFETY: 只读文件映射与不可变堆切片均无内部可变性，跨线程只读共享安全。
+unsafe impl Send for SystemFontBacking {}
+#[cfg(not(target_arch = "wasm32"))]
+unsafe impl Sync for SystemFontBacking {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SystemFontBacking {
+    #[inline]
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            #[cfg(target_os = "windows")]
+            Self::WinMapped { ptr, len, .. } => unsafe { core::slice::from_raw_parts(*ptr, *len) },
+            #[cfg(unix)]
+            Self::UnixMapped { ptr, len } => unsafe { core::slice::from_raw_parts(*ptr, *len) },
+            Self::Heap(b) => b,
+        }
+    }
+
+    #[inline]
+    fn is_mapped(&self) -> bool {
+        !matches!(self, Self::Heap(_))
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for SystemFontBacking {
+    fn drop(&mut self) {
+        match self {
+            #[cfg(target_os = "windows")]
+            Self::WinMapped { ptr, mapping, .. } => unsafe {
+                if !ptr.is_null() {
+                    let _ = win_mmap::UnmapViewOfFile(*ptr as *const core::ffi::c_void);
+                }
+                if !mapping.is_null() {
+                    let _ = win_mmap::CloseHandle(*mapping);
+                }
+            },
+            #[cfg(unix)]
+            Self::UnixMapped { ptr, len } => unsafe {
+                if !ptr.is_null() && *len > 0 {
+                    let _ = unix_mmap::munmap(*ptr as *mut core::ffi::c_void, *len);
+                }
+            },
+            Self::Heap(_) => {}
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod win_mmap {
+    use core::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+
+    pub(super) const PAGE_READONLY: u32 = 0x02;
+    pub(super) const FILE_MAP_READ: u32 = 0x0004;
+
+    unsafe extern "system" {
+        pub(super) fn CreateFileMappingW(
+            hfile: *mut c_void,
+            attrs: *const c_void,
+            protect: u32,
+            max_size_high: u32,
+            max_size_low: u32,
+            name: *const u16,
+        ) -> *mut c_void;
+        pub(super) fn MapViewOfFile(
+            mapping: *mut c_void,
+            desired_access: u32,
+            file_offset_high: u32,
+            file_offset_low: u32,
+            bytes_to_map: usize,
+        ) -> *mut c_void;
+        pub(super) fn UnmapViewOfFile(base_addr: *const c_void) -> i32;
+        pub(super) fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    pub(super) fn map_readonly(path: &str) -> Option<super::SystemFontBacking> {
+        let file = std::fs::File::open(path).ok()?;
+        let len = file.metadata().ok()?.len() as usize;
+        if len < 64 {
+            return None;
+        }
+        unsafe {
+            let mapping = CreateFileMappingW(
+                file.as_raw_handle() as *mut c_void,
+                core::ptr::null(),
+                PAGE_READONLY,
+                0,
+                0,
+                core::ptr::null(),
+            );
+            if mapping.is_null() {
+                return None;
+            }
+            let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+            if view.is_null() {
+                let _ = CloseHandle(mapping);
+                return None;
+            }
+            Some(super::SystemFontBacking::WinMapped {
+                ptr: view as *const u8,
+                len,
+                mapping,
+                _file: file,
+            })
+        }
+    }
+}
+
+#[cfg(unix)]
+mod unix_mmap {
+    use core::ffi::c_void;
+    use std::os::unix::io::AsRawFd;
+
+    const PROT_READ: i32 = 1;
+    const MAP_SHARED: i32 = 1;
+
+    unsafe extern "C" {
+        fn mmap(
+            addr: *mut c_void,
+            length: usize,
+            prot: i32,
+            flags: i32,
+            fd: i32,
+            offset: isize,
+        ) -> *mut c_void;
+        pub(super) fn munmap(addr: *mut c_void, length: usize) -> i32;
+    }
+
+    pub(super) fn map_readonly(path: &str) -> Option<super::SystemFontBacking> {
+        let file = std::fs::File::open(path).ok()?;
+        let len = file.metadata().ok()?.len() as usize;
+        if len < 64 {
+            return None;
+        }
+        unsafe {
+            let view = mmap(
+                core::ptr::null_mut(),
+                len,
+                PROT_READ,
+                MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            );
+            if view.is_null() || view as isize == -1 {
+                return None;
+            }
+            Some(super::SystemFontBacking::UnixMapped {
+                ptr: view as *const u8,
+                len,
+            })
+        }
+    }
+}
+
 struct LoadedFont {
     bytes: &'static [u8],
     face: Face<'static>,
+    #[cfg(not(target_arch = "wasm32"))]
+    backing: SystemFontBacking,
+}
+
+// SAFETY: `LoadedFont` 仅存放于进程级 `OnceLock` 静态只读槽位中，永不移动或释放底层映射。
+unsafe impl Send for LoadedFont {}
+unsafe impl Sync for LoadedFont {}
+
+impl LoadedFont {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn from_backing(backing: SystemFontBacking) -> Option<Self> {
+        let slice = backing.as_slice();
+        let ptr = slice.as_ptr();
+        let len = slice.len();
+        // SAFETY: `backing`（OS 文件映射视图或 `Box<[u8]>`）的地址与结构体自身移动无关，
+        // 且 `LoadedFont` 仅存入进程生命周期的 `OnceLock` 中永不销毁。
+        let static_bytes: &'static [u8] = unsafe { core::slice::from_raw_parts(ptr, len) };
+        let face = Face::parse(static_bytes, 0).ok()?;
+        Some(Self {
+            bytes: static_bytes,
+            face,
+            backing,
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
+    fn is_mapped(&self) -> bool {
+        self.backing.is_mapped()
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -61,12 +269,8 @@ const FALLBACK_CJK_CANDIDATES: &[&str] = &[
 ];
 
 #[cfg(not(target_arch = "wasm32"))]
-static PRIMARY_BYTES: OnceLock<Option<Box<[u8]>>> = OnceLock::new();
-#[cfg(not(target_arch = "wasm32"))]
 static PRIMARY_FONT: OnceLock<Option<LoadedFont>> = OnceLock::new();
 
-#[cfg(not(target_arch = "wasm32"))]
-static FALLBACK_CJK_BYTES: OnceLock<Option<Box<[u8]>>> = OnceLock::new();
 #[cfg(not(target_arch = "wasm32"))]
 static FALLBACK_CJK_FONT: OnceLock<Option<LoadedFont>> = OnceLock::new();
 
@@ -95,11 +299,26 @@ std::thread_local! {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn read_first_valid_font(candidates: &[&str]) -> Option<Box<[u8]>> {
+fn load_first_valid_font(candidates: &[&str]) -> Option<LoadedFont> {
     for path in candidates {
+        // 优先使用操作系统只读共享文件映射（零私钥堆拷贝、零整文件读取），失败时安全回退堆读取
+        #[cfg(target_os = "windows")]
+        if let Some(mapped) = win_mmap::map_readonly(path) {
+            if let Some(loaded) = LoadedFont::from_backing(mapped) {
+                return Some(loaded);
+            }
+        }
+        #[cfg(unix)]
+        if let Some(mapped) = unix_mmap::map_readonly(path) {
+            if let Some(loaded) = LoadedFont::from_backing(mapped) {
+                return Some(loaded);
+            }
+        }
         if let Ok(bytes) = std::fs::read(path) {
-            if Face::parse(bytes.as_slice(), 0).is_ok() {
-                return Some(bytes.into_boxed_slice());
+            if let Some(loaded) =
+                LoadedFont::from_backing(SystemFontBacking::Heap(bytes.into_boxed_slice()))
+            {
+                return Some(loaded);
             }
         }
     }
@@ -110,14 +329,8 @@ fn read_first_valid_font(candidates: &[&str]) -> Option<Box<[u8]>> {
 fn primary_font() -> Option<&'static LoadedFont> {
     PRIMARY_FONT
         .get_or_init(|| {
-            let bytes = PRIMARY_BYTES
-                .get_or_init(|| {
-                    read_first_valid_font(PRIMARY_FONT_CANDIDATES)
-                        .or_else(|| read_first_valid_font(FALLBACK_CJK_CANDIDATES))
-                })
-                .as_deref()?;
-            let face = Face::parse(bytes, 0).ok()?;
-            Some(LoadedFont { bytes, face })
+            load_first_valid_font(PRIMARY_FONT_CANDIDATES)
+                .or_else(|| load_first_valid_font(FALLBACK_CJK_CANDIDATES))
         })
         .as_ref()
 }
@@ -125,13 +338,7 @@ fn primary_font() -> Option<&'static LoadedFont> {
 #[cfg(not(target_arch = "wasm32"))]
 fn fallback_cjk_font() -> Option<&'static LoadedFont> {
     FALLBACK_CJK_FONT
-        .get_or_init(|| {
-            let bytes = FALLBACK_CJK_BYTES
-                .get_or_init(|| read_first_valid_font(FALLBACK_CJK_CANDIDATES))
-                .as_deref()?;
-            let face = Face::parse(bytes, 0).ok()?;
-            Some(LoadedFont { bytes, face })
-        })
+        .get_or_init(|| load_first_valid_font(FALLBACK_CJK_CANDIDATES))
         .as_ref()
 }
 
@@ -209,6 +416,18 @@ pub fn get_system_font_bytes() -> Option<&'static [u8]> {
 pub fn resolve_char_font_and_glyph(ch: char) -> Option<(&'static [u8], u16)> {
     let (font, gid) = select_font_and_glyph(ch)?;
     Some((font.bytes, gid.0))
+}
+
+/// 供 GPU 曲线字形渲染器（Slug）按字符零拷贝访问解析后的 `ttf_parser::Face`、`GlyphId` 与稳定字体键。
+#[cfg(feature = "gpu")]
+#[inline]
+pub(crate) fn with_char_face_and_glyph<R>(
+    ch: char,
+    f: impl FnOnce(&Face<'_>, GlyphId, u64) -> R,
+) -> Option<R> {
+    let (font, gid) = select_font_and_glyph(ch)?;
+    let font_key = font.bytes.as_ptr() as usize as u64;
+    Some(f(&font.face, gid, font_key))
 }
 
 /// 获取指定精确浮点字号（`fs`）在单行行盒内的光学垂直居中基线偏移（像素），
@@ -832,13 +1051,7 @@ fn invalidate_styled_glyphs_for_spec(spec: crate::text_rich::FontSpec) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn load_static_candidate(candidates: &[&str]) -> Option<LoadedFont> {
-    let boxed = read_first_valid_font(candidates)?;
-    let leaked: &'static [u8] = Box::leak(boxed);
-    let face = Face::parse(leaked, 0).ok()?;
-    Some(LoadedFont {
-        bytes: leaked,
-        face,
-    })
+    load_first_valid_font(candidates)
 }
 
 /// 注册静态 TrueType/OpenType 字体字节流到指定 [`FontSpec`](crate::text_rich::FontSpec)（支持自定义字族、粗体、斜体与等宽字体）。
@@ -901,6 +1114,102 @@ pub fn registered_custom_font_bytes() -> usize {
                 .map(|r| r.values().map(|f| f.owned_bytes()).sum())
         })
         .unwrap_or(0)
+}
+
+/// 字体与字形位图缓存内存占用快照（供性能剖析与四层内存账本使用）。
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct FontMemoryStats {
+    pub primary_bytes: usize,
+    pub fallback_cjk_bytes: usize,
+    pub bold_bytes: usize,
+    pub italic_bytes: usize,
+    pub mono_bytes: usize,
+    pub mono_bold_bytes: usize,
+    pub serif_bytes: usize,
+    pub custom_font_bytes: usize,
+    /// 通过 OS 只读共享文件映射（`MapViewOfFile` / `mmap`）加载的字体字节（不占用 Rust 私有堆）。
+    pub mapped_font_bytes: usize,
+    /// 真正驻留在进程私有堆上的字体字节（自定义动态注册字体或不支持 mmap 的回退）。
+    pub heap_font_bytes: usize,
+    pub glyph_cache_entries: usize,
+    pub glyph_cache_bitmap_bytes: usize,
+    pub styled_glyph_cache_entries: usize,
+    pub styled_glyph_cache_bitmap_bytes: usize,
+}
+
+impl FontMemoryStats {
+    /// 原始 TTF/TTC 字体文件字节总计（只读映射 + 私有堆）。
+    #[inline]
+    pub const fn total_raw_font_bytes(&self) -> usize {
+        self.primary_bytes
+            + self.fallback_cjk_bytes
+            + self.bold_bytes
+            + self.italic_bytes
+            + self.mono_bytes
+            + self.mono_bold_bytes
+            + self.serif_bytes
+            + self.custom_font_bytes
+    }
+
+    /// 缓存的 CPU 抗锯齿字形位图总字节（含彩色 Emoji RGBA8）。
+    #[inline]
+    pub const fn total_bitmap_bytes(&self) -> usize {
+        self.glyph_cache_bitmap_bytes + self.styled_glyph_cache_bitmap_bytes
+    }
+}
+
+/// 采集当前已加载 TrueType 原始字体文件与字形位图缓存的精确字节统计（零副作用、不触发懒加载）。
+pub fn font_memory_stats() -> FontMemoryStats {
+    let mut stats = FontMemoryStats::default();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut record = |slot: &OnceLock<Option<LoadedFont>>| -> usize {
+            let Some(f) = slot.get().and_then(|o| o.as_ref()) else {
+                return 0;
+            };
+            let len = f.backing.len();
+            if f.is_mapped() {
+                stats.mapped_font_bytes += len;
+            } else {
+                stats.heap_font_bytes += len;
+            }
+            len
+        };
+        stats.primary_bytes = record(&PRIMARY_FONT);
+        stats.fallback_cjk_bytes = record(&FALLBACK_CJK_FONT);
+        stats.bold_bytes = record(&BOLD_FONT);
+        stats.italic_bytes = record(&ITALIC_FONT);
+        stats.mono_bytes = record(&MONO_FONT);
+        stats.mono_bold_bytes = record(&MONO_BOLD_FONT);
+        stats.serif_bytes = record(&SERIF_FONT);
+    }
+    stats.custom_font_bytes = registered_custom_font_bytes();
+    stats.heap_font_bytes += stats.custom_font_bytes;
+    if let Some(cache) = GLYPH_CACHE.get() {
+        if let Ok(r) = cache.read() {
+            stats.glyph_cache_entries = r.len();
+            stats.glyph_cache_bitmap_bytes = r
+                .values()
+                .map(|g| {
+                    g.bitmap.capacity()
+                        + g.color_rgba.as_ref().map(|v| v.capacity()).unwrap_or(0)
+                })
+                .sum();
+        }
+    }
+    if let Some(cache) = STYLED_GLYPH_CACHE.get() {
+        if let Ok(r) = cache.read() {
+            stats.styled_glyph_cache_entries = r.len();
+            stats.styled_glyph_cache_bitmap_bytes = r
+                .values()
+                .map(|g| {
+                    g.bitmap.capacity()
+                        + g.color_rgba.as_ref().map(|v| v.capacity()).unwrap_or(0)
+                })
+                .sum();
+        }
+    }
+    stats
 }
 
 fn select_styled_font_and_glyph(

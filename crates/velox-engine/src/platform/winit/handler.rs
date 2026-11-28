@@ -253,7 +253,13 @@ impl WinitAppHandler {
             let ops = self.core.cached_draw_ops();
             let sf = self.core.scale_factor();
             let scene_bg = infer_scene_bg(ops, self.core.theme().background);
-            let presented = gpu_surf.render_scaled_with_clear(ops, viewport, sf, scene_bg);
+            let presented = gpu_surf.render_scaled_with_clear_dirty(
+                ops,
+                viewport,
+                sf,
+                scene_bg,
+                &curr_damage,
+            );
             if presented {
                 if wait_gpu_sync {
                     gpu_surf.flush_and_wait();

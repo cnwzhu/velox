@@ -76,21 +76,17 @@ impl OffscreenGpuState {
         if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
             return None;
         }
-        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("velox_offscreen_device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            memory_hints: wgpu::MemoryHints::MemoryUsage,
-            trace: wgpu::Trace::default(),
-            experimental_features: wgpu::ExperimentalFeatures::default(),
-        }))
-        .ok()?;
+        let (device, queue, pso_cache) = super::pso_cache::request_device_with_pso_cache(
+            &adapter,
+            "velox_offscreen_device",
+            wgpu::Limits::default(),
+        )?;
 
         let w = width.max(1);
         let h = height.max(1);
         let (target_texture, target_view, readback_buf, padded_bytes_per_row) =
             Self::create_targets(&device, w, h);
-        let renderer = WgpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let renderer = WgpuRenderer::new_with_cache(&device, wgpu::TextureFormat::Rgba8Unorm, pso_cache);
 
         Some(Self {
             renderer,
@@ -414,6 +410,49 @@ impl WgpuOffscreenRenderer {
     #[inline]
     pub fn queue(&self) -> Option<&wgpu::Queue> {
         self.gpu.as_ref().map(|g| &g.queue)
+    }
+
+    /// 返回内部 `WgpuRenderer` 的完整 GPU/CPU 子池内存统计快照（若 GPU 已就绪）。
+    #[inline]
+    pub fn gpu_memory_stats(&self) -> Option<super::WgpuMemoryStats> {
+        self.gpu.as_ref().map(|g| g.renderer.memory_stats())
+    }
+
+    /// 显式启动后台子管线（Effects / Canvas）异步预热线程。
+    #[inline]
+    pub fn spawn_background_pipeline_warmup(&mut self) {
+        if let Some(g) = &mut self.gpu {
+            g.renderer.spawn_background_pipeline_warmup(&g.device, &g.queue);
+        }
+    }
+
+    /// 等待后台子管线预热线程完成并收割已编译子引擎。
+    #[inline]
+    pub fn wait_background_pipeline_warmup(&mut self) {
+        if let Some(g) = &mut self.gpu {
+            g.renderer.wait_background_pipeline_warmup();
+        }
+    }
+
+    /// 返回当前离屏 GPU 渲染器是否成功从磁盘加载了二进制 PSO 缓存。
+    #[inline]
+    pub fn pso_cache_loaded_from_disk(&self) -> bool {
+        self.gpu
+            .as_ref()
+            .is_some_and(|g| g.renderer.pso_cache_loaded_from_disk())
+    }
+
+    /// 估算离屏渲染目标纹理与回读缓冲本身占用的 GPU/映射字节。
+    #[inline]
+    pub fn offscreen_target_gpu_bytes(&self) -> usize {
+        self.gpu
+            .as_ref()
+            .map(|g| {
+                let target = (g.width as usize) * (g.height as usize) * 4;
+                let readback = (g.padded_bytes_per_row as usize) * (g.height as usize);
+                target + readback
+            })
+            .unwrap_or(0)
     }
 
     /// 向离屏渲染器注册外部零拷贝 GPU 纹理（如海图/视频/3D 视口）。

@@ -68,6 +68,107 @@ fn hash_layout_text(text: &str) -> u64 {
     h
 }
 
+#[inline]
+fn mix_u64(h: &mut u64, v: u64) {
+    *h ^= v;
+    *h = h.wrapping_mul(0x0100_0000_01b3);
+}
+
+#[inline]
+fn mix_region(h: &mut u64, r: Region) {
+    let packed = ((r.x as u16 as u64) << 48)
+        | ((r.y as u16 as u64) << 32)
+        | ((r.w as u16 as u64) << 16)
+        | (r.h as u16 as u64);
+    mix_u64(h, packed);
+}
+
+/// 判断逻辑脏矩形切片映射到物理像素并外扩 1px 保护边后，是否与毛玻璃外扩采样区 `[sx, sy, sw, sh]` 相交。
+fn dirty_intersects_phys_rect(
+    dirty_regions: &[Region],
+    sx: u32,
+    sy: u32,
+    sw: u32,
+    sh: u32,
+    sf: f32,
+) -> bool {
+    let bx0 = sx as i64;
+    let by0 = sy as i64;
+    let bx1 = bx0 + sw as i64;
+    let by1 = by0 + sh as i64;
+    for &d in dirty_regions {
+        if d.is_empty() {
+            continue;
+        }
+        let dx0 = ((d.x as f32) * sf).floor() as i64 - 1;
+        let dy0 = ((d.y as f32) * sf).floor() as i64 - 1;
+        let dx1 = ((d.right() as f32) * sf).ceil() as i64 + 1;
+        let dy1 = ((d.bottom() as f32) * sf).ceil() as i64 + 1;
+        if dx0 < bx1 && dx1 > bx0 && dy0 < by1 && dy1 > by0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// 计算当前毛玻璃之前、落在外扩采样框 `sample_logical` 内的所有背景图元内容特征哈希。
+///
+/// 若下方存在外部实时视频/雷达纹理（内容可能脱离 `DrawOp` 变更），返回 `None` 禁止跨帧复用以保证实时性。
+fn compute_backdrop_underlay_hash(
+    ops_before: &[DrawOp<'_>],
+    sample_logical: Region,
+    clear_color: wgpu::Color,
+) -> Option<u64> {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    mix_u64(&mut h, clear_color.r.to_bits());
+    mix_u64(&mut h, clear_color.g.to_bits());
+    mix_u64(&mut h, clear_color.b.to_bits());
+    mix_u64(&mut h, clear_color.a.to_bits());
+
+    for op in ops_before {
+        let always_affect = matches!(
+            op.payload,
+            DrawPayload::PushLayer(_)
+                | DrawPayload::PopLayer
+                | DrawPayload::ExternalTexture(_)
+                | DrawPayload::StyledQuad(_)
+        );
+        if !always_affect && op.bounds.intersect(sample_logical).is_empty() {
+            continue;
+        }
+        if matches!(op.payload, DrawPayload::ExternalTexture(_))
+            && !op.bounds.intersect(sample_logical).is_empty()
+        {
+            return None;
+        }
+        if let DrawPayload::StyledQuad(sq) = op.payload {
+            if sq.transform.is_none() && op.bounds.intersect(sample_logical).is_empty() {
+                continue;
+            }
+        }
+        let snap = op.to_snapshot();
+        mix_region(&mut h, snap.effective_bounds);
+        mix_region(&mut h, op.clip);
+        mix_u64(&mut h, snap.payload_hash as u64);
+        match op.payload {
+            DrawPayload::SceneCanvas(sc) => {
+                mix_u64(&mut h, sc.content_hash() as u64);
+            }
+            DrawPayload::Vector(vs) => {
+                let mut vh = 0x5645_4354u32;
+                vs.mix_hash(&mut vh);
+                mix_u64(&mut h, vh as u64);
+            }
+            DrawPayload::DecodedImage(img) => {
+                mix_u64(&mut h, img.id.0 as u64);
+                mix_u64(&mut h, crate::image_pipeline::image_revision(img.id).unwrap_or(0));
+            }
+            _ => {}
+        }
+    }
+    Some(h)
+}
+
 /// 256 字节对齐的动态 `ViewportUniform` 槽位（供多 Pass 离屏图层共享单个 `viewport_buf`）。
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -101,6 +202,49 @@ pub(crate) struct ExternalTextureEntry {
     pub(crate) sampler: Option<wgpu::Sampler>,
 }
 
+/// `WgpuRenderer` GPU 与伴随 CPU 缓存字节统计快照（用于四层内存账本剖析）。
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct WgpuMemoryStats {
+    pub glyph_atlas_size: u32,
+    pub glyph_atlas_bytes: usize,
+    pub glyph_atlas_entries: usize,
+    pub glyph_atlas_occupancy: f32,
+    pub sprite_atlas_size: u32,
+    pub sprite_atlas_bytes: usize,
+    pub sprite_atlas_entries: usize,
+    pub sprite_atlas_occupancy: f32,
+    pub ramp_atlas_bytes: usize,
+    pub instance_buf_bytes: usize,
+    pub uploaded_primitives_cpu_bytes: usize,
+    pub layer_pool_targets: usize,
+    pub layer_pool_target_bytes: usize,
+    pub layer_pool_masks: usize,
+    pub layer_pool_mask_bytes: usize,
+    pub canvas_scenes: usize,
+    pub canvas_gpu_bytes: usize,
+    pub slug_cached_glyphs: usize,
+    pub slug_gpu_bytes: usize,
+    pub slug_last_drawn_glyphs: usize,
+    pub text_layout_cache_entries: usize,
+    pub backdrop_blur_cache_hits: u64,
+    pub backdrop_blur_cache_misses: u64,
+}
+
+impl WgpuMemoryStats {
+    /// 估算该渲染器持有的全部 GPU 纹理与缓冲总字节。
+    #[inline]
+    pub const fn total_gpu_bytes(&self) -> usize {
+        self.glyph_atlas_bytes
+            + self.sprite_atlas_bytes
+            + self.ramp_atlas_bytes
+            + self.instance_buf_bytes
+            + self.layer_pool_target_bytes
+            + self.layer_pool_mask_bytes
+            + self.canvas_gpu_bytes
+            + self.slug_gpu_bytes
+    }
+}
+
 /// 自研轻量级 `wgpu` 2D SDF 渲染管线核心（绑定任意目标 `TextureView` 即可渲染）。
 pub struct WgpuRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -118,6 +262,9 @@ pub struct WgpuRenderer {
     ramp_atlas: GradientRampAtlas,
     effects: Option<GpuEffectsEngine>,
     canvas_engine: Option<super::canvas_pipeline::CanvasGpuEngine>,
+    pipeline_cache: Option<Arc<super::pso_cache::DiskPipelineCache>>,
+    bg_effects_rx: Option<std::sync::mpsc::Receiver<GpuEffectsEngine>>,
+    bg_canvas_rx: Option<std::sync::mpsc::Receiver<super::canvas_pipeline::CanvasGpuEngine>>,
     external_textures: HashMap<ExternalTextureId, ExternalTextureEntry>,
     next_external_id: u32,
     target_format: wgpu::TextureFormat,
@@ -137,6 +284,15 @@ pub struct WgpuRenderer {
 impl WgpuRenderer {
     /// 基于已有 `wgpu::Device` 与目标表面像素格式创建 2D SDF 渲染管线。
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        Self::new_with_cache(device, target_format, None)
+    }
+
+    /// 基于已有 `wgpu::Device`、目标表面像素格式与可选持久化磁盘 `PipelineCache` 创建 2D SDF 渲染管线。
+    pub(crate) fn new_with_cache(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        pipeline_cache: Option<Arc<super::pso_cache::DiskPipelineCache>>,
+    ) -> Self {
         let trace = std::env::var_os("VELOX_STARTUP_TRACE").is_some();
         let t0 = std::time::Instant::now();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -252,14 +408,18 @@ impl WgpuRenderer {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: pipeline_cache.as_deref().map(|c| c.wgpu_cache()),
         });
         let t_pso = t0.elapsed();
+        if let Some(c) = &pipeline_cache {
+            c.persist();
+        }
         if trace {
             std::println!(
-                "[VELOX_STARTUP_TRACE]   pipeline detail: create_shader_module={:.1}ms, create_render_pipeline=+{:.1}ms",
+                "[VELOX_STARTUP_TRACE]   pipeline detail: create_shader_module={:.1}ms, create_render_pipeline=+{:.1}ms, pso_cache_hit={}",
                 t_shader.as_secs_f64() * 1000.0,
                 (t_pso - t_shader).as_secs_f64() * 1000.0,
+                pipeline_cache.as_ref().is_some_and(|c| c.loaded_from_disk()),
             );
         }
 
@@ -317,6 +477,9 @@ impl WgpuRenderer {
             ramp_atlas,
             effects: None,
             canvas_engine: None,
+            pipeline_cache,
+            bg_effects_rx: None,
+            bg_canvas_rx: None,
             external_textures: HashMap::new(),
             next_external_id: 1,
             target_format,
@@ -505,6 +668,198 @@ impl WgpuRenderer {
     #[inline]
     pub fn layer_mask_cache_count(&self) -> usize {
         self.effects.as_ref().map(|fx| fx.pool.mask_count()).unwrap_or(0)
+    }
+
+    /// 返回内部已加载的持久化磁盘 PSO 缓存是否命中（仅在支持 `Features::PIPELINE_CACHE` 的后端上为 `true`）。
+    #[inline]
+    pub fn pso_cache_loaded_from_disk(&self) -> bool {
+        self.pipeline_cache
+            .as_ref()
+            .is_some_and(|c| c.loaded_from_disk())
+    }
+
+    /// 在低优先级后台线程异步预编译 `GpuEffectsEngine`（Dual Kawase / 混合模式）与 `CanvasGpuEngine` PSO，
+    /// 首屏不阻塞且消除首次切换至特效或交互画布页时的主线程同步编译卡顿。
+    pub fn spawn_background_pipeline_warmup(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let need_effects = self.effects.is_none() && self.bg_effects_rx.is_none();
+        let need_canvas = self.canvas_engine.is_none() && self.bg_canvas_rx.is_none();
+        if !need_effects && !need_canvas {
+            return;
+        }
+        struct WarmupPayload {
+            device: wgpu::Device,
+            queue: wgpu::Queue,
+            fmt: wgpu::TextureFormat,
+            cache: Option<Arc<super::pso_cache::DiskPipelineCache>>,
+            fx_tx: Option<std::sync::mpsc::Sender<GpuEffectsEngine>>,
+            cv_tx: Option<std::sync::mpsc::Sender<super::canvas_pipeline::CanvasGpuEngine>>,
+        }
+        // SAFETY: `wgpu::Device`/`Queue` 底层均为 `Arc` 跨线程安全句柄，显式实现避免 `wgpu 30` 深层 `Hub` 递归校验警告。
+        unsafe impl Send for WarmupPayload {}
+
+        let payload = WarmupPayload {
+            device: device.clone(),
+            queue: queue.clone(),
+            fmt: self.target_format,
+            cache: self.pipeline_cache.clone(),
+            fx_tx: if need_effects {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.bg_effects_rx = Some(rx);
+                Some(tx)
+            } else {
+                None
+            },
+            cv_tx: if need_canvas {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.bg_canvas_rx = Some(rx);
+                Some(tx)
+            } else {
+                None
+            },
+        };
+
+        let _ = std::thread::Builder::new()
+            .name(String::from("velox-pso-warmup"))
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                let payload = payload;
+                let trace = std::env::var_os("VELOX_STARTUP_TRACE").is_some();
+                let t0 = std::time::Instant::now();
+                let raw_cache = payload.cache.as_deref().map(|c| c.wgpu_cache());
+                if let Some(tx) = payload.fx_tx {
+                    let fx = GpuEffectsEngine::new(&payload.device, &payload.queue, payload.fmt, raw_cache);
+                    if let Some(c) = &payload.cache {
+                        c.persist();
+                    }
+                    let _ = tx.send(fx);
+                }
+                let t_fx = t0.elapsed();
+                if let Some(tx) = payload.cv_tx {
+                    let cv = super::canvas_pipeline::CanvasGpuEngine::new(
+                        &payload.device,
+                        payload.fmt,
+                        raw_cache,
+                    );
+                    if let Some(c) = &payload.cache {
+                        c.persist();
+                    }
+                    let _ = tx.send(cv);
+                }
+                if trace {
+                    let t_all = t0.elapsed();
+                    std::println!(
+                        "[VELOX_STARTUP_TRACE] async bg sub-pipeline warmup: effects={:.1}ms, canvas=+{:.1}ms, total={:.1}ms",
+                        t_fx.as_secs_f64() * 1000.0,
+                        (t_all - t_fx).as_secs_f64() * 1000.0,
+                        t_all.as_secs_f64() * 1000.0,
+                    );
+                }
+            });
+    }
+
+    /// 非阻塞收割已在后台线程预热完毕的特效与画布子引擎（0.0ms）。
+    pub(crate) fn poll_warmed_subengines(&mut self) {
+        if self.effects.is_none() {
+            if let Some(rx) = &self.bg_effects_rx {
+                match rx.try_recv() {
+                    Ok(fx) => {
+                        self.effects = Some(fx);
+                        self.bg_effects_rx = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.bg_effects_rx = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        }
+        if self.canvas_engine.is_none() {
+            if let Some(rx) = &self.bg_canvas_rx {
+                match rx.try_recv() {
+                    Ok(cv) => {
+                        self.canvas_engine = Some(cv);
+                        self.bg_canvas_rx = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.bg_canvas_rx = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        }
+    }
+
+    /// 等待后台子管线预热线程完成并收割结果（主要用于测试基准验证或应用显式预热屏障）。
+    pub fn wait_background_pipeline_warmup(&mut self) {
+        if let Some(rx) = self.bg_effects_rx.take() {
+            if let Ok(fx) = rx.recv() {
+                if self.effects.is_none() {
+                    self.effects = Some(fx);
+                }
+            }
+        }
+        if let Some(rx) = self.bg_canvas_rx.take() {
+            if let Ok(cv) = rx.recv() {
+                if self.canvas_engine.is_none() {
+                    self.canvas_engine = Some(cv);
+                }
+            }
+        }
+    }
+
+    /// 返回跨帧毛玻璃（`backdrop-filter`）模糊小纹理缓存命中与未命中统计 `(hits, misses)`。
+    #[inline]
+    pub fn backdrop_blur_cache_stats(&self) -> (u64, u64) {
+        self.effects
+            .as_ref()
+            .map(|fx| fx.pool.backdrop_cache_stats())
+            .unwrap_or((0, 0))
+    }
+
+    /// 返回当前 `WgpuRenderer` 各子池（字形/精灵/渐变图集、实例缓冲、离屏图层池、Canvas 场景缓冲）完整内存快照。
+    pub fn memory_stats(&self) -> WgpuMemoryStats {
+        let (canvas_scenes, canvas_gpu_bytes, slug_cached_glyphs, slug_gpu_bytes, slug_last_drawn_glyphs) =
+            self.canvas_engine
+                .as_ref()
+                .map(|c| {
+                    let (sg, sb, sd) = c.slug_stats();
+                    (c.scene_count(), c.total_gpu_bytes(), sg, sb, sd)
+                })
+                .unwrap_or((0, 0, 0, 0, 0));
+        let (backdrop_blur_cache_hits, backdrop_blur_cache_misses) = self.backdrop_blur_cache_stats();
+        WgpuMemoryStats {
+            glyph_atlas_size: self.glyph_atlas.width,
+            glyph_atlas_bytes: self.glyph_atlas.gpu_bytes(),
+            glyph_atlas_entries: self.glyph_atlas.entry_count(),
+            glyph_atlas_occupancy: self.glyph_atlas.occupancy_ratio(),
+            sprite_atlas_size: self.sprite_atlas.width,
+            sprite_atlas_bytes: self.sprite_atlas.gpu_bytes(),
+            sprite_atlas_entries: self.sprite_atlas.entry_count(),
+            sprite_atlas_occupancy: self.sprite_atlas.occupancy_ratio(),
+            ramp_atlas_bytes: (super::ramp::RAMP_WIDTH as usize)
+                .saturating_mul(self.ramp_atlas.rows as usize)
+                .saturating_mul(4),
+            instance_buf_bytes: self
+                .instance_capacity
+                .saturating_mul(core::mem::size_of::<GpuPrimitive>()),
+            uploaded_primitives_cpu_bytes: self
+                .uploaded_primitives
+                .capacity()
+                .saturating_add(self.primitives.capacity())
+                .saturating_mul(core::mem::size_of::<GpuPrimitive>()),
+            layer_pool_targets: self.layer_pool_target_count(),
+            layer_pool_target_bytes: self.layer_pool_bytes(),
+            layer_pool_masks: self.layer_mask_cache_count(),
+            layer_pool_mask_bytes: self.layer_mask_cache_bytes(),
+            canvas_scenes,
+            canvas_gpu_bytes,
+            slug_cached_glyphs,
+            slug_gpu_bytes,
+            slug_last_drawn_glyphs,
+            text_layout_cache_entries: self.text_layout_cache.len(),
+            backdrop_blur_cache_hits,
+            backdrop_blur_cache_misses,
+        }
     }
 
     /// 配置离屏图层纹理池的空闲字节预算（超出时在帧末按 LRU 立即回收）。
@@ -1628,6 +1983,36 @@ impl WgpuRenderer {
         phys_height: u32,
         clear_color: wgpu::Color,
     ) {
+        self.render_to_view_with_damage_hints(
+            device,
+            queue,
+            ops,
+            viewport,
+            scale_factor,
+            target_view,
+            phys_width,
+            phys_height,
+            clear_color,
+            None,
+        );
+    }
+
+    /// 面向 Swapchain 整帧清屏呈现的入口，同时接受可选的 `damage_hints` 脏区切片供多 Pass 毛玻璃
+    /// 执行外扩采样框交集剪枝与模糊小纹理跨帧复用（绝不跳过 Swapchain 整屏清屏）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_to_view_with_damage_hints(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        ops: &[DrawOp<'_>],
+        viewport: Region,
+        scale_factor: f32,
+        target_view: &wgpu::TextureView,
+        phys_width: u32,
+        phys_height: u32,
+        clear_color: wgpu::Color,
+        damage_hints: Option<&[Region]>,
+    ) {
         if ops_have_layers_or_blend(ops) && !viewport.is_empty() {
             self.render_to_view_multi_pass(
                 device,
@@ -1639,6 +2024,7 @@ impl WgpuRenderer {
                 phys_width,
                 phys_height,
                 clear_color,
+                damage_hints,
             );
             return;
         }
@@ -1751,11 +2137,39 @@ impl WgpuRenderer {
         dirty_regions: &[Region],
         clear_color: wgpu::Color,
     ) {
-        if dirty_regions.is_empty()
-            || crate::renderers::software::ops_have_layers_or_blend(ops)
-            || ops
-                .iter()
-                .any(|op| matches!(op.payload, DrawPayload::SceneCanvas(_)))
+        if dirty_regions.is_empty() {
+            self.render_to_view(
+                device,
+                queue,
+                ops,
+                viewport,
+                scale_factor,
+                target_view,
+                phys_width,
+                phys_height,
+                clear_color,
+            );
+            return;
+        }
+        if crate::renderers::software::ops_have_layers_or_blend(ops) && !viewport.is_empty() {
+            // 透传精确脏区列表供 `backdrop-filter` 执行外扩采样框交集跳过与模糊小纹理复用
+            self.render_to_view_multi_pass(
+                device,
+                queue,
+                ops,
+                viewport,
+                scale_factor,
+                target_view,
+                phys_width,
+                phys_height,
+                clear_color,
+                Some(dirty_regions),
+            );
+            return;
+        }
+        if ops
+            .iter()
+            .any(|op| matches!(op.payload, DrawPayload::SceneCanvas(_)))
         {
             self.render_to_view(
                 device,
@@ -1867,6 +2281,7 @@ impl WgpuRenderer {
         phys_width: u32,
         phys_height: u32,
         clear_color: wgpu::Color,
+        dirty_regions: Option<&[Region]>,
     ) {
         let pw = phys_width.max(1);
         let ph = phys_height.max(1);
@@ -1874,13 +2289,35 @@ impl WgpuRenderer {
         let use_ttf = crate::display::ttf_atlas::has_system_font();
         let is_srgb = self.target_is_srgb;
 
+        self.poll_warmed_subengines();
         if self.effects.is_none() {
-            self.effects = Some(GpuEffectsEngine::new(device, queue, self.target_format));
+            let raw_cache = self.pipeline_cache.as_deref().map(|c| c.wgpu_cache());
+            self.effects = Some(GpuEffectsEngine::new(
+                device,
+                queue,
+                self.target_format,
+                raw_cache,
+            ));
+            if let Some(c) = &self.pipeline_cache {
+                c.persist();
+            }
         }
 
         let mut bind_group_dirty = false;
         for _attempt in 0..4 {
-            match self.try_plan_multi_pass(device, queue, ops, viewport, sf, use_ttf, pw, ph, clear_color, is_srgb) {
+            match self.try_plan_multi_pass(
+                device,
+                queue,
+                ops,
+                viewport,
+                sf,
+                use_ttf,
+                pw,
+                ph,
+                clear_color,
+                is_srgb,
+                dirty_regions,
+            ) {
                 Ok(()) => break,
                 Err(need) => {
                     let (dirty, can_retry) = self.handle_atlas_grow(device, need);
@@ -1917,6 +2354,8 @@ impl WgpuRenderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("velox_wgpu_multi_pass_encoder"),
         });
+        let raw_cache = self.pipeline_cache.as_deref().map(|c| c.wgpu_cache());
+        let had_canvas = self.canvas_engine.is_some();
         if let Some(ref mut fx) = self.effects {
             fx.execute_steps(
                 device,
@@ -1928,9 +2367,15 @@ impl WgpuRenderer {
                 &self.external_textures,
                 ops,
                 &mut self.canvas_engine,
+                raw_cache,
                 self.target_format,
                 target_view,
             );
+        }
+        if !had_canvas && self.canvas_engine.is_some() {
+            if let Some(c) = &self.pipeline_cache {
+                c.persist();
+            }
         }
         queue.submit([encoder.finish()]);
         if let Some(fx) = &mut self.effects {
@@ -1954,6 +2399,7 @@ impl WgpuRenderer {
         ph: u32,
         clear_color: wgpu::Color,
         is_srgb: bool,
+        dirty_regions: Option<&[Region]>,
     ) -> Result<(), AtlasGrowNeed> {
         struct LayerFrame<'a> {
             tex_idx: usize,
@@ -2062,22 +2508,71 @@ impl WgpuRenderer {
                             );
                             let (sx, sy, sw, sh) = clamp_rect_u32(raw_sample, parent_aw, parent_ah);
                             if sw > 0 && sh > 0 {
-                                let bd_raw = fx.pool.acquire(device, sw, sh);
-                                fx.steps.push(GpuPassStep::CopyRect {
-                                    src_idx: parent_idx,
-                                    src_origin: (sx, sy),
-                                    dst_idx: bd_raw,
-                                    dst_origin: (0, 0),
-                                    size: (sw, sh),
-                                });
-                                let bd_blurred = if blur_px >= 0.5 {
-                                    let b = fx.plan_kawase_blur(device, bd_raw, sw, sh, blur_px, is_srgb);
-                                    if b != bd_raw {
-                                        fx.pool.release(bd_raw);
-                                    }
-                                    b
+                                // 脏矩形锥体剪枝（Dirty-Tile Blur Culling）：
+                                // 仅当位于根图层、外扩采样区 `[sx, sy, sw, sh]` 与本帧所有脏区无交集，
+                                // 且下方覆盖该采样区的背景图元特征哈希严格未变时，直接复用上一帧已模糊小纹理，跳过全部 Kawase Pass。
+                                let bd_cache_key = super::layer_pool::BackdropCacheKey {
+                                    sx,
+                                    sy,
+                                    sw,
+                                    sh,
+                                    blur_px_q4: (blur_px * 4.0).round().clamp(0.0, u16::MAX as f32) as u16,
+                                    is_srgb,
+                                };
+                                let underlay_hash_opt = if stack.len() == 1 && blur_px >= 0.5 {
+                                    let sample_logical = Region::new(
+                                        ((sx as f32) / sf).floor().max(0.0) as i16,
+                                        ((sy as f32) / sf).floor().max(0.0) as i16,
+                                        ((sw as f32) / sf).ceil().max(1.0) as i16,
+                                        ((sh as f32) / sf).ceil().max(1.0) as i16,
+                                    );
+                                    compute_backdrop_underlay_hash(&ops[..op_idx], sample_logical, clear_color)
                                 } else {
-                                    bd_raw
+                                    None
+                                };
+                                let can_reuse_backdrop = underlay_hash_opt.is_some()
+                                    && dirty_regions.is_some_and(|dirty| {
+                                        !dirty.is_empty()
+                                            && !dirty_intersects_phys_rect(dirty, sx, sy, sw, sh, sf)
+                                    });
+                                let (bd_blurred, reused_cached_blur) = if can_reuse_backdrop {
+                                    let uh = underlay_hash_opt.unwrap();
+                                    if let Some(hit_idx) = fx.pool.lookup_backdrop(bd_cache_key, uh) {
+                                        (hit_idx, true)
+                                    } else {
+                                        let bd_raw = fx.pool.acquire(device, sw, sh);
+                                        fx.steps.push(GpuPassStep::CopyRect {
+                                            src_idx: parent_idx,
+                                            src_origin: (sx, sy),
+                                            dst_idx: bd_raw,
+                                            dst_origin: (0, 0),
+                                            size: (sw, sh),
+                                        });
+                                        let b = fx.plan_kawase_blur(device, bd_raw, sw, sh, blur_px, is_srgb);
+                                        if b != bd_raw {
+                                            fx.pool.release(bd_raw);
+                                        }
+                                        (b, false)
+                                    }
+                                } else {
+                                    let bd_raw = fx.pool.acquire(device, sw, sh);
+                                    fx.steps.push(GpuPassStep::CopyRect {
+                                        src_idx: parent_idx,
+                                        src_origin: (sx, sy),
+                                        dst_idx: bd_raw,
+                                        dst_origin: (0, 0),
+                                        size: (sw, sh),
+                                    });
+                                    let b = if blur_px >= 0.5 {
+                                        let blurred = fx.plan_kawase_blur(device, bd_raw, sw, sh, blur_px, is_srgb);
+                                        if blurred != bd_raw {
+                                            fx.pool.release(bd_raw);
+                                        }
+                                        blurred
+                                    } else {
+                                        bd_raw
+                                    };
+                                    (b, false)
                                 };
 
                                 let dst_rect_bd = [
@@ -2150,7 +2645,15 @@ impl WgpuRenderer {
                                     effect_slot: slot,
                                     use_hw_blend: false,
                                 });
-                                fx.pool.release(bd_blurred);
+                                if !reused_cached_blur {
+                                    if let Some(uh) = underlay_hash_opt {
+                                        fx.pool.pin_backdrop(bd_blurred, bd_cache_key, uh);
+                                    } else {
+                                        fx.pool.release(bd_blurred);
+                                    }
+                                } else {
+                                    fx.pool.release(bd_blurred);
+                                }
                                 fx.pool.release(snap_idx);
                             }
                         }
@@ -2957,10 +3460,17 @@ impl WgpuRenderer {
 
         let mut cleared = false;
         let is_srgb = self.target_is_srgb;
-        let mut canvas_eng = self
-            .canvas_engine
-            .take()
-            .unwrap_or_else(|| super::canvas_pipeline::CanvasGpuEngine::new(device, self.target_format));
+        self.poll_warmed_subengines();
+        let raw_cache = self.pipeline_cache.as_deref().map(|c| c.wgpu_cache());
+        let had_canvas = self.canvas_engine.is_some();
+        let mut canvas_eng = self.canvas_engine.take().unwrap_or_else(|| {
+            super::canvas_pipeline::CanvasGpuEngine::new(device, self.target_format, raw_cache)
+        });
+        if !had_canvas {
+            if let Some(c) = &self.pipeline_cache {
+                c.persist();
+            }
+        }
 
         for step in &steps {
             match *step {
@@ -3060,8 +3570,10 @@ impl WgpuRenderer {
         let vp_ox = bounds_phys[0] + spec.viewport.offset_x * sf;
         let vp_oy = bounds_phys[1] + spec.viewport.offset_y * sf;
 
-        // 1. ASCII 快速通道：绕过 CosmicEditor，直接按字节查表出字形实例
-        for lbl in spec.labels {
+        // 1. 存在系统 TrueType 字体时，所有画布世界标签已由 `CanvasGpuEngine` 内的 Slug GPU 二次贝塞尔曲线管线
+        //    在同一 RenderPass 中无限清晰直出（零图集、零缩放重光栅化）；仅在无 TTF 的极简环境中走内置位图兜底。
+        if !crate::display::ttf_atlas::has_system_font() {
+            for lbl in spec.labels {
             if lbl.text.is_empty() {
                 continue;
             }
@@ -3139,6 +3651,7 @@ impl WgpuRenderer {
                         pen_x += (e.advance.max(4) as f32) * ratio;
                     }
                 }
+            }
             }
         }
 

@@ -7,8 +7,8 @@ mod pixel;
 
 pub(crate) use font_ttf as ttf_atlas;
 pub use font_ttf::{
-    get_cached_glyph_styled_q4, register_font_bytes, register_font_vec,
-    registered_custom_font_bytes, registered_custom_font_count, unregister_font,
+    font_memory_stats, get_cached_glyph_styled_q4, register_font_bytes, register_font_vec,
+    registered_custom_font_bytes, registered_custom_font_count, unregister_font, FontMemoryStats,
 };
 pub use pixel::{PixelFormat, Rgb565, Rgba8888, SpriteFormat, Xrgb8888};
 

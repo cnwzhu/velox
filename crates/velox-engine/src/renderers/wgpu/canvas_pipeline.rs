@@ -98,10 +98,18 @@ pub(crate) struct CanvasGpuEngine {
     idle_budget_bytes: usize,
     idle_max_age_frames: u64,
     last_state_upload_bytes: usize,
+    slug: super::slug_glyph::SlugTextEngine,
 }
 
+// SAFETY: `CanvasGpuEngine` 仅持有 `wgpu` 跨线程安全句柄与独占容器，支持后台预热线程移交至渲染主线程。
+unsafe impl Send for CanvasGpuEngine {}
+
 impl CanvasGpuEngine {
-    pub(crate) fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        pipeline_cache: Option<&wgpu::PipelineCache>,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("velox_canvas_wgsl"),
             source: wgpu::ShaderSource::Wgsl(CANVAS_WGSL.into()),
@@ -182,7 +190,7 @@ impl CanvasGpuEngine {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: pipeline_cache,
         });
 
         let inst_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -226,7 +234,7 @@ impl CanvasGpuEngine {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: pipeline_cache,
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -235,6 +243,8 @@ impl CanvasGpuEngine {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
+        let slug = super::slug_glyph::SlugTextEngine::new(device, target_format, pipeline_cache);
 
         Self {
             mesh_pipeline,
@@ -251,6 +261,7 @@ impl CanvasGpuEngine {
             idle_budget_bytes: DEFAULT_CANVAS_IDLE_BUDGET_BYTES,
             idle_max_age_frames: DEFAULT_CANVAS_IDLE_MAX_AGE_FRAMES,
             last_state_upload_bytes: 0,
+            slug,
         }
     }
 
@@ -344,6 +355,7 @@ impl CanvasGpuEngine {
     pub(crate) fn tick_frame_reclaim(&mut self) {
         self.next_uniform_slot = 0;
         self.uniform_staging.clear();
+        self.slug.begin_frame();
         self.frame_index = self.frame_index.saturating_add(1);
         self.reclaim_idle_scenes();
     }
@@ -396,6 +408,16 @@ impl CanvasGpuEngine {
     #[inline]
     pub(crate) fn last_state_upload_bytes(&self) -> usize {
         self.last_state_upload_bytes
+    }
+
+    /// 返回 Slug 曲线字形引擎的统计信息 `(cached_glyphs, gpu_bytes, last_drawn_glyphs)`。
+    #[inline]
+    pub(crate) fn slug_stats(&self) -> (usize, usize, usize) {
+        (
+            self.slug.cached_glyph_count(),
+            self.slug.gpu_bytes(),
+            self.slug.last_drawn_glyphs(),
+        )
     }
 
     #[inline]
@@ -644,6 +666,17 @@ impl CanvasGpuEngine {
             uniform.palette[i] = color_to_f32(c);
         }
         let dyn_offset = self.alloc_uniform_slot(device, queue, uniform);
+        let (slug_start, slug_end) = self.slug.prepare_canvas_labels(
+            device,
+            queue,
+            spec,
+            phys_w,
+            phys_h,
+            bounds_phys,
+            clip_phys,
+            scale_factor,
+            is_srgb,
+        );
 
         #[cfg(feature = "custom-shader")]
         let cs_vp = super::custom_shader::CustomShaderViewport::from_viewport2d(
@@ -745,7 +778,12 @@ impl CanvasGpuEngine {
             }
         }
 
-        // 4. 前景自定义 WGSL 着色器
+        // 4. Slug (2026 Public Domain) GPU 二次贝塞尔曲线字形标签（同 RenderPass 零位图图集直出）
+        if slug_end > slug_start {
+            self.slug.draw_range(&mut rpass, slug_start, slug_end);
+        }
+
+        // 5. 前景自定义 WGSL 着色器
         #[cfg(feature = "custom-shader")]
         for shader in &fg_shaders {
             shader.render(&mut rpass);

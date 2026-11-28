@@ -154,11 +154,15 @@ pub(crate) struct GpuEffectsEngine {
     pub(crate) steps: Vec<GpuPassStep>,
 }
 
+// SAFETY: `GpuEffectsEngine` 仅持有 `wgpu` 跨线程安全句柄与独占容器，支持后台预热线程移交至渲染主线程。
+unsafe impl Send for GpuEffectsEngine {}
+
 impl GpuEffectsEngine {
     pub(crate) fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         target_format: wgpu::TextureFormat,
+        pipeline_cache: Option<&wgpu::PipelineCache>,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("velox_wgpu_effects_shader"),
@@ -255,7 +259,7 @@ impl GpuEffectsEngine {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: pipeline_cache,
         });
 
         // 硬件 `SrcOver` 直出管线：对所有 `BlendMode::SrcOver` 图层/投影/外部纹理跳过整屏快照与拷贝
@@ -290,7 +294,7 @@ impl GpuEffectsEngine {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: pipeline_cache,
         });
 
         let uniform_buf = Self::create_uniform_buf(device, INIT_EFFECT_SLOTS);
@@ -500,6 +504,7 @@ impl GpuEffectsEngine {
         >,
         ops: &[crate::motion::DrawOp<'_>],
         canvas_engine: &mut Option<super::canvas_pipeline::CanvasGpuEngine>,
+        pipeline_cache: Option<&wgpu::PipelineCache>,
         target_format: wgpu::TextureFormat,
         target_view: &wgpu::TextureView,
     ) {
@@ -808,7 +813,11 @@ impl GpuEffectsEngine {
                     if let Some(op) = ops.get(*op_idx) {
                         if let crate::motion::DrawPayload::SceneCanvas(spec) = op.payload {
                             let canvas_eng = canvas_engine.get_or_insert_with(|| {
-                                super::canvas_pipeline::CanvasGpuEngine::new(device, target_format)
+                                super::canvas_pipeline::CanvasGpuEngine::new(
+                                    device,
+                                    target_format,
+                                    pipeline_cache,
+                                )
                             });
                             let dst = self.pool.get(*target_idx);
                             canvas_eng.render_canvas(

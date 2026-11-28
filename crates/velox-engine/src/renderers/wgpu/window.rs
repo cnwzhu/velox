@@ -70,15 +70,11 @@ impl PreparedWgpuContext {
             ..wgpu::Limits::default()
         };
 
-        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("velox_wgpu_device"),
-            required_features: wgpu::Features::empty(),
+        let (device, queue, pso_cache) = super::pso_cache::request_device_with_pso_cache(
+            &adapter,
+            "velox_wgpu_device",
             required_limits,
-            memory_hints: wgpu::MemoryHints::MemoryUsage,
-            trace: wgpu::Trace::default(),
-            experimental_features: wgpu::ExperimentalFeatures::default(),
-        }))
-        .ok()?;
+        )?;
         let t_dev = t0.elapsed();
 
         device.on_uncaptured_error(Arc::new(|err| {
@@ -87,7 +83,9 @@ impl PreparedWgpuContext {
 
         // 桌面端（Windows DX12 / macOS Metal / Linux Vulkan）首选 `Bgra8Unorm`，后台预先完成 WGSL 编译与 PSO 构建
         let preferred_fmt = wgpu::TextureFormat::Bgra8Unorm;
-        let renderer = WgpuRenderer::new(&device, preferred_fmt);
+        let mut renderer = WgpuRenderer::new_with_cache(&device, preferred_fmt, pso_cache);
+        // 首屏主 SDF 管线就绪后立即触发 Effects / Canvas 管线的独立后台预热，消除首次切页同步编译停顿
+        renderer.spawn_background_pipeline_warmup(&device, &queue);
         let t_ren = t0.elapsed();
 
         let backend_name = match info.backend {
@@ -355,15 +353,11 @@ impl WgpuWindowRenderer {
             ..wgpu::Limits::default()
         };
 
-        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("velox_wgpu_device"),
-            required_features: wgpu::Features::empty(),
+        let (device, queue, pso_cache) = super::pso_cache::request_device_with_pso_cache(
+            &adapter,
+            "velox_wgpu_device",
             required_limits,
-            memory_hints: wgpu::MemoryHints::MemoryUsage,
-            trace: wgpu::Trace::default(),
-            experimental_features: wgpu::ExperimentalFeatures::default(),
-        }))
-        .ok()?;
+        )?;
         let t_dev = t0.elapsed();
 
         device.on_uncaptured_error(Arc::new(|err| {
@@ -386,7 +380,8 @@ impl WgpuWindowRenderer {
         surface.configure(&device, &surface_config);
         let t_cfg = t0.elapsed();
 
-        let renderer = WgpuRenderer::new(&device, format);
+        let mut renderer = WgpuRenderer::new_with_cache(&device, format, pso_cache);
+        renderer.spawn_background_pipeline_warmup(&device, &queue);
         let t_ren = t0.elapsed();
         if trace {
             std::println!(
@@ -482,7 +477,11 @@ impl WgpuWindowRenderer {
 
         let renderer = match precompiled_renderer {
             Some((fmt, r)) if fmt == format => r,
-            _ => WgpuRenderer::new(&device, format),
+            _ => {
+                let mut r = WgpuRenderer::new(&device, format);
+                r.spawn_background_pipeline_warmup(&device, &queue);
+                r
+            }
         };
         if trace {
             std::println!(
@@ -672,13 +671,27 @@ impl WgpuWindowRenderer {
         self.render_scaled_with_clear(ops, viewport, scale_factor, Color::rgb(0, 0, 0))
     }
 
-    /// 直接在 Swapchain 上以指定背景清屏色 `clear` 执行单 Pass 2D SDF 渲染并提交显示。
+    /// 直接在 Swapchain 上以指定背景清屏色 `clear` 执行 2D SDF 渲染并提交显示。
     pub fn render_scaled_with_clear(
         &mut self,
         ops: &[DrawOp<'_>],
         viewport: Region,
         scale_factor: f32,
         clear: Color,
+    ) -> bool {
+        self.render_scaled_with_clear_dirty(ops, viewport, scale_factor, clear, &[])
+    }
+
+    /// 直接在 Swapchain 上以指定背景清屏色与本帧精确脏区切片 `dirty_regions` 执行渲染并提交显示。
+    ///
+    /// 传入 `dirty_regions` 后，多 Pass 管线中的 `backdrop-filter` 毛玻璃将自动启用脏区外扩交集剪枝与模糊小纹理复用。
+    pub fn render_scaled_with_clear_dirty(
+        &mut self,
+        ops: &[DrawOp<'_>],
+        viewport: Region,
+        scale_factor: f32,
+        clear: Color,
+        dirty_regions: &[Region],
     ) -> bool {
         let Some(frame) = self.acquire_surface_texture() else {
             return false;
@@ -709,7 +722,12 @@ impl WgpuWindowRenderer {
                 a: 1.0,
             }
         };
-        self.renderer.render_to_view(
+        let hints = if dirty_regions.is_empty() {
+            None
+        } else {
+            Some(dirty_regions)
+        };
+        self.renderer.render_to_view_with_damage_hints(
             &self.device,
             &self.queue,
             ops,
@@ -719,6 +737,7 @@ impl WgpuWindowRenderer {
             self.surface_config.width,
             self.surface_config.height,
             clear_color,
+            hints,
         );
         self.queue.present(frame);
         true

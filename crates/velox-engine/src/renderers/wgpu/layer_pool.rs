@@ -13,6 +13,17 @@ use crate::solver::Region;
 use crate::style::Color;
 use crate::svg::{rasterize_svg, rasterize_svg_path, SvgRenderOptions};
 
+/// 毛玻璃（`backdrop-filter`）模糊小纹理跨帧缓存键（包含外扩采样区域与量化模糊半径）。
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct BackdropCacheKey {
+    pub(crate) sx: u32,
+    pub(crate) sy: u32,
+    pub(crate) sw: u32,
+    pub(crate) sh: u32,
+    pub(crate) blur_px_q4: u16,
+    pub(crate) is_srgb: bool,
+}
+
 pub(crate) struct PooledTarget {
     pub(crate) texture: wgpu::Texture,
     pub(crate) view: wgpu::TextureView,
@@ -22,6 +33,8 @@ pub(crate) struct PooledTarget {
     pub(crate) generation: u64,
     last_used_frame: u64,
     in_use: bool,
+    /// 若该槽位承载了可跨帧复用的已模糊毛玻璃小纹理，记录 `(cache_key, underlay_hash)`。
+    pinned_backdrop: Option<(BackdropCacheKey, u64)>,
 }
 
 pub(crate) struct CachedPathMask {
@@ -39,6 +52,8 @@ pub(crate) const DEFAULT_IDLE_TARGET_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const DEFAULT_IDLE_TARGET_MAX_AGE_FRAMES: u64 = 60;
 /// 默认 SVG Path `R8Unorm` 遮罩缓存字节预算（8 MiB）。
 pub(crate) const DEFAULT_MASK_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+/// 默认跨帧毛玻璃模糊小纹理缓存字节预算（16 MiB）。
+pub(crate) const DEFAULT_BACKDROP_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 
 #[inline]
 fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> usize {
@@ -73,6 +88,9 @@ pub(crate) struct LayerTargetPool {
     total_mask_bytes: usize,
     mask_budget_bytes: usize,
     masks_evicted: bool,
+    backdrop_cache_budget_bytes: usize,
+    backdrop_cache_hits: u64,
+    backdrop_cache_misses: u64,
 }
 
 impl LayerTargetPool {
@@ -129,6 +147,9 @@ impl LayerTargetPool {
             total_mask_bytes: 0,
             mask_budget_bytes: DEFAULT_MASK_BUDGET_BYTES,
             masks_evicted: false,
+            backdrop_cache_budget_bytes: DEFAULT_BACKDROP_CACHE_BUDGET_BYTES,
+            backdrop_cache_hits: 0,
+            backdrop_cache_misses: 0,
         }
     }
 
@@ -146,11 +167,11 @@ impl LayerTargetPool {
         let bw = req_w.max(1).div_ceil(64) * 64;
         let bh = req_h.max(1).div_ceil(64) * 64;
 
-        // 寻找最紧凑的空闲槽位（面积不大于需求 4 倍以避免小图层误占全屏大纹理）
+        // 寻找最紧凑的空闲槽位（面积不大于需求 4 倍，且跳过跨帧钉住的毛玻璃缓存槽位）
         let mut best: Option<(usize, u64)> = None;
         let req_area = (bw as u64) * (bh as u64);
         for (idx, t) in self.targets.iter().enumerate() {
-            if !t.in_use && t.width >= bw && t.height >= bh {
+            if !t.in_use && t.pinned_backdrop.is_none() && t.width >= bw && t.height >= bh {
                 let area = (t.width as u64) * (t.height as u64);
                 if area <= req_area.saturating_mul(4).max(65_536) {
                     if best.is_none_or(|(_, best_a)| area < best_a) {
@@ -196,16 +217,23 @@ impl LayerTargetPool {
             generation,
             last_used_frame: self.frame_index,
             in_use: true,
+            pinned_backdrop: None,
         };
 
-        // 若池已达数量上限，按最久未用优先回收一个空闲槽位重建
+        // 若池已达数量上限，按最久未用优先回收一个空闲槽位重建（优先非 pinned 槽位）
         if self.targets.len() >= MAX_POOLED_TARGETS {
             if let Some((evict, _)) = self
                 .targets
                 .iter()
                 .enumerate()
                 .filter(|(_, t)| !t.in_use)
-                .min_by_key(|(_, t)| (t.last_used_frame, core::cmp::Reverse(t.byte_size)))
+                .min_by_key(|(_, t)| {
+                    (
+                        t.pinned_backdrop.is_some(),
+                        t.last_used_frame,
+                        core::cmp::Reverse(t.byte_size),
+                    )
+                })
             {
                 let old_bytes = self.targets[evict].byte_size;
                 self.total_target_bytes = self
@@ -228,6 +256,81 @@ impl LayerTargetPool {
             t.in_use = false;
             t.last_used_frame = self.frame_index;
         }
+    }
+
+    /// 查找匹配 `(key, underlay_hash)` 的跨帧已模糊毛玻璃小纹理槽位（命中时完全跳过 Kawase 模糊 Pass）。
+    pub(crate) fn lookup_backdrop(&mut self, key: BackdropCacheKey, underlay_hash: u64) -> Option<usize> {
+        for (idx, t) in self.targets.iter_mut().enumerate() {
+            if !t.in_use {
+                if let Some((k, h)) = t.pinned_backdrop {
+                    if k == key && h == underlay_hash {
+                        t.in_use = true;
+                        t.last_used_frame = self.frame_index;
+                        self.backdrop_cache_hits = self.backdrop_cache_hits.saturating_add(1);
+                        return Some(idx);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// 记录一次毛玻璃模糊未命中并将刚计算完成的 `bd_idx` 原地钉住供后续帧复用（零额外显存拷贝）。
+    pub(crate) fn pin_backdrop(
+        &mut self,
+        bd_idx: usize,
+        key: BackdropCacheKey,
+        underlay_hash: u64,
+    ) {
+        self.backdrop_cache_misses = self.backdrop_cache_misses.saturating_add(1);
+        // 解除同 key 的陈旧缓存槽位，使其立即可回池复用
+        for (idx, t) in self.targets.iter_mut().enumerate() {
+            if idx != bd_idx {
+                if let Some((k, _)) = t.pinned_backdrop {
+                    if k == key {
+                        t.pinned_backdrop = None;
+                    }
+                }
+            }
+        }
+        if let Some(t) = self.targets.get_mut(bd_idx) {
+            t.pinned_backdrop = Some((key, underlay_hash));
+            t.in_use = false;
+            t.last_used_frame = self.frame_index;
+        }
+        // 若钉住的毛玻璃小纹理总字节超预算，按最久未用解除旧钉住标记
+        let mut pinned_bytes: usize = self
+            .targets
+            .iter()
+            .filter(|t| t.pinned_backdrop.is_some())
+            .map(|t| t.byte_size)
+            .sum();
+        while pinned_bytes > self.backdrop_cache_budget_bytes {
+            let Some((victim, b)) = self
+                .targets
+                .iter()
+                .enumerate()
+                .filter(|&(i, t)| i != bd_idx && t.pinned_backdrop.is_some() && !t.in_use)
+                .min_by_key(|(_, t)| (t.last_used_frame, core::cmp::Reverse(t.byte_size)))
+                .map(|(i, t)| (i, t.byte_size))
+            else {
+                break;
+            };
+            self.targets[victim].pinned_backdrop = None;
+            pinned_bytes = pinned_bytes.saturating_sub(b);
+        }
+    }
+
+    /// 使全部跨帧毛玻璃模糊缓存失效（例如视口尺寸变化或手动内存回收时）。
+    pub(crate) fn invalidate_backdrop_cache(&mut self) {
+        for t in &mut self.targets {
+            t.pinned_backdrop = None;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn backdrop_cache_stats(&self) -> (u64, u64) {
+        (self.backdrop_cache_hits, self.backdrop_cache_misses)
     }
 
     /// 多 Pass 帧提交完成后调用：归还本帧全部槽位并按字节预算与闲置年龄回收多余空闲纹理。
@@ -306,6 +409,7 @@ impl LayerTargetPool {
 
     /// 视口尺寸变化（尤其是窗口缩小）时，立即回收明显大于新视口的空闲大纹理。
     pub(crate) fn on_viewport_resized(&mut self, new_w: u32, new_h: u32) -> bool {
+        self.invalidate_backdrop_cache();
         let nbw = new_w.max(1).div_ceil(64) * 64;
         let nbh = new_h.max(1).div_ceil(64) * 64;
         let mut evicted = false;
@@ -328,6 +432,7 @@ impl LayerTargetPool {
 
     /// 后台化或内存警告时立即释放全部空闲离屏纹理与 SVG 遮罩缓存。
     pub(crate) fn trim_all_idle(&mut self) -> bool {
+        self.invalidate_backdrop_cache();
         let mut evicted = false;
         let mut i = 0;
         while i < self.targets.len() {
