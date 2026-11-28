@@ -518,6 +518,7 @@ fn profile_p0_p1_p2_p3_end_to_end() {
                 bounds: vp_reg,
                 clip: vp_reg,
                 clip_radius: 0,
+                subpx_q4: 0,
                 payload: DrawPayload::SceneCanvas(&spec),
             };
             let _ = slug_off.render_draw_ops_rgba8888_into(&[op], vp_reg, 1, &[vp_reg], &mut slug_fb);

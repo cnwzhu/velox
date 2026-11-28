@@ -440,6 +440,7 @@ pub(crate) fn reflatten_pass4_only<'a, 'b, const MAX_OPS: usize, const MAX_HITS:
         parent_clip_radius: 0,
         opacity: 255,
         offset: (0, 0),
+        subpx_q4: (0, 0),
         text_size: None,
         text_color: None,
         in_overlay: false,

@@ -450,6 +450,7 @@ fn test_spatial_occlusion_matches_bruteforce_and_scales_linearly() {
         bounds: Region::new(x, y, w, h),
         clip,
         clip_radius: 0,
+        subpx_q4: 0,
         payload: DrawPayload::Quad {
             bg: Color::rgba(40, 120, 220, alpha),
             bg_grad: Color::rgba(40, 120, 220, alpha),
@@ -473,6 +474,7 @@ fn test_spatial_occlusion_matches_bruteforce_and_scales_linearly() {
         bounds: Region::new(400, 200, 120, 24),
         clip: Region::new(380, 190, 240, 80),
         clip_radius: 0,
+        subpx_q4: 0,
         payload: DrawPayload::TextRun {
             text: StrRef::Static("Hello Spatial Occlusion"),
             color: Color::WHITE,
@@ -586,6 +588,7 @@ fn test_gpu_incremental_instance_upload_and_dirty_readback() {
         bounds: vp,
         clip: vp,
         clip_radius: 0,
+        subpx_q4: 0,
         payload: DrawPayload::Quad {
             bg: Color::rgb(16, 24, 38),
             bg_grad: Color::rgb(16, 24, 38),
@@ -603,6 +606,7 @@ fn test_gpu_incremental_instance_upload_and_dirty_readback() {
             bounds: r,
             clip: r,
             clip_radius: 0,
+            subpx_q4: 0,
             payload: DrawPayload::Quad {
                 bg: Color::rgb(50, 80, 140),
                 bg_grad: Color::rgb(50, 80, 140),
@@ -735,6 +739,7 @@ fn test_canvas_scene_lifecycle_budget_and_partial_state_upload() {
             bounds: vp,
             clip: vp,
             clip_radius: 0,
+            subpx_q4: 0,
             payload: DrawPayload::SceneCanvas(&spec),
         };
         assert!(off.render_draw_ops_scaled(&[op], vp, 1.0));

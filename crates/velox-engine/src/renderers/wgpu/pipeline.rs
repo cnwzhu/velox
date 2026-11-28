@@ -200,6 +200,7 @@ struct AtlasGrowNeed {
 pub(crate) struct ExternalTextureEntry {
     pub(crate) view: wgpu::TextureView,
     pub(crate) sampler: Option<wgpu::Sampler>,
+    pub(crate) generation: u64,
 }
 
 /// `WgpuRenderer` GPU 与伴随 CPU 缓存字节统计快照（用于四层内存账本剖析）。
@@ -267,6 +268,7 @@ pub struct WgpuRenderer {
     bg_canvas_rx: Option<std::sync::mpsc::Receiver<super::canvas_pipeline::CanvasGpuEngine>>,
     external_textures: HashMap<ExternalTextureId, ExternalTextureEntry>,
     next_external_id: u32,
+    next_external_gen: u64,
     target_format: wgpu::TextureFormat,
     primitives: Vec<GpuPrimitive>,
     /// 上一帧已上传到 GPU `instance_buf` 的实例镜像，用于增量局部区间 `queue.write_buffer`。
@@ -482,6 +484,7 @@ impl WgpuRenderer {
             bg_canvas_rx: None,
             external_textures: HashMap::new(),
             next_external_id: 1,
+            next_external_gen: 1,
             target_format,
             primitives: Vec::with_capacity(INITIAL_INSTANCE_CAPACITY),
             uploaded_primitives: Vec::with_capacity(INITIAL_INSTANCE_CAPACITY),
@@ -608,9 +611,17 @@ impl WgpuRenderer {
             id = id.wrapping_add(1);
         }
         self.next_external_id = id.wrapping_add(1).max(1);
+        let generation = self.next_external_gen;
+        self.next_external_gen = self.next_external_gen.wrapping_add(1).max(1);
         let tex_id = ExternalTextureId(id);
-        self.external_textures
-            .insert(tex_id, ExternalTextureEntry { view, sampler });
+        self.external_textures.insert(
+            tex_id,
+            ExternalTextureEntry {
+                view,
+                sampler,
+                generation,
+            },
+        );
         tex_id
     }
 
@@ -621,14 +632,25 @@ impl WgpuRenderer {
         view: wgpu::TextureView,
         sampler: Option<wgpu::Sampler>,
     ) {
-        self.external_textures
-            .insert(id, ExternalTextureEntry { view, sampler });
+        let generation = self.next_external_gen;
+        self.next_external_gen = self.next_external_gen.wrapping_add(1).max(1);
+        self.external_textures.insert(
+            id,
+            ExternalTextureEntry {
+                view,
+                sampler,
+                generation,
+            },
+        );
     }
 
     /// 原地更新已注册外部纹理的 `wgpu::TextureView`（如外部引擎 Resize 或双缓冲翻页时调用）。
     pub fn update_external_texture(&mut self, id: ExternalTextureId, view: wgpu::TextureView) -> bool {
         if let Some(entry) = self.external_textures.get_mut(&id) {
             entry.view = view;
+            let generation = self.next_external_gen;
+            self.next_external_gen = self.next_external_gen.wrapping_add(1).max(1);
+            entry.generation = generation;
             true
         } else {
             false
@@ -1120,6 +1142,11 @@ impl WgpuRenderer {
         origin_y: f32,
     ) -> Result<(), AtlasGrowNeed> {
         let mut sb_f = snap_bounds(op.bounds, sf);
+        if op.subpx_q4 != 0 {
+            let (dx_q4, dy_q4) = crate::motion::unpack_subpx_q4(op.subpx_q4);
+            sb_f[0] += (dx_q4 as f32) * (sf * 0.0625);
+            sb_f[1] += (dy_q4 as f32) * (sf * 0.0625);
+        }
         let clip_region = if op.clip_radius > 0 { op.clip } else { eff_clip };
         let mut sc_f = snap_clip(clip_region, sf);
         if (op.bounds.w == 1 && eff_clip.w == 1) || (op.bounds.h == 1 && eff_clip.h == 1) {
@@ -2639,6 +2666,7 @@ impl WgpuRenderer {
                                 fx.steps.push(GpuPassStep::Effect {
                                     dst_idx: parent_idx,
                                     clear_dst: false,
+                                    dont_care_scissor: None,
                                     src_idx: bd_blurred,
                                     dst_snap_idx: snap_idx,
                                     mask_path,
@@ -2792,6 +2820,7 @@ impl WgpuRenderer {
                                 fx.steps.push(GpuPassStep::Effect {
                                     dst_idx: sh_raw,
                                     clear_dst: true,
+                                    dont_care_scissor: None,
                                     src_idx: layer.tex_idx,
                                     dst_snap_idx: layer.tex_idx,
                                     mask_path: sh_mask,
@@ -2873,6 +2902,7 @@ impl WgpuRenderer {
                                 fx.steps.push(GpuPassStep::Effect {
                                     dst_idx: parent_idx,
                                     clear_dst: false,
+                                    dont_care_scissor: None,
                                     src_idx: sh_final,
                                     dst_snap_idx: sh_snap_opt.unwrap_or(sh_final),
                                     mask_path: None,
@@ -2968,6 +2998,7 @@ impl WgpuRenderer {
                         fx.steps.push(GpuPassStep::Effect {
                             dst_idx: parent_idx,
                             clear_dst: false,
+                            dont_care_scissor: None,
                             src_idx: src_final,
                             dst_snap_idx: snap_opt.unwrap_or(src_final),
                             mask_path,
@@ -3092,6 +3123,7 @@ impl WgpuRenderer {
                         fx.steps.push(GpuPassStep::Effect {
                             dst_idx: parent_idx,
                             clear_dst: false,
+                            dont_care_scissor: None,
                             src_idx: tmp_tex,
                             dst_snap_idx: snap_idx,
                             mask_path: None,

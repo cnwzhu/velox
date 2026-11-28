@@ -21,6 +21,7 @@ use super::{block_on, create_wgpu_instance};
 pub struct PreparedWgpuContext {
     // 析构顺序：先释放管线，再释放队列、设备、适配器与实例
     precompiled_renderer: Option<(wgpu::TextureFormat, WgpuRenderer)>,
+    pso_cache: Option<Arc<super::pso_cache::DiskPipelineCache>>,
     queue: wgpu::Queue,
     device: wgpu::Device,
     adapter: Option<wgpu::Adapter>,
@@ -83,7 +84,7 @@ impl PreparedWgpuContext {
 
         // 桌面端（Windows DX12 / macOS Metal / Linux Vulkan）首选 `Bgra8Unorm`，后台预先完成 WGSL 编译与 PSO 构建
         let preferred_fmt = wgpu::TextureFormat::Bgra8Unorm;
-        let mut renderer = WgpuRenderer::new_with_cache(&device, preferred_fmt, pso_cache);
+        let mut renderer = WgpuRenderer::new_with_cache(&device, preferred_fmt, pso_cache.clone());
         // 首屏主 SDF 管线就绪后立即触发 Effects / Canvas 管线的独立后台预热，消除首次切页同步编译停顿
         renderer.spawn_background_pipeline_warmup(&device, &queue);
         let t_ren = t0.elapsed();
@@ -112,6 +113,7 @@ impl PreparedWgpuContext {
 
         Some(Self {
             precompiled_renderer: Some((preferred_fmt, renderer)),
+            pso_cache,
             queue,
             device,
             adapter: Some(adapter),
@@ -157,6 +159,7 @@ impl PreparedWgpuContext {
         let renderer = WgpuRenderer::new(&device, preferred_format);
         Self {
             precompiled_renderer: Some((preferred_format, renderer)),
+            pso_cache: None,
             queue,
             device,
             adapter,
@@ -206,6 +209,7 @@ impl PreparedWgpuContext {
         let renderer = WgpuRenderer::new(&device, preferred_format);
         Self {
             precompiled_renderer: Some((preferred_format, renderer)),
+            pso_cache: None,
             queue,
             device,
             adapter: Some(adapter),
@@ -265,11 +269,11 @@ impl PreparedWgpuContext {
         self.device_uuid
     }
 
-    /// 取出预编译的 `WgpuRenderer`（若格式一致）或按指定像素格式即时构建。
+    /// 取出预编译的 `WgpuRenderer`（若格式一致）或按指定像素格式即时构建（保留磁盘 PSO 缓存）。
     pub fn take_or_create_renderer(&mut self, format: wgpu::TextureFormat) -> WgpuRenderer {
         match self.precompiled_renderer.take() {
             Some((fmt, r)) if fmt == format => r,
-            _ => WgpuRenderer::new(&self.device, format),
+            _ => WgpuRenderer::new_with_cache(&self.device, format, self.pso_cache.clone()),
         }
     }
 }
@@ -430,6 +434,7 @@ impl WgpuWindowRenderer {
         let t0 = std::time::Instant::now();
         let PreparedWgpuContext {
             precompiled_renderer,
+            pso_cache,
             queue,
             device,
             adapter,
@@ -478,7 +483,7 @@ impl WgpuWindowRenderer {
         let renderer = match precompiled_renderer {
             Some((fmt, r)) if fmt == format => r,
             _ => {
-                let mut r = WgpuRenderer::new(&device, format);
+                let mut r = WgpuRenderer::new_with_cache(&device, format, pso_cache);
                 r.spawn_background_pipeline_warmup(&device, &queue);
                 r
             }

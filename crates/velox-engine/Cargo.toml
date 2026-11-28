@@ -27,9 +27,13 @@ gpu-interop = ["gpu", "dep:windows", "dep:ash"]
 # 跨平台桌面窗口（其余纯 Rust 平台桥接 wayland / android / ios / harmony / web 默认可用）
 winit = ["std", "dep:winit", "dep:softbuffer"]
 
+# 可选零拷贝 OpenType GSUB/GPOS 高级塑形与可变字体（Variable Fonts）引擎（基于 swash）
+swash = ["std", "dep:swash"]
+
 [dependencies]
 bumpalo = { workspace = true }
 ttf-parser = { workspace = true }
+swash = { workspace = true, optional = true }
 winit = { workspace = true, optional = true }
 softbuffer = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }

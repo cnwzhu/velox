@@ -35,6 +35,7 @@ winit = { version = "0.30", default-features = false, features = ["rwh_06", "way
 softbuffer = { version = "0.4", default-features = false, features = ["wayland", "wayland-dlopen"] }
 fontdue = "0.9"
 ttf-parser = "0.25"
+swash = { version = "0.2", default-features = false, features = ["std", "scale", "render"] }
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "dx12", "metal", "vulkan", "wgsl", "webgpu"] }
 windows = { version = "0.62", default-features = false, features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Security", "Win32_System_Threading"] }
 ash = { version = "0.38", default-features = false }

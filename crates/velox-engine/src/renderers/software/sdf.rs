@@ -772,7 +772,13 @@ pub(crate) fn rasterize_quad_precise<P: PixelFormat>(
                     let e_col = (flat_x1 - origin_x) as usize;
                     if let Some(slice) = target.get_mut((row_offset + s_col)..(row_offset + e_col))
                     {
-                        slice.fill(P::from_color(row_bg));
+                        if P::NEEDS_DITHER && has_grad {
+                            for (i, dst_px) in slice.iter_mut().enumerate() {
+                                *dst_px = P::from_color_dithered(row_bg, flat_x0 + i as i16, py);
+                            }
+                        } else {
+                            slice.fill(P::from_color(row_bg));
+                        }
                     }
                 } else if row_bg.a() > 0 {
                     for fpx in flat_x0..flat_x1 {
@@ -873,7 +879,11 @@ pub(crate) fn rasterize_quad_precise<P: PixelFormat>(
                     }
                 }
             } else if cur_bg.a() > 0 {
-                *dst = dst.blend(cur_bg, outer_cov);
+                if P::NEEDS_DITHER && has_grad && outer_cov == 255 && cur_bg.a() == 255 {
+                    *dst = P::from_color_dithered(cur_bg, px, py);
+                } else {
+                    *dst = dst.blend(cur_bg, outer_cov);
+                }
             }
             px += 1;
         }

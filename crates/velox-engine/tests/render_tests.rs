@@ -29,6 +29,7 @@ fn test_front_to_back_occlusion_culling() {
         bounds: vp,
         clip: vp,
         clip_radius: 0,
+        subpx_q4: 0,
         payload: DrawPayload::Quad {
             bg: Color::rgb(15, 23, 42),
             bg_grad: Color::rgb(15, 23, 42),
@@ -42,6 +43,7 @@ fn test_front_to_back_occlusion_culling() {
         bounds: Region::new(40, 40, 240, 160),
         clip: vp,
         clip_radius: 0,
+        subpx_q4: 0,
         payload: DrawPayload::Quad {
             bg: Color::rgb(30, 41, 59),
             bg_grad: Color::rgb(30, 41, 59),
@@ -62,6 +64,7 @@ fn test_front_to_back_occlusion_culling() {
         bounds: Region::new(0, 0, 320, 40),
         clip: vp,
         clip_radius: 0,
+        subpx_q4: 0,
         payload: bg_op.payload,
     };
     let trimmed = compute_unoccluded_clip(vp, &[top_bar]);
@@ -201,6 +204,7 @@ fn test_tiled_rounded_clip_large_radius_public() {
             bounds: vp,
             clip: vp,
             clip_radius: 0,
+            subpx_q4: 0,
             payload: DrawPayload::Quad {
                 bg: bg_color,
                 bg_grad: bg_color,
@@ -214,6 +218,7 @@ fn test_tiled_rounded_clip_large_radius_public() {
             bounds: Region::new(10, 10, 100, 100),
             clip: Region::new(10, 10, 100, 100),
             clip_radius: 48,
+            subpx_q4: 0,
             payload: DrawPayload::Quad {
                 bg: fg_color,
                 bg_grad: fg_color,

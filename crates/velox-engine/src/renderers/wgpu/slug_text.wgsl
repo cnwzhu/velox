@@ -1,13 +1,13 @@
-// Velox Slug (2026 Public Domain) GPU 曲线字形直接光栅化着色器
+// Velox Slug (2026 Public Domain) GPU 曲线字形直接光栅化着色器 v2
 //
-// 基于 Eric Lengyel 公有领域 Slug 算法（US10373352B1 已于 2026-03-17 无条件捐献至公有领域）：
-// - 零位图字形图集：直接由 TrueType 二次贝塞尔轮廓与双轴加速条带（Bands）实时解析求值；
-// - 0.1x ~ 1000x 任意缩放与任意角度 OBB 旋转下均保持像素级锐利；
-// - 动态顶点膨胀（Dynamic Glyph Dilation）+ 屏幕导数盒滤波抗锯齿（Box Filter Coverage）。
+// 升级特性：
+// - 16 B/曲线 f16 量化存储（WGSL 内置 unpack2x16float，全后端零扩展兼容，显存与采样带宽减半）；
+// - 完整 2x2 线性变换 + 逆雅可比动态顶点膨胀（支持任意旋转、非均匀缩放与斜切 OBB 文本）；
+// - Eric Lengyel 公有领域 2-bit 根贡献分类码 0x2E74 + 双轴条带 Early-Exit + 屏幕导数盒滤波抗锯齿。
 
 struct SlugCurve {
-    p01: vec4<f32>, // (p0.x, p0.y, p1.x, p1.y)
-    p2_pad: vec4<f32>, // (p2.x, p2.y, 0.0, 0.0)
+    // x = pack2x16float(p0), y = pack2x16float(p1), z = pack2x16float(p2), w = pad
+    p012_pad: vec4<u32>,
 };
 
 struct SlugBand {
@@ -16,8 +16,10 @@ struct SlugBand {
 };
 
 struct SlugGlyphInstance {
-    // (origin_x_px, origin_y_px, font_px, angle_rad)
-    origin_scale_rot: vec4<f32>,
+    // 2x2 线性矩阵第 0 行 + 屏幕基线原点：[m00, m01, origin_x_px, origin_y_px]
+    xform_row0: vec4<f32>,
+    // 2x2 线性矩阵第 1 行 + 膨胀与色彩标志：[m10, m11, dilation_px, is_srgb]
+    xform_row1: vec4<f32>,
     // (em_min_x, em_min_y, em_max_x, em_max_y)
     em_bounds: vec4<f32>,
     // (clip_x0, clip_y0, clip_x1, clip_y1)
@@ -26,8 +28,8 @@ struct SlugGlyphInstance {
     color: vec4<f32>,
     // (h_band_offset, num_h_bands, v_band_offset, num_v_bands)
     band_info: vec4<u32>,
-    // (viewport_w, viewport_h, is_srgb, dilation_px)
-    extra: vec4<f32>,
+    // (viewport_w, viewport_h, approx_font_px, 0.0)
+    viewport_info: vec4<f32>,
 };
 
 @group(0) @binding(0) var<storage, read> curves: array<SlugCurve>;
@@ -58,28 +60,45 @@ fn vs_slug(
         default: { corner = vec2<f32>(0.0, 1.0); }
     }
 
-    let scale = max(inst.origin_scale_rot.z, 1.0);
-    let dilate_px = max(inst.extra.w, 1.5);
-    let dilate_em = dilate_px / scale;
+    let m00 = inst.xform_row0.x;
+    let m01 = inst.xform_row0.y;
+    let origin = inst.xform_row0.zw;
+    let m10 = inst.xform_row1.x;
+    let m11 = inst.xform_row1.y;
+    let dilate_px = max(inst.xform_row1.z, 1.5);
 
-    let min_em = inst.em_bounds.xy - vec2<f32>(dilate_em, dilate_em);
-    let max_em = inst.em_bounds.zw + vec2<f32>(dilate_em, dilate_em);
-    let em = mix(min_em, max_em, corner);
-
-    let angle = inst.origin_scale_rot.w;
-    let ca = cos(angle);
-    let sa = sin(angle);
-
-    // EM 空间 Y 向上；屏幕空间 Y 向下，支持任意角度 OBB 旋转
-    let local_px = vec2<f32>(em.x * scale, -em.y * scale);
-    let rot_px = vec2<f32>(
-        local_px.x * ca - local_px.y * sa,
-        local_px.x * sa + local_px.y * ca,
+    // 2x2 逆雅可比动态顶点膨胀（参考《A Decade of Slug》）：
+    // 将 EM 盒四个角点沿屏幕像素外法线外扩 `dilate_px`，再用 J^-1 精确反算对应 EM 空间坐标，
+    // 保证任意旋转、非均匀缩放与斜切变换下抗锯齿边缘都严格具备 `dilate_px` 保护带。
+    let base_em = mix(inst.em_bounds.xy, inst.em_bounds.zw, corner);
+    let base_screen = origin + vec2<f32>(
+        m00 * base_em.x + m01 * base_em.y,
+        m10 * base_em.x + m11 * base_em.y,
     );
-    let screen = inst.origin_scale_rot.xy + rot_px;
 
-    let vw = max(inst.extra.x, 1.0);
-    let vh = max(inst.extra.y, 1.0);
+    // EM 框外法线方向（角点 sign ∈ {-1, +1}）经雅可比各列映射到屏幕空间后单位化外扩
+    let sign_em = corner * 2.0 - vec2<f32>(1.0, 1.0);
+    let col0 = vec2<f32>(m00, m10);
+    let col1 = vec2<f32>(m01, m11);
+    let len0 = max(length(col0), 1e-4);
+    let len1 = max(length(col1), 1e-4);
+    let screen_offset = (col0 / len0) * (sign_em.x * dilate_px) + (col1 / len1) * (sign_em.y * dilate_px);
+    let screen = base_screen + screen_offset;
+
+    // 使用 2x2 逆雅可比 `J^-1` 将屏幕外扩偏移精确映射回 EM 坐标
+    let det = m00 * m11 - m01 * m10;
+    var em = base_em;
+    if (abs(det) > 1e-6) {
+        let inv_det = 1.0 / det;
+        let d_em = vec2<f32>(
+            (m11 * screen_offset.x - m01 * screen_offset.y) * inv_det,
+            (-m10 * screen_offset.x + m00 * screen_offset.y) * inv_det,
+        );
+        em = base_em + d_em;
+    }
+
+    let vw = max(inst.viewport_info.x, 1.0);
+    let vh = max(inst.viewport_info.y, 1.0);
     let ndc_x = (screen.x / vw) * 2.0 - 1.0;
     let ndc_y = 1.0 - (screen.y / vh) * 2.0;
 
@@ -91,7 +110,7 @@ fn vs_slug(
     return out;
 }
 
-// Eric Lengyel Slug 2-bit 根贡献分类码（完美消除端点重合时的重复计数与 -0.0 伪影）：
+// Eric Lengyel Slug 2-bit 根贡献分类码（消除端点重复计数与 -0.0 伪影）：
 // - bit 0 (1u): t1 = (b - d) / a 有效（曲线从 >=0 穿越到 <0）
 // - bit 1 (2u): t2 = (b + d) / a 有效（曲线从 <0 穿越到 >=0）
 fn calc_root_code(y1: f32, y2: f32, y3: f32) -> u32 {
@@ -181,10 +200,10 @@ fn fs_slug(in: VsOut) -> @location(0) vec4<f32> {
     let h_band = bands[inst.band_info.x + h_idx];
     let h_end = h_band.start + h_band.count;
     for (var i = h_band.start; i < h_end; i = i + 1u) {
-        let c = curves[band_indices[i]];
-        let p1 = c.p01.xy - em;
-        let p2 = c.p01.zw - em;
-        let p3 = c.p2_pad.xy - em;
+        let c = curves[band_indices[i]].p012_pad;
+        let p1 = unpack2x16float(c.x) - em;
+        let p2 = unpack2x16float(c.y) - em;
+        let p3 = unpack2x16float(c.z) - em;
         if (max(max(p1.x, p2.x), p3.x) * pixels_per_em.x < -0.5) {
             break;
         }
@@ -208,10 +227,10 @@ fn fs_slug(in: VsOut) -> @location(0) vec4<f32> {
     let v_band = bands[inst.band_info.z + v_idx];
     let v_end = v_band.start + v_band.count;
     for (var i = v_band.start; i < v_end; i = i + 1u) {
-        let c = curves[band_indices[i]];
-        let p1 = c.p01.xy - em;
-        let p2 = c.p01.zw - em;
-        let p3 = c.p2_pad.xy - em;
+        let c = curves[band_indices[i]].p012_pad;
+        let p1 = unpack2x16float(c.x) - em;
+        let p2 = unpack2x16float(c.y) - em;
+        let p3 = unpack2x16float(c.z) - em;
         if (max(max(p1.y, p2.y), p3.y) * pixels_per_em.y < -0.5) {
             break;
         }
@@ -229,14 +248,13 @@ fn fs_slug(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // 3. Slug 双轴融合 + 极小字号光学笔画轻微增强
+    // 3. Slug 双轴融合 + 远景小字号光学笔画轻微增强
     let combined = max(
         abs(xcov * xwgt + ycov * ywgt) / max(xwgt + ywgt, 1e-5),
         min(abs(xcov), abs(ycov)),
     );
     var coverage = clamp(combined, 0.0, 1.0);
-    // 远景小字号（< 18px）做适度光学加粗，防止细笔画发虚
-    let font_px = inst.origin_scale_rot.z;
+    let font_px = inst.viewport_info.z;
     if (font_px < 18.0 && coverage > 0.0) {
         let boost = clamp((18.0 - font_px) / 18.0, 0.0, 1.0) * 0.25;
         coverage = mix(coverage, sqrt(coverage), boost);
@@ -248,7 +266,7 @@ fn fs_slug(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     var rgb = inst.color.rgb;
-    if (inst.extra.z > 0.5) {
+    if (inst.xform_row1.w > 0.5) {
         rgb = vec3<f32>(
             srgb_to_linear_channel(rgb.r),
             srgb_to_linear_channel(rgb.g),

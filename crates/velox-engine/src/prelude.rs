@@ -92,6 +92,12 @@ pub use crate::svg::{
     parse_svg_color, parse_svg_viewbox, SvgFillRule, SvgLineCap, SvgLineJoin, SvgRenderOptions,
     SvgViewBox, Transform2D,
 };
+#[cfg(feature = "swash")]
+pub use crate::swash_shaper::{
+    clear_swash_run_cache, rasterize_swash_glyph, rasterize_swash_glyph_with_bytes,
+    shape_text_run_swash, shape_text_run_with_font_bytes, swash_run_cache_stats,
+    FontVariationAxis, ShapedGlyphRun, SwashRunCacheStats, SwashShapedGlyph,
+};
 pub use crate::text_rich::{
     classify_script, contains_rtl, inline_flow, is_emoji_char, is_rtl_char, measure_rich_text_box,
     mirror_bidi_char, reorder_bidi_visual, rich_text, shape_text_run, split_script_runs, BidiClass,

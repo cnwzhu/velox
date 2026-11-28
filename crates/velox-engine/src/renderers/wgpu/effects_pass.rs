@@ -106,6 +106,8 @@ pub(crate) enum GpuPassStep {
     Effect {
         dst_idx: usize,
         clear_dst: bool,
+        /// 非 `None` 时使用 `LoadOp::DontCare` + 精确 Scissor（专供 Dual Kawase 金字塔免除 Tile GPU 整纹理清屏）。
+        dont_care_scissor: Option<[u32; 4]>,
         src_idx: usize,
         dst_snap_idx: usize,
         mask_path: Option<(std::string::String, u32, u32)>,
@@ -149,6 +151,8 @@ pub(crate) struct GpuEffectsEngine {
     uniform_gen: u64,
     /// 跨帧 `BindGroup` 复用缓存：键 `(uniform_gen, src_gen, snap_gen, mask_key)`，消除每帧驱动层重分配。
     bg_cache: HashMap<(u64, u64, u64, u64), wgpu::BindGroup>,
+    /// 外部零拷贝纹理跨帧 `BindGroup` 复用缓存：键 `(uniform_gen, ext_gen, snap_gen)`，消除视频/海图 60fps 建组开销。
+    ext_bg_cache: HashMap<(u64, u64, u64), wgpu::BindGroup>,
     pub(crate) pool: LayerTargetPool,
     pub(crate) slots: Vec<EffectUniform>,
     pub(crate) steps: Vec<GpuPassStep>,
@@ -307,6 +311,7 @@ impl GpuEffectsEngine {
             uniform_capacity: INIT_EFFECT_SLOTS,
             uniform_gen: 1,
             bg_cache: HashMap::with_capacity(32),
+            ext_bg_cache: HashMap::with_capacity(8),
             pool,
             slots: Vec::with_capacity(INIT_EFFECT_SLOTS),
             steps: Vec::with_capacity(32),
@@ -427,7 +432,8 @@ impl GpuEffectsEngine {
             let slot = self.push_slot(u);
             self.steps.push(GpuPassStep::Effect {
                 dst_idx,
-                clear_dst: true,
+                clear_dst: false,
+                dont_care_scissor: Some([0, 0, next_w, next_h]),
                 src_idx: prev_idx,
                 dst_snap_idx: prev_idx,
                 mask_path: None,
@@ -463,7 +469,8 @@ impl GpuEffectsEngine {
             let slot = self.push_slot(u);
             self.steps.push(GpuPassStep::Effect {
                 dst_idx: out_idx,
-                clear_dst: true,
+                clear_dst: false,
+                dont_care_scissor: Some([0, 0, target_w, target_h]),
                 src_idx: cur_idx,
                 dst_snap_idx: cur_idx,
                 mask_path: None,
@@ -513,9 +520,13 @@ impl GpuEffectsEngine {
             self.uniform_buf = Self::create_uniform_buf(device, self.uniform_capacity);
             self.uniform_gen = self.uniform_gen.wrapping_add(1).max(1);
             self.bg_cache.clear();
+            self.ext_bg_cache.clear();
         }
         if self.bg_cache.len() > 256 {
             self.bg_cache.clear();
+        }
+        if self.ext_bg_cache.len() > 128 {
+            self.ext_bg_cache.clear();
         }
         if !self.slots.is_empty() {
             queue.write_buffer(&self.uniform_buf, 0, pod_as_bytes(&self.slots));
@@ -624,6 +635,7 @@ impl GpuEffectsEngine {
                 GpuPassStep::Effect {
                     dst_idx,
                     clear_dst,
+                    dont_care_scissor,
                     src_idx,
                     dst_snap_idx,
                     mask_path,
@@ -697,6 +709,16 @@ impl GpuEffectsEngine {
                     let bg = &self.bg_cache[&cache_key];
                     let dst_view = &self.pool.get(*dst_idx).view;
 
+                    let load_op = if dont_care_scissor.is_some() {
+                        // SAFETY: Dual Kawase 着色器在 `dont_care_scissor` 内逐像素覆盖全部目标有效区，
+                        // 且下游仅在该 `active_w × active_h` 范围内（带半像素 UV 钳位）采样。
+                        wgpu::LoadOp::DontCare(unsafe { wgpu::LoadOpDontCare::enabled() })
+                    } else if *clear_dst {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    } else {
+                        wgpu::LoadOp::Load
+                    };
+
                     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("velox_effect_pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -704,11 +726,7 @@ impl GpuEffectsEngine {
                             depth_slice: None,
                             resolve_target: None,
                             ops: wgpu::Operations {
-                                load: if *clear_dst {
-                                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-                                } else {
-                                    wgpu::LoadOp::Load
-                                },
+                                load: load_op,
                                 store: wgpu::StoreOp::Store,
                             },
                         })],
@@ -717,6 +735,14 @@ impl GpuEffectsEngine {
                         timestamp_writes: None,
                         multiview_mask: None,
                     });
+                    if let Some([sx, sy, sw, sh]) = *dont_care_scissor {
+                        let dst_tex = self.pool.get(*dst_idx);
+                        let cw = sw.min(dst_tex.width.saturating_sub(sx));
+                        let ch = sh.min(dst_tex.height.saturating_sub(sy));
+                        if cw > 0 && ch > 0 {
+                            rpass.set_scissor_rect(sx, sy, cw, ch);
+                        }
+                    }
                     rpass.set_pipeline(if *use_hw_blend {
                         &self.pipeline_src_over
                     } else {
@@ -737,45 +763,55 @@ impl GpuEffectsEngine {
                         continue;
                     };
                     // 硬件 SrcOver 直出不采样背景快照，绑定只读外部纹理作占位以避免与 dst_view 同 Pass 冲突
-                    let snap_view = if *use_hw_blend || *dst_snap_idx == *dst_idx {
-                        &entry.view
+                    let use_dummy_snap = *use_hw_blend || *dst_snap_idx == *dst_idx;
+                    let snap_gen = if use_dummy_snap {
+                        0
                     } else {
-                        &self.pool.get(*dst_snap_idx).view
+                        self.pool.get(*dst_snap_idx).generation
                     };
+                    let ext_key = (self.uniform_gen, entry.generation, snap_gen);
+                    if !self.ext_bg_cache.contains_key(&ext_key) {
+                        let snap_view = if use_dummy_snap {
+                            &entry.view
+                        } else {
+                            &self.pool.get(*dst_snap_idx).view
+                        };
+                        let mask_view = self.pool.white_mask_view();
+                        let sampler = entry.sampler.as_ref().unwrap_or(linear_sampler);
+                        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("velox_external_tex_bg"),
+                            layout: &self.bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                        buffer: &self.uniform_buf,
+                                        offset: 0,
+                                        size: wgpu::BufferSize::new(256),
+                                    }),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(&entry.view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::TextureView(snap_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 3,
+                                    resource: wgpu::BindingResource::TextureView(mask_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 4,
+                                    resource: wgpu::BindingResource::Sampler(sampler),
+                                },
+                            ],
+                        });
+                        self.ext_bg_cache.insert(ext_key, bg);
+                    }
+                    let bg = &self.ext_bg_cache[&ext_key];
                     let dst_view = &self.pool.get(*dst_idx).view;
-                    let mask_view = self.pool.white_mask_view();
-                    let sampler = entry.sampler.as_ref().unwrap_or(linear_sampler);
-
-                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("velox_external_tex_bg"),
-                        layout: &self.bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                    buffer: &self.uniform_buf,
-                                    offset: 0,
-                                    size: wgpu::BufferSize::new(256),
-                                }),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::TextureView(&entry.view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::TextureView(snap_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: wgpu::BindingResource::TextureView(mask_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: wgpu::BindingResource::Sampler(sampler),
-                            },
-                        ],
-                    });
                     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("velox_external_tex_pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -797,7 +833,7 @@ impl GpuEffectsEngine {
                     } else {
                         &self.pipeline
                     });
-                    rpass.set_bind_group(0, &bg, &[*effect_slot * 256]);
+                    rpass.set_bind_group(0, bg, &[*effect_slot * 256]);
                     rpass.draw(0..6, 0..1);
                 }
 

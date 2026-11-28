@@ -2,12 +2,12 @@
 
 use crate::arena::{ScratchArena, SmallVec};
 use crate::element::{ExitTo, TransitionSpec};
-use crate::motion::draw_op::{DrawOp, DrawPayload};
+use crate::motion::draw_op::{pack_subpx_q4, DrawOp, DrawPayload};
 use crate::motion::spring::rubberband_i16;
 use crate::solver::Region;
 use crate::style::{Color, Easing, LoopMode};
 
-/// 跨帧过渡动画可插值的视觉状态（几何边界、背景色、边框色与整体不透明度）。
+/// 跨帧过渡动画可插值的视觉状态（几何边界、背景色、边框色、整体不透明度与 1/16 px 亚像素残差）。
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct MotionState {
     /// 屏幕绝对坐标矩形。
@@ -18,6 +18,8 @@ pub struct MotionState {
     pub border: Color,
     /// 容器及其子树整体不透明度（`0..=255`）。
     pub opacity: u8,
+    /// 弹簧/缓动几何插值的 `1/16 px`（Q4）亚像素位置残差（利用结构体对齐空洞，0 字节膨胀）。
+    pub subpx_q4: u8,
 }
 
 impl MotionState {
@@ -29,6 +31,7 @@ impl MotionState {
             bg,
             border,
             opacity: 255,
+            subpx_q4: 0,
         }
     }
 
@@ -43,11 +46,13 @@ impl MotionState {
     fn lerp(self, to: Self, t_256: i32) -> Self {
         let t_clamped = t_256.clamp(0, 256) as u16;
         let op = self.opacity as i32 + (((to.opacity as i32 - self.opacity as i32) * t_256) >> 8);
+        let (bounds, subpx_q4) = lerp_region_signed_q4(self.bounds, to.bounds, t_256);
         Self {
-            bounds: lerp_region_signed(self.bounds, to.bounds, t_256),
+            bounds,
             bg: self.bg.lerp(to.bg, t_clamped),
             border: self.border.lerp(to.border, t_clamped),
             opacity: op.clamp(0, 255) as u8,
+            subpx_q4,
         }
     }
 }
@@ -102,17 +107,24 @@ const fn region_to_q4(r: Region) -> [i32; 4] {
 }
 
 #[inline(always)]
-fn q4_to_region(p: [i32; 4]) -> Region {
+fn q4_to_region_and_subpx(p: [i32; 4]) -> (Region, u8) {
     let round = |v: i32| -> i16 {
         let r = if v >= 0 { (v + 8) >> 4 } else { -((-v + 8) >> 4) };
         r.clamp(i16::MIN as i32, i16::MAX as i32) as i16
     };
-    Region {
-        x: round(p[0]),
-        y: round(p[1]),
-        w: round(p[2]).max(0),
-        h: round(p[3]).max(0),
-    }
+    let rx = round(p[0]);
+    let ry = round(p[1]);
+    let dx_q4 = (p[0] - ((rx as i32) << 4)).clamp(-8, 7) as i8;
+    let dy_q4 = (p[1] - ((ry as i32) << 4)).clamp(-8, 7) as i8;
+    (
+        Region {
+            x: rx,
+            y: ry,
+            w: round(p[2]).max(0),
+            h: round(p[3]).max(0),
+        },
+        pack_subpx_q4(dx_q4, dy_q4),
+    )
 }
 
 #[inline(always)]
@@ -241,6 +253,7 @@ impl ActiveTransition {
             bg: self.start_bg,
             border: self.start_border,
             opacity: self.start_opacity,
+            subpx_q4: 0,
         }
     }
 
@@ -251,6 +264,7 @@ impl ActiveTransition {
             bg: self.target_bg,
             border: self.target_border,
             opacity: self.target_opacity,
+            subpx_q4: 0,
         }
     }
 
@@ -351,11 +365,13 @@ impl ActiveTransition {
             let t_clamped = self.spring_t_q8.clamp(0, 256) as u16;
             let op = self.start_opacity as i32
                 + (((self.target_opacity as i32 - self.start_opacity as i32) * self.spring_t_q8) >> 8);
+            let (bounds, subpx_q4) = q4_to_region_and_subpx(self.pos_q4);
             return MotionState {
-                bounds: q4_to_region(self.pos_q4),
+                bounds,
                 bg: self.start_bg.lerp(self.target_bg, t_clamped),
                 border: self.start_border.lerp(self.target_border, t_clamped),
                 opacity: op.clamp(0, 255) as u8,
+                subpx_q4,
             };
         }
         if matches!(self.loop_mode(), LoopMode::Once)
@@ -818,8 +834,14 @@ impl MotionCache {
                 + (((g.exit_to.opacity as i32 - g.start_opacity as i32) * t_256) >> 8))
                 .clamp(0, 255) as u8;
             if cur_op > 0 {
-                let dx = (((g.exit_to.dx as i32) * t_256) >> 8) as i16;
-                let dy = (((g.exit_to.dy as i32) * t_256) >> 8) as i16;
+                let dx_q4_tot = ((g.exit_to.dx as i32) * t_256) >> 4;
+                let dy_q4_tot = ((g.exit_to.dy as i32) * t_256) >> 4;
+                let dx = ((dx_q4_tot + if dx_q4_tot >= 0 { 8 } else { -8 }) / 16) as i16;
+                let dy = ((dy_q4_tot + if dy_q4_tot >= 0 { 8 } else { -8 }) / 16) as i16;
+                let g_subpx = pack_subpx_q4(
+                    (dx_q4_tot - (dx as i32) * 16).clamp(-8, 7) as i8,
+                    (dy_q4_tot - (dy as i32) * 16).clamp(-8, 7) as i8,
+                );
                 let ghost_bounds = Region::new(
                     g.bounds.x.saturating_add(dx),
                     g.bounds.y.saturating_add(dy),
@@ -835,6 +857,7 @@ impl MotionCache {
                         bounds: ghost_bounds,
                         clip: g.clip,
                         clip_radius: g.clip_radius,
+                        subpx_q4: g_subpx,
                         payload: DrawPayload::Quad {
                             bg: ghost_bg,
                             bg_grad: ghost_grad,
@@ -884,6 +907,7 @@ impl MotionCache {
                                     bounds: text_bounds,
                                     clip: g.clip.intersect(ghost_bounds),
                                     clip_radius: 0,
+                                    subpx_q4: g_subpx,
                                     payload: DrawPayload::TextRun {
                                         text: copied_str,
                                         color: tc,
@@ -1144,6 +1168,11 @@ impl MotionCache {
                         cur.opacity
                     } else {
                         target.opacity
+                    },
+                    subpx_q4: if s.animate_bounds || in_flight {
+                        cur.subpx_q4
+                    } else {
+                        0
                     },
                 });
                 tr.set_target(target);
@@ -1540,12 +1569,27 @@ fn lerp_i16_signed(a: i16, b: i16, t_256: i32) -> i16 {
 }
 
 #[inline]
-fn lerp_region_signed(a: Region, b: Region, t_256: i32) -> Region {
-    Region {
-        x: lerp_i16_signed(a.x, b.x, t_256),
-        y: lerp_i16_signed(a.y, b.y, t_256),
-        w: lerp_i16_signed(a.w, b.w, t_256).max(0),
-        h: lerp_i16_signed(a.h, b.h, t_256).max(0),
-    }
+fn lerp_i16_signed_q4(a: i16, b: i16, t_256: i32) -> (i16, i8) {
+    let diff = (b as i32) - (a as i32);
+    let q4 = ((a as i32) << 4) + ((diff * t_256) >> 4);
+    let rounded = if q4 >= 0 { (q4 + 8) >> 4 } else { -((-q4 + 8) >> 4) };
+    let r = rounded.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    let rem = (q4 - ((r as i32) << 4)).clamp(-8, 7) as i8;
+    (r, rem)
+}
+
+#[inline]
+fn lerp_region_signed_q4(a: Region, b: Region, t_256: i32) -> (Region, u8) {
+    let (x, dx) = lerp_i16_signed_q4(a.x, b.x, t_256);
+    let (y, dy) = lerp_i16_signed_q4(a.y, b.y, t_256);
+    (
+        Region {
+            x,
+            y,
+            w: lerp_i16_signed(a.w, b.w, t_256).max(0),
+            h: lerp_i16_signed(a.h, b.h, t_256).max(0),
+        },
+        pack_subpx_q4(dx, dy),
+    )
 }
 

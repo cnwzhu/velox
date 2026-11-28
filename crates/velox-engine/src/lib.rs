@@ -38,6 +38,8 @@ pub mod solver;
 pub mod style;
 pub mod style_ext;
 pub mod svg;
+#[cfg(feature = "swash")]
+pub mod swash_shaper;
 pub mod text_rich;
 pub mod theme;
 pub mod vector_canvas;

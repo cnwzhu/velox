@@ -21,9 +21,17 @@ pub enum SpriteFormat {
 pub trait PixelFormat: Copy + Clone + Default + PartialEq + Eq + Send + Sync + 'static {
     /// 全零/纯黑默认像素常量（供 `const fn` 静态帧缓冲初始化使用）。
     const BLACK: Self;
+    /// 该像素格式在渐变渲染时是否需要 4×4 Bayer 有序抖动（仅 `Rgb565` 为 `true`，32-bit 格式编译期零开销消除）。
+    const NEEDS_DITHER: bool = false;
 
     /// 从标准 `ARGB8888` 颜色转换。
     fn from_color(c: Color) -> Self;
+    /// 带像素坐标 `(x, y)` 的有序抖动颜色转换：16-bit `Rgb565` 使用 4×4 Bayer 矩阵消除渐变色带，
+    /// 32-bit 像素格式默认编译期零开销直通 [`Self::from_color`]。
+    #[inline(always)]
+    fn from_color_dithered(c: Color, _x: i16, _y: i16) -> Self {
+        Self::from_color(c)
+    }
     /// 转换回不透明 `ARGB8888` 颜色。
     fn to_color(self) -> Color;
     /// 将前景色 `fg` 以 `coverage`（`0..=255`）覆盖率混合到当前背景像素上（纯整数四舍五入运算）。
@@ -50,14 +58,37 @@ pub trait PixelFormat: Copy + Clone + Default + PartialEq + Eq + Send + Sync + '
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub struct Rgb565(pub u16);
 
+/// 4×4 Bayer 有序抖动阈值表（值域 `0..=15`，专供 `Rgb565` 渐变消除 5-6-5 量化色带）。
+const BAYER_4X4: [u8; 16] = [
+    0, 8, 2, 10,
+    12, 4, 14, 6,
+    3, 11, 1, 9,
+    15, 7, 13, 5,
+];
+
 impl PixelFormat for Rgb565 {
     const BLACK: Self = Self(0);
+    const NEEDS_DITHER: bool = true;
 
     #[inline(always)]
     fn from_color(c: Color) -> Self {
         let r = ((c.r() as u16) >> 3) & 0x1F;
         let g = ((c.g() as u16) >> 2) & 0x3F;
         let b = ((c.b() as u16) >> 3) & 0x1F;
+        Self((r << 11) | (g << 5) | b)
+    }
+
+    #[inline(always)]
+    fn from_color_dithered(c: Color, x: i16, y: i16) -> Self {
+        // 无偏 4×4 Bayer 有序抖动：精确按 31/255（R/B）与 63/255（G）比例分配残余误差，
+        // 避免简单 `>> 3` 截断带来的中性灰偏亮，同时保证纯黑（0）与纯白（255）100% 精确无噪点。
+        let t_off = ((BAYER_4X4[(((y as usize) & 3) << 2) | ((x as usize) & 3)] as u16) << 4) + 8;
+        let nr = (c.r() as u16) * 31 + t_off;
+        let ng = (c.g() as u16) * 63 + t_off;
+        let nb = (c.b() as u16) * 31 + t_off;
+        let r = ((nr + (nr >> 8)) >> 8).min(31);
+        let g = ((ng + (ng >> 8)) >> 8).min(63);
+        let b = ((nb + (nb >> 8)) >> 8).min(31);
         Self((r << 11) | (g << 5) | b)
     }
 

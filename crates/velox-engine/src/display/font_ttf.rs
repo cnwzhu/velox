@@ -430,6 +430,32 @@ pub(crate) fn with_char_face_and_glyph<R>(
     Some(f(&font.face, gid, font_key))
 }
 
+/// 供可选 `swash` 零拷贝 OpenType 塑形引擎直接借用已内存映射的字体字节切片（零拷贝、零二次读取）。
+#[cfg(feature = "swash")]
+pub(crate) fn with_styled_font_bytes<R>(
+    sample_char: char,
+    spec: crate::text_rich::FontSpec,
+    f: impl FnOnce(&[u8], u64) -> R,
+) -> Option<R> {
+    if spec == crate::text_rich::FontSpec::SANS {
+        let (font, _) = select_font_and_glyph(sample_char)?;
+        let key = font.bytes.as_ptr() as usize as u64;
+        return Some(f(font.bytes, key));
+    }
+    let (selected, _, _, _) = select_styled_font_and_glyph(sample_char, spec)?;
+    match selected {
+        SelectedFont::Static(sf) => {
+            let key = sf.bytes.as_ptr() as usize as u64;
+            Some(f(sf.bytes, key))
+        }
+        SelectedFont::Custom(cf) => {
+            let bytes = cf.raw_bytes();
+            let key = bytes.as_ptr() as usize as u64;
+            Some(f(bytes, key))
+        }
+    }
+}
+
 /// 获取指定精确浮点字号（`fs`）在单行行盒内的光学垂直居中基线偏移（像素），
 /// 基于字体真实 `capital_height`（大写字母高度，缺省回退 `0.70 * upem`）居中，避免 `hhea.ascender` 过大导致按钮文字偏下。
 pub fn get_font_ascent_f32(fs: f32) -> i32 {
@@ -956,7 +982,8 @@ static MONO_BOLD_FONT: OnceLock<Option<LoadedFont>> = OnceLock::new();
 static SERIF_FONT: OnceLock<Option<LoadedFont>> = OnceLock::new();
 
 enum FontBacking {
-    Static,
+    #[allow(dead_code)]
+    Static(&'static [u8]),
     Owned(Box<[u8]>),
 }
 
@@ -964,8 +991,17 @@ impl FontBacking {
     #[inline]
     fn owned_bytes(&self) -> usize {
         match self {
-            Self::Static => 0,
+            Self::Static(_) => 0,
             Self::Owned(b) => b.len(),
+        }
+    }
+
+    #[cfg(feature = "swash")]
+    #[inline]
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Static(b) => b,
+            Self::Owned(b) => b,
         }
     }
 }
@@ -986,7 +1022,7 @@ impl OwnedCustomFont {
         let face = Face::parse(bytes, 0).ok()?;
         Some(Self {
             face,
-            _backing: FontBacking::Static,
+            _backing: FontBacking::Static(bytes),
         })
     }
 
@@ -1007,6 +1043,12 @@ impl OwnedCustomFont {
     #[inline]
     fn face(&self) -> &Face<'_> {
         &self.face
+    }
+
+    #[cfg(feature = "swash")]
+    #[inline]
+    fn raw_bytes(&self) -> &[u8] {
+        self._backing.as_slice()
     }
 
     #[inline]

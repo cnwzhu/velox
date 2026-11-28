@@ -6,6 +6,34 @@ use crate::paint::{ExternalTextureSpec, LayerSpec, StyledQuad};
 use crate::solver::Region;
 use crate::style::Color;
 
+/// 将有符号 4-bit 亚像素偏移 `(dx_q4, dy_q4)`（范围 `-8..=7`，单位 `1/16 px`）紧凑打包为 1 字节。
+#[inline(always)]
+pub const fn pack_subpx_q4(dx_q4: i8, dy_q4: i8) -> u8 {
+    let dx = if dx_q4 < -8 {
+        -8
+    } else if dx_q4 > 7 {
+        7
+    } else {
+        dx_q4
+    };
+    let dy = if dy_q4 < -8 {
+        -8
+    } else if dy_q4 > 7 {
+        7
+    } else {
+        dy_q4
+    };
+    (((dx as u8) & 0x0F) << 4) | ((dy as u8) & 0x0F)
+}
+
+/// 将 [`pack_subpx_q4`] 打包的 1 字节解码为有符号 `(dx_q4, dy_q4)`（范围 `-8..=7`，单位 `1/16 px`）。
+#[inline(always)]
+pub const fn unpack_subpx_q4(packed: u8) -> (i8, i8) {
+    let dx = (packed as i8) >> 4;
+    let dy = ((packed << 4) as i8) >> 4;
+    (dx, dy)
+}
+
 /// 扁平化一维渲染指令。
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct DrawOp<'a> {
@@ -17,6 +45,8 @@ pub struct DrawOp<'a> {
     pub clip: Region,
     /// 父级裁剪圆角半径（逻辑像素；`0` 表示轴对齐直角裁剪，非零时启用抗锯齿圆角 SDF 裁切）。
     pub clip_radius: u8,
+    /// 亚像素动画平移残差（利用结构体原有对齐空洞，0 字节膨胀；高 4 位 `dx_q4`、低 4 位 `dy_q4`，单位 `1/16 px`）。
+    pub subpx_q4: u8,
     /// 绘制负载数据。
     pub payload: DrawPayload<'a>,
 }
@@ -177,6 +207,7 @@ impl<'a> DrawOp<'a> {
         mix_i16(&mut h, self.clip.w);
         mix_i16(&mut h, self.clip.h);
         mix(&mut h, self.clip_radius);
+        mix(&mut h, self.subpx_q4);
 
         match self.payload {
             DrawPayload::Quad {

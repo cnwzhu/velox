@@ -35,9 +35,38 @@ pub(super) struct Pass4Inherit {
     pub parent_clip_radius: u8,
     pub opacity: u8,
     pub offset: (i16, i16),
+    /// 祖先容器传递下来的 `1/16 px`（Q4）亚像素偏移残差，保证父子同步丝滑收敛。
+    pub subpx_q4: (i8, i8),
     pub text_size: Option<u8>,
     pub text_color: Option<Color>,
     pub in_overlay: bool,
+}
+
+#[inline(always)]
+fn add_subpx_q4(base_offset: (i16, i16), base_q4: (i8, i8), delta_q4: u8) -> ((i16, i16), (i8, i8)) {
+    if delta_q4 == 0 {
+        return (base_offset, base_q4);
+    }
+    let (dx, dy) = crate::motion::unpack_subpx_q4(delta_q4);
+    let mut sx = (base_q4.0 as i16) + (dx as i16);
+    let mut sy = (base_q4.1 as i16) + (dy as i16);
+    let mut ox = base_offset.0;
+    let mut oy = base_offset.1;
+    if sx > 7 {
+        ox = ox.saturating_add(1);
+        sx -= 16;
+    } else if sx < -8 {
+        ox = ox.saturating_sub(1);
+        sx += 16;
+    }
+    if sy > 7 {
+        oy = oy.saturating_add(1);
+        sy -= 16;
+    } else if sy < -8 {
+        oy = oy.saturating_sub(1);
+        sy += 16;
+    }
+    ((ox, oy), (sx as i8, sy as i8))
 }
 
 #[inline(never)]
@@ -204,6 +233,7 @@ fn try_push_div_layer<'a, const MAX_OPS: usize, const MAX_HITS: usize>(
             bounds: exp_bounds,
             clip: eff_parent_clip,
             clip_radius: eff_parent_clip_radius,
+            subpx_q4: 0,
             payload: DrawPayload::PushLayer(spec_ref),
         }) {
             return Some(exp_bounds);
@@ -226,6 +256,7 @@ fn try_push_div_styled_quad<'a, const MAX_OPS: usize, const MAX_HITS: usize>(
     bounds: Region,
     eff_parent_clip: Region,
     eff_parent_clip_radius: u8,
+    subpx_q4: u8,
     raw_bg: Color,
     border_color: Color,
     border_width: u8,
@@ -286,6 +317,7 @@ fn try_push_div_styled_quad<'a, const MAX_OPS: usize, const MAX_HITS: usize>(
             bounds,
             clip: eff_parent_clip,
             clip_radius: eff_parent_clip_radius,
+            subpx_q4,
             payload: DrawPayload::StyledQuad(sq_ref),
         }) {
             ctx.dropped_ops = ctx.dropped_ops.saturating_add(1);
@@ -449,6 +481,7 @@ fn try_push_div_external_texture<'a, const MAX_OPS: usize, const MAX_HITS: usize
                 bounds,
                 clip: eff_parent_clip,
                 clip_radius: eff_parent_clip_radius,
+                subpx_q4: 0,
                 payload: DrawPayload::ExternalTexture(ext_ref),
             }) {
                 ctx.dropped_ops = ctx.dropped_ops.saturating_add(1);
@@ -621,6 +654,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
 
             let mut opacity = base_opacity;
             let mut child_offset = inh.offset;
+            let mut node_subpx_q4 = inh.subpx_q4;
             let mut flip_info: Option<(crate::paint::Transform2D, f32, f32)> = None;
             if div.id().is_some() || eff_transition.is_some() {
                 if emit_here {
@@ -634,6 +668,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                             bg,
                             border: border_color,
                             opacity: base_opacity,
+                            subpx_q4: 0,
                         },
                         eff_transition,
                     );
@@ -642,7 +677,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                         flip_info = compute_flip_transform(layout_bounds, st.bounds);
                         bounds = translate_region(layout_bounds, inh.offset);
                     } else {
-                        child_offset = (
+                        let base_off = (
                             inh.offset
                                 .0
                                 .saturating_add(st.bounds.x.saturating_sub(layout_bounds.x)),
@@ -650,7 +685,15 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                                 .1
                                 .saturating_add(st.bounds.y.saturating_sub(layout_bounds.y)),
                         );
-                        bounds = translate_region(st.bounds, inh.offset);
+                        let (eff_off, eff_subpx) = add_subpx_q4(base_off, inh.subpx_q4, st.subpx_q4);
+                        child_offset = eff_off;
+                        node_subpx_q4 = eff_subpx;
+                        let carry_x = eff_off.0.saturating_sub(base_off.0);
+                        let carry_y = eff_off.1.saturating_sub(base_off.1);
+                        bounds = translate_region(
+                            st.bounds,
+                            (inh.offset.0.saturating_add(carry_x), inh.offset.1.saturating_add(carry_y)),
+                        );
                     }
                     bg = st.bg;
                     if !show_focus_border {
@@ -668,6 +711,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                     opacity = op;
                 }
             }
+            let packed_subpx_q4 = crate::motion::pack_subpx_q4(node_subpx_q4.0, node_subpx_q4.1);
             if let Some(st) = div.layout_ext().and_then(|l| l.sticky_top) {
                 let min_y = eff_parent_clip.y.saturating_add(st);
                 let max_y = eff_parent_clip.bottom().saturating_sub(bounds.h);
@@ -761,6 +805,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                             bounds: sh_bounds,
                             clip: eff_parent_clip,
                             clip_radius: eff_parent_clip_radius,
+                            subpx_q4: packed_subpx_q4,
                             payload: DrawPayload::Quad {
                                 bg: sh_col,
                                 bg_grad: sh_col,
@@ -794,6 +839,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                     bounds,
                     eff_parent_clip,
                     eff_parent_clip_radius,
+                    packed_subpx_q4,
                     raw_bg,
                     border_color,
                     border_width,
@@ -812,6 +858,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                     bounds,
                     clip: eff_parent_clip,
                     clip_radius: eff_parent_clip_radius,
+                    subpx_q4: packed_subpx_q4,
                     payload: DrawPayload::Quad {
                         bg,
                         bg_grad,
@@ -935,6 +982,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                 parent_clip_radius: my_clip_radius,
                 opacity: inner_opacity,
                 offset: child_offset,
+                subpx_q4: node_subpx_q4,
                 text_size: child_text_size,
                 text_color: child_text_color,
                 in_overlay: now_in_overlay,
@@ -1038,6 +1086,7 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                     bounds: exp_bounds,
                     clip: eff_parent_clip,
                     clip_radius: eff_parent_clip_radius,
+                    subpx_q4: 0,
                     payload: DrawPayload::PopLayer,
                 }) {
                     ctx.dropped_ops = ctx.dropped_ops.saturating_add(1);
@@ -1069,11 +1118,13 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                 }
             }
             color = color.scale_alpha(inh.opacity);
+            let leaf_subpx = crate::motion::pack_subpx_q4(inh.subpx_q4.0, inh.subpx_q4.1);
             if !ctx.out_ops.push(DrawOp {
                 id: op_id,
                 bounds,
                 clip: inh.parent_clip,
                 clip_radius: inh.parent_clip_radius,
+                subpx_q4: leaf_subpx,
                 payload: DrawPayload::TextRun {
                     text: t.content,
                     color,
@@ -1129,11 +1180,13 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
                 },
                 other => other,
             };
+            let leaf_subpx = crate::motion::pack_subpx_q4(inh.subpx_q4.0, inh.subpx_q4.1);
             if !ctx.out_ops.push(DrawOp {
                 id: None,
                 bounds,
                 clip: inh.parent_clip,
                 clip_radius: inh.parent_clip_radius,
+                subpx_q4: leaf_subpx,
                 payload: DrawPayload::Sprite(source),
             }) {
                 ctx.dropped_ops = ctx.dropped_ops.saturating_add(1);
@@ -1148,12 +1201,14 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
             let bounds = translate_region(Region::new(node.x, node.y, node.w, node.h), inh.offset);
             let mut spec = **rt;
             spec.default_color = spec.default_color.scale_alpha(inh.opacity);
+            let leaf_subpx = crate::motion::pack_subpx_q4(inh.subpx_q4.0, inh.subpx_q4.1);
             if let Some(rt_ref) = ctx.arena.try_alloc(spec) {
                 if !ctx.out_ops.push(DrawOp {
                     id: None,
                     bounds,
                     clip: inh.parent_clip,
                     clip_radius: inh.parent_clip_radius,
+                    subpx_q4: leaf_subpx,
                     payload: DrawPayload::RichText(rt_ref),
                 }) {
                     ctx.dropped_ops = ctx.dropped_ops.saturating_add(1);
@@ -1169,12 +1224,14 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
             let bounds = translate_region(Region::new(node.x, node.y, node.w, node.h), inh.offset);
             let mut spec = **img;
             spec.opacity = ((spec.opacity as u16 * inh.opacity as u16) / 255) as u8;
+            let leaf_subpx = crate::motion::pack_subpx_q4(inh.subpx_q4.0, inh.subpx_q4.1);
             if let Some(img_ref) = ctx.arena.try_alloc(spec) {
                 if !ctx.out_ops.push(DrawOp {
                     id: None,
                     bounds,
                     clip: inh.parent_clip,
                     clip_radius: inh.parent_clip_radius,
+                    subpx_q4: leaf_subpx,
                     payload: DrawPayload::DecodedImage(img_ref),
                 }) {
                     ctx.dropped_ops = ctx.dropped_ops.saturating_add(1);
@@ -1190,12 +1247,14 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
             let bounds = translate_region(Region::new(node.x, node.y, node.w, node.h), inh.offset);
             let mut spec = **vec_spec;
             spec.opacity = ((spec.opacity as u16 * inh.opacity as u16) / 255) as u8;
+            let leaf_subpx = crate::motion::pack_subpx_q4(inh.subpx_q4.0, inh.subpx_q4.1);
             if let Some(v_ref) = ctx.arena.try_alloc(spec) {
                 if !ctx.out_ops.push(DrawOp {
                     id: None,
                     bounds,
                     clip: inh.parent_clip,
                     clip_radius: inh.parent_clip_radius,
+                    subpx_q4: leaf_subpx,
                     payload: DrawPayload::Vector(v_ref),
                 }) {
                     ctx.dropped_ops = ctx.dropped_ops.saturating_add(1);
@@ -1211,12 +1270,14 @@ pub(super) fn pass4_vertical_assign_and_flatten<'a, const MAX_OPS: usize, const 
             let bounds = translate_region(Region::new(node.x, node.y, node.w, node.h), inh.offset);
             let mut spec = **canvas_spec;
             spec.opacity = ((spec.opacity as u16 * inh.opacity as u16) / 255) as u8;
+            let leaf_subpx = crate::motion::pack_subpx_q4(inh.subpx_q4.0, inh.subpx_q4.1);
             if let Some(c_ref) = ctx.arena.try_alloc(spec) {
                 if !ctx.out_ops.push(DrawOp {
                     id: Some(spec.id),
                     bounds,
                     clip: inh.parent_clip,
                     clip_radius: inh.parent_clip_radius,
+                    subpx_q4: leaf_subpx,
                     payload: DrawPayload::SceneCanvas(c_ref),
                 }) {
                     ctx.dropped_ops = ctx.dropped_ops.saturating_add(1);

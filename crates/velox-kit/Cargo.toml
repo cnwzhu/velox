@@ -20,6 +20,7 @@ winit = ["std", "velox-engine/winit"]
 gpu = ["std", "velox-engine/gpu"]
 gpu-interop = ["gpu", "velox-engine/gpu-interop"]
 custom-shader = ["gpu", "velox-engine/custom-shader", "velox-canvas?/custom-shader"]
+swash = ["std", "velox-engine/swash"]
 
 # 组件层与 2D 空间画布基座（关闭 default-features 即仅使用 velox-engine）
 base = ["dep:velox-base"]
